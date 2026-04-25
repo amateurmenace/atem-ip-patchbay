@@ -44,7 +44,7 @@ DIST = BUILD / "dist"
 APP_NAME = "ATEM IP Patchbay"
 APP_VERSION = "0.1.0"
 
-PINNED_PYINSTALLER = "6.10.0"
+PINNED_PYINSTALLER = "6.20.0"  # First version supporting Python 3.14; 6.10.0 capped at <3.14
 
 # Jellyfin ships portable static FFmpeg builds for macOS that include
 # libsrt — required for our SRT push to ATEM. Evermeet's and OSXExperts'
@@ -105,12 +105,24 @@ def out(cmd: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _venv_python() -> Path:
+    """Return the path to the venv's Python interpreter for this platform.
+
+    Windows venvs put it at ``.venv\\Scripts\\python.exe``; everything
+    else uses ``.venv/bin/python``. Hardcoding the Unix layout broke
+    the first Windows build attempt — see the v0.1.0 alpha bug report.
+    """
+    if sys.platform.startswith("win"):
+        return VENV / "Scripts" / "python.exe"
+    return VENV / "bin" / "python"
+
+
 def ensure_venv() -> Path:
     """Create build/.venv if missing and install PyInstaller into it.
 
     Returns the path to the venv's python interpreter.
     """
-    venv_python = VENV / "bin" / "python"
+    venv_python = _venv_python()
     if not venv_python.exists():
         log(f"Creating build venv at {VENV.relative_to(ROOT)}")
         run([sys.executable, "-m", "venv", str(VENV)])
@@ -405,6 +417,17 @@ def make_inno_installer(exe_path: Path) -> Path:
 
 
 def main() -> int:
+    # Windows console defaults to cp1252 on a fresh Python 3.x install,
+    # which can't encode the ▶ / ! glyphs we use in log()/warn(). Force
+    # the streams to utf-8 so the build script doesn't crash on its own
+    # banner. No-op on Mac/Linux (already utf-8) and harmless if stdout
+    # has been redirected to a non-tty.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--clean", action="store_true",
@@ -424,7 +447,12 @@ def main() -> int:
         for d in (VENV, CACHE, WORK, DIST):
             if d.exists():
                 log(f"Removing {d.relative_to(ROOT)}")
-                shutil.rmtree(d)
+                # ignore_errors swallows the macOS rmtree-on-busy-fd race
+                # ([Errno 66] Directory not empty: 'site-packages'). If
+                # the directory only partially gets removed, the next
+                # step's create-or-replace operations will surface any
+                # genuine permission problem.
+                shutil.rmtree(d, ignore_errors=True)
 
     venv_python = ensure_venv()
 
