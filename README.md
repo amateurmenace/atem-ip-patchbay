@@ -239,6 +239,14 @@ executables that interact only via process boundaries (an "aggregate"
 under GPL terms), so the MIT license applies to everything in this
 repo.
 
+## Downloading
+
+Pre-built binaries land on the
+[Releases page](https://github.com/amateurmenace/atem-ip-patchbay/releases)
+whenever a `v*` tag is pushed — Mac (arm64 `.dmg`) + Windows (x64
+`Setup.exe`). Each release has auto-generated notes summarising the
+commits since the previous tag.
+
 ## Building from source
 
 To build a `.app` + `.dmg` locally on macOS:

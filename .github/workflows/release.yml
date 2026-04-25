@@ -1,0 +1,171 @@
+# Build Mac + Windows binaries and attach them to a GitHub Release.
+# Triggered by pushing a tag matching v* (e.g. `git tag v0.1.0-alpha.1`
+# then `git push --tags`).
+#
+# Mac builds are arm64-only for now — adding x86_64 means a second
+# matrix entry on macos-13 plus a `lipo`-merge step. Skipping until
+# someone asks for it.
+#
+# Code-signing is *opt-in* via repository secrets:
+#   MACOS_SIGN_IDENTITY      — full identity name
+#                              ("Developer ID Application: NAME (TEAMID)")
+#   MACOS_CERTIFICATE_P12    — base64-encoded .p12 export of the cert
+#   MACOS_CERTIFICATE_PWD    — password set when exporting the .p12
+#   MACOS_KEYCHAIN_PWD       — fresh password for the throwaway runner keychain
+# When those aren't set, the .dmg ships unsigned and end users get a
+# Gatekeeper "unidentified developer" prompt on first launch (recoverable
+# via right-click → Open). Windows always ships unsigned for now (the
+# alpha doesn't have an EV cert).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed by gh release create
+
+jobs:
+
+  # ---------------------------------------------------------------
+  # macOS arm64 — produces ATEM-IP-Patchbay-<version>-arm64.dmg
+  # ---------------------------------------------------------------
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Cache FFmpeg sidecar
+        uses: actions/cache@v4
+        with:
+          path: build/.cache
+          key: ffmpeg-macos-jellyfin-v1
+
+      - name: Import signing identity (if secrets are set)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KC_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "MACOS_CERTIFICATE_P12 not set — building unsigned. Users will see Gatekeeper on first launch."
+            exit 0
+          fi
+          # Decode the base64 cert into a temp file.
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          # Create a throwaway keychain — never touches the runner's default.
+          security create-keychain -p "$KC_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PWD" build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" build.keychain
+          # Make our keychain the default + first in the search list so
+          # `security find-identity` picks up the imported cert.
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm /tmp/cert.p12
+
+      - name: Build .dmg
+        env:
+          # When MACOS_SIGN_IDENTITY is unset, build.py auto-detects;
+          # if the keychain has nothing, signing is skipped automatically.
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: python3 build/build.py
+
+      - name: Sanity-check the .dmg
+        run: |
+          ls -lh build/dist/
+          # The bundled FFmpeg must report libsrt — without it the
+          # produced .dmg can't push to ATEM. Catch a broken upstream
+          # download here instead of at first user-launch.
+          file "build/dist/ATEM IP Patchbay.app/Contents/Frameworks/ffmpeg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: build/dist/*.dmg
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Windows x64 — produces ATEM-IP-Patchbay-Setup-<version>-x64.exe
+  # plus the bare ATEM IP Patchbay.exe for users who prefer no installer
+  # ---------------------------------------------------------------
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Cache FFmpeg sidecar
+        uses: actions/cache@v4
+        with:
+          path: build/.cache
+          key: ffmpeg-windows-btbn-n8.1-v1
+
+      - name: Build .exe + installer
+        run: python build\build.py
+
+      - name: Sanity-check the artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem build\dist | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            build/dist/ATEM-IP-Patchbay-Setup-*.exe
+            build/dist/ATEM IP Patchbay.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Pull both artifacts together and create the GitHub Release.
+  # ---------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # Need history for --generate-notes to compare against the
+        # previous tag.
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Quote the .exe with a space carefully. gh release create
+          # accepts multiple file args; each one becomes a release asset.
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/macos-arm64/*.dmg \
+            "artifacts/windows-x64/ATEM-IP-Patchbay-Setup-"*.exe \
+            "artifacts/windows-x64/ATEM IP Patchbay.exe"
