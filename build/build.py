@@ -60,6 +60,16 @@ JELLYFIN_FFMPEG_ARM64 = (
     f"jellyfin-ffmpeg_{JELLYFIN_FFMPEG_VERSION}_portable_macarm64-gpl.tar.xz"
 )
 
+# BtbN ships static FFmpeg builds for Windows including libsrt. We pull
+# the n8.1 (FFmpeg 8.1) GPL static build — single ffmpeg.exe, no DLLs
+# to wrangle. Roughly 220 MB zipped, ~270 MB extracted; PyInstaller's
+# --onefile mode then re-compresses on top of that for the installer.
+BTBN_FFMPEG_VERSION = "n8.1"
+BTBN_FFMPEG_WIN64 = (
+    f"https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    f"ffmpeg-{BTBN_FFMPEG_VERSION}-latest-win64-gpl-8.1.zip"
+)
+
 # Code-signing identity. Populated from the SIGN_IDENTITY env var or
 # auto-detected via `security find-identity` when --skip-sign is not
 # passed. Override examples:
@@ -190,12 +200,73 @@ def ensure_ffmpeg_macos() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Step 2b — FFmpeg sidecar (Windows path)
+# ---------------------------------------------------------------------------
+
+
+def ensure_ffmpeg_windows() -> Path:
+    """Download BtbN's static Windows FFmpeg into build/.cache.
+
+    Returns the path to ffmpeg.exe. Verifies libsrt is present before
+    accepting the download — same belt-and-braces check we do on Mac.
+    """
+    CACHE.mkdir(parents=True, exist_ok=True)
+    binary = CACHE / "ffmpeg.exe"
+    version_file = CACHE / "ffmpeg.version"
+
+    if binary.exists() and version_file.exists() and version_file.read_text().strip() == BTBN_FFMPEG_VERSION:
+        log(f"FFmpeg sidecar already present (version: {BTBN_FFMPEG_VERSION})")
+        return binary
+
+    log(f"Downloading BtbN FFmpeg {BTBN_FFMPEG_VERSION} (win64-gpl) for libsrt support")
+    tmp_zip = Path(tempfile.mkdtemp()) / "ffmpeg.zip"
+    run([
+        "curl", "-fsSL", "--retry", "3", "--retry-delay", "2",
+        "-o", str(tmp_zip),
+        BTBN_FFMPEG_WIN64,
+    ])
+    if tmp_zip.stat().st_size < 50_000_000:
+        raise SystemExit(f"Downloaded ffmpeg zip is suspiciously small ({tmp_zip.stat().st_size} bytes)")
+
+    log("Extracting ffmpeg.exe from zip")
+    import zipfile
+    with zipfile.ZipFile(tmp_zip) as z:
+        # BtbN zips look like: ffmpeg-n8.1-latest-win64-gpl-8.1/bin/ffmpeg.exe
+        members = [m for m in z.namelist() if m.endswith("bin/ffmpeg.exe")]
+        if not members:
+            raise SystemExit("No bin/ffmpeg.exe inside the BtbN zip")
+        with z.open(members[0]) as src, binary.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+    tmp_zip.unlink()
+
+    # Sanity check — running ffmpeg.exe -protocols on Windows confirms libsrt
+    # works. On non-Windows platforms (e.g. running this code under WSL or
+    # a CI setup matrix) we just trust the BtbN build flags.
+    if sys.platform.startswith("win"):
+        proto_check = subprocess.run(
+            [str(binary), "-protocols"], capture_output=True, text=True
+        )
+        if not any(line.strip() == "srt" for line in proto_check.stdout.splitlines()):
+            raise SystemExit(
+                "Downloaded ffmpeg.exe lacks libsrt support. The BtbN URL or "
+                "build flags may have changed; check the release notes at "
+                "https://github.com/BtbN/FFmpeg-Builds/releases"
+            )
+
+    version_file.write_text(BTBN_FFMPEG_VERSION)
+    log(f"FFmpeg ready at {binary.relative_to(ROOT)}")
+    print(f"    {binary.stat().st_size // (1024 * 1024)} MB")
+    return binary
+
+
+# ---------------------------------------------------------------------------
 # Step 3 — PyInstaller
 # ---------------------------------------------------------------------------
 
 
-def run_pyinstaller(venv_python: Path, spec_path: Path) -> Path:
-    """Run pyinstaller against the spec; return the path to the .app."""
+def run_pyinstaller(venv_python: Path, spec_path: Path, expected_output: Path) -> Path:
+    """Run pyinstaller against the spec; return the path to the produced
+    bundle (a .app on macOS or .exe on Windows)."""
     log(f"Running PyInstaller against {spec_path.relative_to(ROOT)}")
     run([
         str(venv_python), "-m", "PyInstaller",
@@ -204,10 +275,9 @@ def run_pyinstaller(venv_python: Path, spec_path: Path) -> Path:
         "--workpath", str(WORK),
         "--distpath", str(DIST),
     ])
-    app_path = DIST / f"{APP_NAME}.app"
-    if not app_path.exists():
-        raise SystemExit(f"PyInstaller did not produce {app_path}")
-    return app_path
+    if not expected_output.exists():
+        raise SystemExit(f"PyInstaller did not produce {expected_output}")
+    return expected_output
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +359,47 @@ def make_dmg(app_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Step 5 (Windows) — Inno Setup installer
+# ---------------------------------------------------------------------------
+
+
+def make_inno_installer(exe_path: Path) -> Path:
+    """Compile build/installer.iss into ATEM-IP-Patchbay-Setup-x64.exe.
+
+    Inno Setup ships its compiler as ``ISCC.exe``; on a default install
+    it lives at ``C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe``.
+    Honors the ``ISCC`` env var if you've put it somewhere else.
+    """
+    iscc = os.environ.get("ISCC") or shutil.which("ISCC") or shutil.which("iscc")
+    if not iscc:
+        # Fall back to the default install location.
+        default = Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe")
+        if default.exists():
+            iscc = str(default)
+    if not iscc:
+        warn(
+            "ISCC.exe (Inno Setup compiler) not found. Skipping installer.\n"
+            "    Install Inno Setup 6 from https://jrsoftware.org/isdl.php "
+            "or set the ISCC env var to its path."
+        )
+        return exe_path
+
+    iss_script = BUILD / "installer.iss"
+    log(f"Compiling Inno Setup installer via {iscc}")
+    run([
+        str(iscc),
+        f"/DAppVersion={APP_VERSION}",
+        f"/DAppExePath={exe_path}",
+        f"/DOutputDir={DIST}",
+        str(iss_script),
+    ])
+    installer = DIST / f"ATEM-IP-Patchbay-Setup-{APP_VERSION}-x64.exe"
+    if not installer.exists():
+        raise SystemExit(f"Inno Setup did not produce {installer}")
+    return installer
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -301,11 +412,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--skip-sign", action="store_true",
-        help="Don't code-sign the .app (useful for fast iteration)",
+        help="Don't code-sign the macOS .app (no-op on Windows for now)",
     )
     parser.add_argument(
         "--no-dmg", action="store_true",
-        help="Stop after producing the .app — don't wrap in a .dmg",
+        help="Skip the final packaging step — stop at the .app or .exe",
     )
     args = parser.parse_args()
 
@@ -315,28 +426,41 @@ def main() -> int:
                 log(f"Removing {d.relative_to(ROOT)}")
                 shutil.rmtree(d)
 
-    if sys.platform != "darwin":
-        raise SystemExit(
-            f"This builder only handles macOS for now (you're on {platform.system()}). "
-            "Windows support comes in the GH Actions phase."
-        )
-
     venv_python = ensure_venv()
-    ensure_ffmpeg_macos()
-    spec = BUILD / "macos.spec"
-    app_path = run_pyinstaller(venv_python, spec)
 
-    if not args.skip_sign:
-        identity = find_signing_identity()
-        if not identity:
-            warn(
-                "No Developer ID Application identity found and SIGN_IDENTITY not set. "
-                "Build will be unsigned — first launch will trigger Gatekeeper."
-            )
-        else:
-            sign_app(app_path, identity)
+    if sys.platform == "darwin":
+        ensure_ffmpeg_macos()
+        spec = BUILD / "macos.spec"
+        expected = DIST / f"{APP_NAME}.app"
+        app_path = run_pyinstaller(venv_python, spec, expected)
 
-    final = app_path if args.no_dmg else make_dmg(app_path)
+        if not args.skip_sign:
+            identity = find_signing_identity()
+            if not identity:
+                warn(
+                    "No Developer ID Application identity found and SIGN_IDENTITY not set. "
+                    "Build will be unsigned — first launch will trigger Gatekeeper."
+                )
+            else:
+                sign_app(app_path, identity)
+
+        final = app_path if args.no_dmg else make_dmg(app_path)
+
+    elif sys.platform.startswith("win"):
+        ensure_ffmpeg_windows()
+        spec = BUILD / "windows.spec"
+        expected = DIST / f"{APP_NAME}.exe"
+        exe_path = run_pyinstaller(venv_python, spec, expected)
+        # No code-signing for Windows in the alpha — that needs an EV cert
+        # which the user hasn't budgeted for yet. The Inno installer step
+        # is the Windows equivalent of the macOS .dmg packaging step.
+        final = exe_path if args.no_dmg else make_inno_installer(exe_path)
+
+    else:
+        raise SystemExit(
+            f"This builder handles macOS and Windows; you're on {platform.system()}. "
+            "Linux support depends on adding v4l2/X11grab source factories first."
+        )
 
     log(f"Done.\n  → {final.relative_to(ROOT)}")
     return 0
