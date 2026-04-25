@@ -57,8 +57,8 @@ your destination decoder breaks, the first place to look is the
 
 ```sh
 brew install ffmpeg python@3.11
-git clone <this-repo-url>
-cd ATEM\ IP\ Patchbay
+git clone https://github.com/amateurmenace/atem-ip-patchbay.git
+cd atem-ip-patchbay
 cp config/example.xml "config/My ATEM.xml"   # then edit the host + key
 python3 run.py
 ```
@@ -71,8 +71,8 @@ listens on TCP 9977.
 ```powershell
 # Install ffmpeg (e.g. from https://www.gyan.dev/ffmpeg/builds/)
 # Install Python 3.11+ from python.org
-git clone <this-repo-url>
-cd "ATEM IP Patchbay"
+git clone https://github.com/amateurmenace/atem-ip-patchbay.git
+cd atem-ip-patchbay
 copy config\example.xml "config\My ATEM.xml"   # edit the host + key
 python run.py
 ```
