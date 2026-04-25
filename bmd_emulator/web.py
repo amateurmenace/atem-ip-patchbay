@@ -59,6 +59,9 @@ def make_app(state: EncoderState, streamer: Streamer):
                     return self._json(200, {"devices": to_json(found)})
                 except Exception as exc:  # noqa: BLE001
                     return self._json(500, {"error": str(exc)})
+            if path == "/api/lan-ip":
+                from .netinfo import get_lan_ip
+                return self._json(200, {"ip": get_lan_ip()})
             if path == "/api/ndi-senders":
                 from .discover import discover_ndi
                 qs = parse_qs(url.query)
@@ -206,6 +209,37 @@ def make_app(state: EncoderState, streamer: Streamer):
                         pass
                 if "pipe_path" in payload:
                     state.pipe_path = str(payload["pipe_path"])
+                if "relay" in payload and isinstance(payload["relay"], dict):
+                    r = payload["relay"]
+                    if "bind_host" in r:
+                        state.relay_bind_host = str(r["bind_host"]).strip() or "0.0.0.0"
+                    if "srt_port" in r:
+                        try:
+                            p = int(r["srt_port"])
+                            if 1 <= p <= 65535:
+                                state.relay_srt_port = p
+                        except (TypeError, ValueError):
+                            pass
+                    if "srt_latency_us" in r:
+                        try:
+                            us = int(r["srt_latency_us"])
+                            if 20_000 <= us <= 8_000_000:
+                                state.relay_srt_latency_us = us
+                        except (TypeError, ValueError):
+                            pass
+                    if "srt_passphrase" in r:
+                        state.relay_srt_passphrase = str(r["srt_passphrase"])
+                    if "rtmp_port" in r:
+                        try:
+                            p = int(r["rtmp_port"])
+                            if 1 <= p <= 65535:
+                                state.relay_rtmp_port = p
+                        except (TypeError, ValueError):
+                            pass
+                    if "rtmp_app" in r:
+                        state.relay_rtmp_app = str(r["rtmp_app"]).strip() or "live"
+                    if "rtmp_key" in r:
+                        state.relay_rtmp_key = str(r["rtmp_key"]).strip() or "stream"
                 if "overlay" in payload and isinstance(payload["overlay"], dict):
                     o = payload["overlay"]
                     if "title" in o:

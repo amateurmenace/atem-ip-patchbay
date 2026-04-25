@@ -60,6 +60,19 @@ const els = {
   rescanDevices:  $('#rescan-devices'),
   ndiRescan:      $('#ndi-rescan'),
 
+  // Relay (incoming SRT/RTMP server)
+  relayPanels:        $$('.relay-only'),
+  relaySrtUrl:        $('#relay-srt-url'),
+  relaySrtCopy:       $('#relay-srt-copy'),
+  relaySrtPort:       $('#relay-srt-port'),
+  relaySrtLatency:    $('#relay-srt-latency'),
+  relaySrtPassphrase: $('#relay-srt-passphrase'),
+  relayRtmpUrl:       $('#relay-rtmp-url'),
+  relayRtmpCopy:      $('#relay-rtmp-copy'),
+  relayRtmpPort:      $('#relay-rtmp-port'),
+  relayRtmpApp:       $('#relay-rtmp-app'),
+  relayRtmpKey:       $('#relay-rtmp-key'),
+
   // Destination
   service:    $('#service'),
   server:     $('#server'),
@@ -115,6 +128,7 @@ let browserDevices = [];                 // navigator.mediaDevices results
 let activeStream   = null;               // current MediaStream in preview
 let previewKey     = '';                 // de-dupe preview switches
 let perms          = { granted: false, prompted: false };
+let lanIp          = '';                 // populated from /api/lan-ip on init
 
 // -----------------------------------------------------------------
 // SVG icons
@@ -128,6 +142,7 @@ const ICONS = {
   iphone:       `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>`,
   virtual:      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12c0-4 3.5-7 8-7s8 3 8 7-3.5 7-8 7-8-3-8-7z"/><path d="M9 12h.01M15 12h.01M9.5 15c.8.6 1.7 1 2.5 1s1.7-.4 2.5-1"/></svg>`,
   pipe:         `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 14l-3 3a3 3 0 1 1-4-4l3-3M14 10l3-3a3 3 0 1 1 4 4l-3 3M8 16l8-8"/></svg>`,
+  relay:        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h6l2-3 2 6 2-3h6"/><circle cx="3" cy="12" r="1.4" fill="currentColor"/><circle cx="21" cy="12" r="1.4" fill="currentColor"/></svg>`,
 };
 
 const CATEGORY_LABEL = {
@@ -139,6 +154,7 @@ const CATEGORY_LABEL = {
   iphone:       'iPhone',
   virtual:      'Virtual',
   pipe:         'URL / Pipe',
+  relay:        'Receive',
 };
 
 // -----------------------------------------------------------------
@@ -356,10 +372,27 @@ async function setPreviewFor(tile) {
   if (tile.sourceId === 'test_pattern') return showTestPatternPreview();
   if (tile.sourceId === 'pipe')         return showPipePreview(tile.name);
   if (tile.sourceId === 'ndi-sender')   return showNdiHint(tile.name);
+  if (tile.sourceId === 'srt_listen' || tile.sourceId === 'rtmp_listen') {
+    return showRelayWaiting(tile.sourceId);
+  }
   if (tile.sourceId === 'avfoundation') {
     if (tile.category === 'screen') return startScreenPreview();
     return startCameraPreview(tile.name);
   }
+}
+
+function showRelayWaiting(sid) {
+  const proto = sid === 'srt_listen' ? 'SRT' : 'RTMP';
+  showPreviewMessage(`
+    <div>
+      <strong>${proto} listener — waiting for a publisher</strong>
+      Click <strong>Start Stream</strong> below to bind the listener. Then
+      point your encoder (OBS, Larix, FFmpeg, an iPhone) at the publish URL
+      shown in the Source panel. Live preview of incoming streams isn't
+      available in the browser — once a publisher connects, watch the
+      <em>Monitor</em> bitrate and FPS to confirm the stream is flowing.
+    </div>`);
+  previewKey = `relay:${sid}`;
 }
 
 // -----------------------------------------------------------------
@@ -415,6 +448,20 @@ function buildSourceTiles(snap) {
     sourceId: 'pipe', avIndex: null,
     name: snap.pipe_path ? snap.pipe_path.split('/').pop() : 'URL / Pipe',
     category: 'pipe', section: 'URL / Pipe',
+  });
+
+  // Relay listeners — turn this app into a server that an external
+  // encoder publishes into.
+  const r = snap.relay || {};
+  tiles.push({
+    sourceId: 'srt_listen', avIndex: null,
+    name: `SRT in :${r.srt_port || 9710}`,
+    category: 'relay', section: 'Receive a stream',
+  });
+  tiles.push({
+    sourceId: 'rtmp_listen', avIndex: null,
+    name: `RTMP in :${r.rtmp_port || 1935}`,
+    category: 'relay', section: 'Receive a stream',
   });
 
   // Render with section headers.
@@ -574,6 +621,8 @@ function render(snap) {
   if (document.activeElement !== els.pipePath) els.pipePath.value = snap.pipe_path || '';
   els.pipeOnly.forEach((e) => (e.hidden = snap.source_id !== 'pipe'));
 
+  renderRelayPanels(snap);
+
   const ov = snap.overlay || {};
   if (document.activeElement !== els.ovTitle) els.ovTitle.value = ov.title || '';
   if (document.activeElement !== els.ovSubtitle) els.ovSubtitle.value = ov.subtitle || '';
@@ -621,7 +670,57 @@ function sourceLabel(snap) {
     return dev ? dev.name : `AV[${v}]`;
   }
   if (snap.source_id === 'pipe') return snap.pipe_path || 'URL / Pipe';
+  if (snap.source_id === 'srt_listen') return `SRT in :${snap.relay?.srt_port ?? 9710}`;
+  if (snap.source_id === 'rtmp_listen') return `RTMP in :${snap.relay?.rtmp_port ?? 1935}`;
   return snap.source_id;
+}
+
+// -----------------------------------------------------------------
+// Relay panel rendering — show/hide + populate URLs and config
+// -----------------------------------------------------------------
+function renderRelayPanels(snap) {
+  const sid = snap.source_id;
+  const r = snap.relay || {};
+
+  els.relayPanels.forEach((el) => {
+    el.hidden = el.dataset.relay !== sid;
+  });
+
+  // Host shown in the publish URL: prefer the LAN IP we fetched at
+  // boot; fall back to the page hostname (which is usually 127.0.0.1
+  // or localhost). Either way the bind address remains 0.0.0.0
+  // server-side, so any interface accepts connections.
+  const host = lanIp || window.location.hostname || '127.0.0.1';
+
+  if (document.activeElement !== els.relaySrtPort)
+    els.relaySrtPort.value = r.srt_port ?? 9710;
+  if (document.activeElement !== els.relaySrtLatency)
+    els.relaySrtLatency.value = Math.round((r.srt_latency_us ?? 200_000) / 1000);
+  if (document.activeElement !== els.relaySrtPassphrase)
+    els.relaySrtPassphrase.value = r.srt_passphrase || '';
+  els.relaySrtUrl.value = `srt://${host}:${r.srt_port ?? 9710}`;
+
+  if (document.activeElement !== els.relayRtmpPort)
+    els.relayRtmpPort.value = r.rtmp_port ?? 1935;
+  if (document.activeElement !== els.relayRtmpApp)
+    els.relayRtmpApp.value = r.rtmp_app || 'live';
+  if (document.activeElement !== els.relayRtmpKey)
+    els.relayRtmpKey.value = r.rtmp_key || 'stream';
+  els.relayRtmpUrl.value = `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}`;
+}
+
+async function copyToClipboard(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  } catch (_e) {
+    // navigator.clipboard fails over plain http on some browsers — fall
+    // back to a manual select so the user can ⌘C.
+    const input = btn.previousElementSibling?.querySelector('input');
+    if (input) { input.select(); }
+  }
 }
 
 // -----------------------------------------------------------------
@@ -838,6 +937,26 @@ function bind() {
   els.videoMode.addEventListener('change', () => applySettings({ video_mode: els.videoMode.value }));
   els.quality.addEventListener('change', () => applySettings({ quality_level: els.quality.value }));
 
+  // Relay panels — config inputs + copy buttons
+  const relayPatch = (patch) => applySettings({ relay: patch });
+  els.relaySrtPort.addEventListener('change', () => {
+    const p = parseInt(els.relaySrtPort.value, 10);
+    if (!isNaN(p)) relayPatch({ srt_port: p });
+  });
+  els.relaySrtLatency.addEventListener('change', () => {
+    const ms = parseInt(els.relaySrtLatency.value, 10);
+    if (!isNaN(ms)) relayPatch({ srt_latency_us: ms * 1000 });
+  });
+  els.relaySrtPassphrase.addEventListener('change', () => relayPatch({ srt_passphrase: els.relaySrtPassphrase.value }));
+  els.relaySrtCopy.addEventListener('click', () => copyToClipboard(els.relaySrtUrl.value, els.relaySrtCopy));
+  els.relayRtmpPort.addEventListener('change', () => {
+    const p = parseInt(els.relayRtmpPort.value, 10);
+    if (!isNaN(p)) relayPatch({ rtmp_port: p });
+  });
+  els.relayRtmpApp.addEventListener('change', () => relayPatch({ rtmp_app: els.relayRtmpApp.value }));
+  els.relayRtmpKey.addEventListener('change', () => relayPatch({ rtmp_key: els.relayRtmpKey.value }));
+  els.relayRtmpCopy.addEventListener('click', () => copyToClipboard(els.relayRtmpUrl.value, els.relayRtmpCopy));
+
   // Encoder
   els.videoCodec.addEventListener('change', () => applySettings({ video_codec: els.videoCodec.value }));
 
@@ -888,6 +1007,10 @@ function bind() {
 bind();
 ensureDevicesLoaded();
 ensureNdiLoaded();
+fetchJSON('/api/lan-ip').then((j) => {
+  lanIp = j.ip || '';
+  if (lastSnapshot) renderRelayPanels(lastSnapshot);
+}).catch(() => {});
 poll();
 setInterval(poll, 1000);
 // Refresh NDI senders every 30s — they come and go.

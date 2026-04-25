@@ -84,6 +84,17 @@ class EncoderState:
     # Path/URL for source_id="pipe".
     pipe_path: str = ""
 
+    # Relay-listener configuration (source_id="srt_listen" / "rtmp_listen").
+    # The app binds a local SRT/RTMP server; an external encoder publishes
+    # into it; we re-encode to BMD-flavored SRT and forward to the ATEM.
+    relay_bind_host: str = "0.0.0.0"
+    relay_srt_port: int = 9710
+    relay_srt_latency_us: int = 200_000
+    relay_srt_passphrase: str = ""
+    relay_rtmp_port: int = 1935
+    relay_rtmp_app: str = "live"
+    relay_rtmp_key: str = "stream"
+
     # Overlay configuration (applied via filter_complex when streaming).
     overlay_title: str = ""
     overlay_subtitle: str = ""
@@ -283,6 +294,15 @@ class EncoderState:
                 "av_video_index": self.av_video_index,
                 "av_audio_index": self.av_audio_index,
                 "pipe_path": self.pipe_path,
+                "relay": {
+                    "bind_host": self.relay_bind_host,
+                    "srt_port": self.relay_srt_port,
+                    "srt_latency_us": self.relay_srt_latency_us,
+                    "srt_passphrase": self.relay_srt_passphrase,
+                    "rtmp_port": self.relay_rtmp_port,
+                    "rtmp_app": self.relay_rtmp_app,
+                    "rtmp_key": self.relay_rtmp_key,
+                },
                 "overlay": {
                     "title": self.overlay_title,
                     "subtitle": self.overlay_subtitle,

@@ -257,6 +257,72 @@ def pipe(path: str) -> Source:
     )
 
 
+def srt_listen(
+    bind_host: str = "0.0.0.0",
+    bind_port: int = 9710,
+    latency_us: int = 200_000,
+    passphrase: str = "",
+) -> Source:
+    """Bind an SRT listener and ingest the first publisher that connects.
+
+    The publisher (OBS, Larix Broadcaster, an iPhone, another FFmpeg)
+    points its caller-mode SRT URL at ``srt://<this-machine>:<port>``
+    and pushes an MPEG-TS stream. We re-encode it through the normal
+    BMD pipeline before forwarding to the ATEM destination.
+    """
+    url = f"srt://{bind_host}:{bind_port}?mode=listener&latency={latency_us}"
+    if passphrase:
+        url += f"&passphrase={passphrase}"
+    return Source(
+        id="srt_listen",
+        label=f"SRT in :{bind_port}",
+        description=f"SRT listener on {bind_host}:{bind_port}",
+        ffmpeg_input_args=[
+            "-f", "mpegts",
+            "-i", url,
+        ],
+        combined_av=True,
+        notes=(
+            f"Point your encoder at srt://<this-machine-ip>:{bind_port} "
+            "in caller mode. MPEG-TS is auto-detected; H.264 / H.265 / "
+            "AAC payloads all work — they get re-encoded into BMD's "
+            "preferred profile on the way out."
+        ),
+    )
+
+
+def rtmp_listen(
+    bind_host: str = "0.0.0.0",
+    bind_port: int = 1935,
+    app_path: str = "live",
+    stream_name: str = "stream",
+) -> Source:
+    """Bind an RTMP server and accept the first publisher.
+
+    FFmpeg's RTMP listener (``-listen 1``) accepts any incoming
+    publish on the given port. The app/stream path components in the
+    URL are placeholders — most clients (OBS et al.) just need a URL
+    they can push to and any matching key.
+    """
+    url = f"rtmp://{bind_host}:{bind_port}/{app_path}/{stream_name}"
+    return Source(
+        id="rtmp_listen",
+        label=f"RTMP in :{bind_port}",
+        description=f"RTMP listener on {bind_host}:{bind_port}/{app_path}",
+        ffmpeg_input_args=[
+            "-listen", "1",
+            "-f", "flv",
+            "-i", url,
+        ],
+        combined_av=True,
+        notes=(
+            f"In OBS: Settings → Stream → Custom, Server "
+            f"rtmp://<this-machine-ip>:{bind_port}/{app_path}, Key {stream_name}. "
+            "FLV/H.264/AAC. Re-encoded into BMD's preferred profile downstream."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Resolver — turn an EncoderState into a concrete Source
 # ---------------------------------------------------------------------------
@@ -278,6 +344,22 @@ def resolve_source(state) -> Source:
 
     if sid == "avfoundation":
         return _resolve_capture_device(state, width, height, fps)
+
+    if sid == "srt_listen":
+        return srt_listen(
+            bind_host=state.relay_bind_host,
+            bind_port=state.relay_srt_port,
+            latency_us=state.relay_srt_latency_us,
+            passphrase=state.relay_srt_passphrase,
+        )
+
+    if sid == "rtmp_listen":
+        return rtmp_listen(
+            bind_host=state.relay_bind_host,
+            bind_port=state.relay_rtmp_port,
+            app_path=state.relay_rtmp_app,
+            stream_name=state.relay_rtmp_key,
+        )
 
     raise ValueError(f"Unknown source id: {sid!r}")
 

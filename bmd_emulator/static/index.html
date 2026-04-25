@@ -218,6 +218,65 @@
             <code>http://server/playlist.m3u8</code>, a named pipe fed by GStreamer, etc.
           </p>
         </div>
+
+        <div class="relay-only" data-relay="srt_listen" hidden>
+          <div class="relay-url-row">
+            <label>Publish to this URL
+              <input id="relay-srt-url" type="text" readonly />
+            </label>
+            <button class="btn-secondary" id="relay-srt-copy" type="button">Copy</button>
+          </div>
+          <div class="relay-config-row">
+            <label class="inline">
+              <span class="lbl">Port</span>
+              <input id="relay-srt-port" type="number" min="1" max="65535" />
+            </label>
+            <label class="inline">
+              <span class="lbl">Latency (ms)</span>
+              <input id="relay-srt-latency" type="number" min="20" max="8000" />
+            </label>
+            <label class="inline">
+              <span class="lbl">Passphrase</span>
+              <input id="relay-srt-passphrase" type="password" placeholder="(optional)" />
+            </label>
+          </div>
+          <p class="hint">
+            Point any SRT-publishing app (OBS, Larix, FFmpeg, an iPhone) at the
+            URL above in <strong>caller mode</strong>. We re-encode incoming
+            MPEG-TS into BMD's preferred profile and forward to the destination
+            you've configured below. Click <strong>Start Stream</strong> to start
+            listening.
+          </p>
+        </div>
+
+        <div class="relay-only" data-relay="rtmp_listen" hidden>
+          <div class="relay-url-row">
+            <label>Publish server URL
+              <input id="relay-rtmp-url" type="text" readonly />
+            </label>
+            <button class="btn-secondary" id="relay-rtmp-copy" type="button">Copy</button>
+          </div>
+          <div class="relay-config-row">
+            <label class="inline">
+              <span class="lbl">Port</span>
+              <input id="relay-rtmp-port" type="number" min="1" max="65535" />
+            </label>
+            <label class="inline">
+              <span class="lbl">App</span>
+              <input id="relay-rtmp-app" type="text" />
+            </label>
+            <label class="inline">
+              <span class="lbl">Stream key</span>
+              <input id="relay-rtmp-key" type="text" />
+            </label>
+          </div>
+          <p class="hint">
+            In OBS: <strong>Settings → Stream → Service: Custom</strong>, paste
+            the URL above as the <em>Server</em>, the stream key as the
+            <em>Stream Key</em>. Click <strong>Start Stream</strong> here first
+            so the listener is bound before OBS connects.
+          </p>
+        </div>
       </section>
 
       <!-- ---------- DESTINATION ------------------------------ -->

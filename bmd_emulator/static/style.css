@@ -612,6 +612,43 @@ button.big { padding: 14px 18px; font-size: 14px; }
 
 .pipe-only { margin-top: 12px; padding: 12px; border-top: 1px dashed var(--line); }
 
+.relay-only {
+  margin-top: 12px;
+  padding: 14px;
+  border-top: 1px dashed var(--line);
+  background: var(--panel-2);
+  border-radius: 0 0 8px 8px;
+}
+.relay-url-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.relay-url-row input[readonly] {
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--accent);
+  cursor: text;
+}
+.relay-config-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.relay-config-row .inline { display: block; }
+.relay-config-row .lbl {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+}
+.relay-config-row input { width: 100%; }
+
 /* ============= TABS ====================================== */
 .tabs {
   display: flex;
