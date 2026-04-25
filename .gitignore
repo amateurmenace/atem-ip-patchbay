@@ -21,8 +21,13 @@ venv/
 .vscode/
 *.swp
 
-# Build / dist (PyInstaller, etc.)
-build/
+# Build / dist (PyInstaller, etc.) — tracked spec files + build.py live
+# under build/, but downloaded ffmpeg, the build venv, and PyInstaller
+# work/output dirs are all generated artefacts.
+build/.cache/
+build/.venv/
+build/.work/
+build/dist/
 dist/
 *.spec.bak
 

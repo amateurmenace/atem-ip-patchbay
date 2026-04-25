@@ -228,3 +228,32 @@ code is included or distributed. The protocol and XML format
 implemented here are documented publicly in *Blackmagic Streaming
 Encoder Ethernet Protocol* and *Blackmagic Streaming XML File Format*
 (both Blackmagic Developer Information).
+
+The packaged macOS `.app` ships with FFmpeg as a sidecar binary
+(invoked via `subprocess`, not linked). The bundled FFmpeg is
+[Jellyfin's portable build](https://github.com/jellyfin/jellyfin-ffmpeg),
+distributed under **GPL-3.0** because it includes libx264 / libx265 /
+GPL-licensed encoders. Per GPL pass-through, source for the bundled
+FFmpeg is at the URL above; this app and FFmpeg are separate
+executables that interact only via process boundaries (an "aggregate"
+under GPL terms), so the MIT license applies to everything in this
+repo.
+
+## Building from source
+
+To build a `.app` + `.dmg` locally on macOS:
+
+```sh
+python3 build/build.py
+```
+
+The orchestrator creates a build venv at `build/.venv`, downloads the
+FFmpeg sidecar into `build/.cache`, runs PyInstaller against
+`build/macos.spec`, signs with the first `Developer ID Application`
+identity it finds in your keychain (override with `SIGN_IDENTITY=...`),
+and packages the result with `create-dmg`. The output lands at
+`build/dist/ATEM-IP-Patchbay-<version>-arm64.dmg`.
+
+Flags: `--clean` wipes the cache and venv before starting,
+`--skip-sign` produces an unsigned bundle, `--no-dmg` stops at the
+`.app`.

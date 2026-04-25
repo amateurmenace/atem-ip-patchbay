@@ -146,9 +146,10 @@ def _scan_avfoundation() -> tuple[list[Device], list[Device]]:
     print a TTY camera-permission prompt the first time on a fresh
     install. Once the user grants access, subsequent calls are silent.
     """
+    from .ffmpeg_path import ffmpeg_path
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-f", "avfoundation",
+            [ffmpeg_path(), "-hide_banner", "-f", "avfoundation",
              "-list_devices", "true", "-i", ""],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -205,9 +206,10 @@ def _scan_dshow() -> tuple[list[Device], list[Device]]:
     the source resolver routes that entry through gdigrab instead of
     dshow.
     """
+    from .ffmpeg_path import ffmpeg_path
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-f", "dshow",
+            [ffmpeg_path(), "-hide_banner", "-f", "dshow",
              "-list_devices", "true", "-i", "dummy"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,

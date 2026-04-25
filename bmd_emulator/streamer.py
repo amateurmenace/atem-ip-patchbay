@@ -328,7 +328,8 @@ class Streamer:
 
     def _build_ffmpeg_cmd(self, plan: StreamPlan) -> list[str]:
         gop = plan.gop
-        cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
+        from .ffmpeg_path import ffmpeg_path
+        cmd: list[str] = [ffmpeg_path(), "-hide_banner", "-loglevel", "info"]
         cmd.extend(plan.source.ffmpeg_input_args)
 
         # Build optional logo input (overlay #2) and the filter graph.
