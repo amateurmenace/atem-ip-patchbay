@@ -52,9 +52,30 @@ class ProtocolServer:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("0.0.0.0", self.port))
+        # Port-walk fallback: try the requested port first (9977 is the
+        # documented BMD port), then up to nine spots forward. A real
+        # BMD encoder on the LAN doesn't conflict (we bind 0.0.0.0
+        # locally; the LAN device has its own bind), but a stale
+        # instance on the same machine would silently brick a fresh
+        # launch otherwise.
+        last_err: OSError | None = None
+        for offset in range(10):
+            try_port = self.port + offset
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", try_port))
+                self._sock = sock
+                self.port = try_port
+                last_err = None
+                break
+            except OSError as exc:
+                sock.close()
+                last_err = exc
+        if self._sock is None:
+            raise RuntimeError(
+                f"Could not bind BMD protocol on TCP {self.port}-{self.port + 9}: {last_err}"
+            )
         self._sock.listen(8)
         self._sock.settimeout(0.5)
         self._stop.clear()

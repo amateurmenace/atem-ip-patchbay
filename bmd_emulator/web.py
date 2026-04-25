@@ -290,7 +290,26 @@ class WebServer:
 
     def start(self) -> None:
         handler = make_app(self.state, self.streamer)
-        self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
+        # Try the preferred port first, then walk forward up to 9 spots
+        # (8090 → 8091 → … → 8099). A stale instance holding the
+        # preferred port shouldn't silently brick a fresh launch — the
+        # alternative was the .app exiting with no UI in windowed mode,
+        # leaving the user with a "process in Activity Monitor but no
+        # window" mystery (which is exactly what happened on first try).
+        last_err: OSError | None = None
+        for offset in range(10):
+            try_port = self.port + offset
+            try:
+                self._httpd = ThreadingHTTPServer((self.host, try_port), handler)
+                self.port = try_port
+                last_err = None
+                break
+            except OSError as exc:
+                last_err = exc
+        if self._httpd is None:
+            raise RuntimeError(
+                f"Could not bind HTTP server on {self.host}:{self.port}-{self.port + 9}: {last_err}"
+            )
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,
             name="http-control",

@@ -36,7 +36,10 @@ def parse_args(argv=None):
         "Default: every *.xml under ./config/",
     )
     p.add_argument("--http-host", default="127.0.0.1")
-    p.add_argument("--http-port", type=int, default=8080)
+    p.add_argument(
+        "--http-port", type=int, default=8090,
+        help="HTTP UI port (default: 8090; will walk forward up to 8099 if taken)",
+    )
     p.add_argument(
         "--protocol-port",
         type=int,
@@ -112,7 +115,9 @@ def main(argv=None) -> int:
     web = WebServer(state, streamer, host=args.http_host, port=args.http_port)
     web.start()
 
-    url = f"http://{args.http_host}:{args.http_port}/"
+    # web.port may have walked forward from the requested port if it
+    # was taken — use whatever it actually bound to.
+    url = f"http://{args.http_host}:{web.port}/"
     log.info("Ready. Open %s", url)
     if not args.no_browser:
         try:
