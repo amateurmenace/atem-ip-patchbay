@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ATEM IP Patchbay</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ========================================================== -->
+  <!-- TOP NAV                                                     -->
+  <!-- ========================================================== -->
+  <header class="topbar">
+   <div class="topbar-inner">
+    <button class="brand" id="brand-btn" type="button" aria-label="ATEM IP Patchbay home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <g class="bm-bars">
+          <rect class="bm-bar" x="2"  y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="7"  y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="12" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="17" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="22" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="27" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+        </g>
+        <circle class="bm-dot" cx="3.5"  cy="16" r="1.8" fill="var(--accent)"/>
+        <circle class="bm-dot" cx="28.5" cy="16" r="1.8" fill="var(--accent)"/>
+      </svg>
+      <div class="title-block">
+        <h1>ATEM IP Patchbay</h1>
+        <div class="kicker">Proof of concept · free forever</div>
+      </div>
+    </button>
+    <div class="status-block">
+      <div class="status-pill" id="status-pill">IDLE</div>
+      <div class="duration" id="duration">00:00:00:00</div>
+    </div>
+   </div>
+  </header>
+
+  <!-- ========================================================== -->
+  <!-- HERO                                                        -->
+  <!-- ========================================================== -->
+  <section class="hero">
+    <div class="hero-headline">
+      Turn any video source into a remote input that streams into your
+      <strong>ATEM Extreme G2</strong>, <strong>Television Studio</strong>, or
+      <strong>Streaming Decoder</strong> over ethernet via SRT.
+    </div>
+    <div class="hero-cols">
+      <div class="hero-col">
+        <div class="hero-col-title">What it does</div>
+        <p>
+          NDI, SDI, HDMI, non-Blackmagic SRT and RTMP streams can all be
+          converted into the special Blackmagic flavor of SRT using this app,
+          for free. This is more of a demo app showing what is now possible,
+          a proof of concept, and should only be used in real productions at
+          your own risk. It is free forever, until it either gets stopped by
+          Blackmagic or they fully embrace opening up their stream decoding
+          ecosystem.
+        </p>
+      </div>
+      <div class="hero-col">
+        <div class="hero-col-title">How it happened</div>
+        <p>
+          Made possible in part by the latest update to the iOS Blackmagic
+          Camera App, which for the first time let that excellent free app
+          stream directly into an input on a qualifying ATEM. Because it's
+          software and not Blackmagic hardware, they seem to have lessened
+          some of the handshake requirements between sender and receiver, so
+          it was much easier to deconstruct what was essential and what was
+          just noise. Then Claude and I (mostly Claude) built an emulator of
+          a streaming encoder and eventually stumbled onto the winning
+          combination that got a signal into the ATEM Mini Extreme ISO G2
+          that inspired this journey.
+        </p>
+      </div>
+    </div>
+    <div class="hero-credit">
+      Made by <a href="https://weirdmachine.org" target="_blank" rel="noopener">Stephen Walter</a>
+      and Claude. Powered by Blackmagic Design.
+    </div>
+  </section>
+
+  <!-- ========================================================== -->
+  <!-- MAIN GRID                                                   -->
+  <!-- ========================================================== -->
+  <main class="grid">
+
+    <!-- ============== LEFT COLUMN : MONITOR + TELEMETRY ========= -->
+    <div class="config-stack">
+    <section class="card monitor">
+      <div class="card-title"><span>Monitor</span><span class="card-title-aux" id="monitor-aux">no source</span></div>
+
+      <div class="preview-frame" id="preview-frame">
+        <video id="preview-video" autoplay playsinline muted hidden></video>
+        <div class="bars" id="preview-bars" aria-hidden="true">
+          <div class="bar bar-white"></div>
+          <div class="bar bar-yellow"></div>
+          <div class="bar bar-cyan"></div>
+          <div class="bar bar-green"></div>
+          <div class="bar bar-magenta"></div>
+          <div class="bar bar-red"></div>
+          <div class="bar bar-blue"></div>
+        </div>
+        <div class="preview-message" id="preview-message" hidden></div>
+        <div class="live-badge" id="live-badge" hidden>● LIVE</div>
+        <div class="preview-overlay">
+          <div class="ovl-row"><span>SOURCE</span> <strong id="ovl-source">—</strong></div>
+          <div class="ovl-row"><span>FORMAT</span> <strong id="ovl-res">1080p30</strong></div>
+          <div class="ovl-row"><span>PROFILE</span> <strong id="ovl-profile">—</strong></div>
+          <div class="ovl-row"><span>BITRATE</span> <strong id="ovl-bitrate">0 kbps</strong></div>
+        </div>
+      </div>
+
+      <div class="controls-row">
+        <button id="btn-start" class="primary big">▶ Start Stream</button>
+        <button id="btn-stop" class="big">■ Stop</button>
+      </div>
+
+      <div id="error" class="error" hidden></div>
+    </section>
+
+    <!-- ============== TELEMETRY ================================= -->
+    <section class="card telemetry">
+      <div class="card-title"><span>Connection</span><span class="card-title-aux" id="conn-aux">—</span></div>
+
+      <div class="telemetry-grid">
+        <div class="tm-cell"><span>Bitrate</span><strong id="tm-bitrate">0 kbps</strong><em id="tm-bitrate-bar" class="bar-strip"></em></div>
+        <div class="tm-cell"><span>FPS</span><strong id="tm-fps">0</strong><em id="tm-fps-target" class="sub">target —</em></div>
+        <div class="tm-cell"><span>Encoder speed</span><strong id="tm-speed">—</strong><em id="tm-speed-note" class="sub">idle</em></div>
+        <div class="tm-cell"><span>Frames sent</span><strong id="tm-frames">0</strong><em class="sub" id="tm-quality">q=—</em></div>
+        <div class="tm-cell"><span>Dropped</span><strong id="tm-dropped">0</strong><em class="sub">since start</em></div>
+        <div class="tm-cell"><span>Duration</span><strong id="tm-duration">00:00:00:00</strong><em class="sub" id="tm-elapsed">—</em></div>
+      </div>
+
+      <div class="telemetry-note hint">
+        <strong>Reading this:</strong> When the encoder reports <strong>speed ≥ 1.0×</strong> and
+        bitrate matches your profile target, the Mac is keeping up. The ATEM's silent acceptance is
+        confirmed by zero dropped frames and a steady FPS — if the ATEM rejected the stream,
+        FFmpeg would surface a connection error in the log within 1–2 seconds.
+      </div>
+    </section>
+
+    <!-- ============== ENCODER =================================== -->
+    <section class="card encoder-card">
+      <div class="card-title"><span>Encoder</span></div>
+      <div class="row-2">
+        <label>Video codec
+          <select id="video-codec">
+            <option value="h265">H.265 · HEVC · libx265 (recommended)</option>
+            <option value="h264">H.264 · libx264</option>
+          </select>
+        </label>
+        <label>Quality preset
+          <select id="quality"></select>
+        </label>
+      </div>
+      <label>Device label <span class="hint">(IDENTITY · sent as <code>bmd_name</code> in streamid)</span>
+        <input id="label" type="text" />
+      </label>
+      <p class="hint guide">
+        <strong>Use H.265 for ATEM Mini built-in Streaming Bridge mode</strong> — it's the codec
+        real BMD encoders and the iPhone Blackmagic Camera both send. Better compression at the
+        same quality, and the ATEM's hardware decoder is tuned for it. Switch to H.264 only when
+        targeting an RTMP receiver (which usually rejects HEVC) or a standalone Streaming Bridge
+        on older firmware.
+      </p>
+    </section>
+
+    <!-- ============== LOG ======================================= -->
+    <details class="card collapsible log-pane-card">
+      <summary class="card-title">FFmpeg log <span class="muted">(last 50 lines)</span></summary>
+      <pre id="log">No process started yet.</pre>
+      <details>
+        <summary>Last command</summary>
+        <pre id="cmd"></pre>
+      </details>
+    </details>
+
+    </div><!-- /.config-stack (left) -->
+
+    <!-- ============== RIGHT COLUMN : SOURCE + DESTINATION + OVERLAYS -->
+    <div class="config-stack">
+
+      <!-- ---------- SOURCE ----------------------------------- -->
+      <section class="card source-card">
+        <div class="card-title"><span>Source</span>
+          <span>
+            <a href="#" class="card-title-aux" id="ndi-rescan">scan NDI</a>
+            <a href="#" class="card-title-aux" id="rescan-devices" style="margin-left:10px;">rescan</a>
+          </span>
+        </div>
+
+        <div id="source-tiles" class="tile-grid" aria-label="Pick a video source">
+          <!-- tiles inserted by JS -->
+        </div>
+
+        <div id="source-hint" class="paste-status hint-panel" hidden></div>
+
+        <div class="audio-row">
+          <label class="inline">
+            <span class="lbl">Audio</span>
+            <select id="av-audio"></select>
+          </label>
+          <label class="inline">
+            <span class="lbl">Format</span>
+            <select id="video-mode"></select>
+          </label>
+        </div>
+
+        <div class="pipe-only" hidden>
+          <label>Source path / URL
+            <input id="pipe-path" type="text" placeholder="/tmp/ndi.ts  or  rtsp://camera/stream  or  http://…" />
+          </label>
+          <p class="hint">
+            Bridge any FFmpeg-readable input. Examples: <code>rtsp://cam/stream</code>,
+            <code>http://server/playlist.m3u8</code>, a named pipe fed by GStreamer, etc.
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- DESTINATION ------------------------------ -->
+      <section class="card destination-card">
+        <div class="card-title"><span>Destination</span>
+          <span class="card-title-aux" id="dest-aux">no destination</span>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="saved" role="tab">Saved</button>
+          <button class="tab" data-tab="paste" role="tab">Paste settings</button>
+          <button class="tab" data-tab="xml" role="tab">Import XML</button>
+          <button class="tab" data-tab="find" role="tab">Find on LAN</button>
+        </div>
+
+        <!-- TAB: SAVED -->
+        <div class="tab-panel" data-panel="saved">
+          <label>Service
+            <select id="service"></select>
+          </label>
+          <label>Server / Protocol
+            <select id="server"></select>
+          </label>
+          <label>Stream key
+            <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" />
+          </label>
+          <label class="srt-only">Passphrase <span class="hint">(optional · AES-encrypted SRT)</span>
+            <input id="passphrase" type="password" />
+          </label>
+          <label>Stream URL
+            <input id="dest-url" type="text" readonly />
+          </label>
+          <details class="srt-only">
+            <summary>Computed SRT streamid</summary>
+            <pre id="streamid">—</pre>
+          </details>
+          <details class="rtmp-only" hidden>
+            <summary>Final RTMP publish URL</summary>
+            <pre id="rtmp-url">—</pre>
+          </details>
+        </div>
+
+        <!-- TAB: PASTE -->
+        <div class="tab-panel" data-panel="paste" hidden>
+          <label>Paste anything streaming-shaped
+            <textarea id="paste-text" rows="6" placeholder="Paste an SRT or RTMP URL, key/value lines, JSON, or an XML config block. Examples:
+
+  srt://207.180.143.114:1935?streamid=#!::u=n1sn-2kpg-9w37-7f54
+
+  Host: 207.180.143.114
+  Port: 1935
+  Key: n1sn-2kpg-9w37-7f54
+  Name: My ATEM
+
+  {&quot;url&quot;:&quot;srt://1.2.3.4:1935&quot;,&quot;key&quot;:&quot;abcd-efgh-…&quot;}"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="paste-apply" class="primary">Use these settings</button>
+            <button id="paste-clear">Clear</button>
+          </div>
+          <div id="paste-status" class="paste-status" hidden></div>
+          <p class="hint">Pasting a URL with embedded <code>streamid=#!::u=KEY</code> auto-extracts the key. Multi-line key/value pastes synthesise a URL from <code>Host</code> + <code>Port</code> + <code>Protocol</code>.</p>
+        </div>
+
+        <!-- TAB: IMPORT XML -->
+        <div class="tab-panel" data-panel="xml" hidden>
+          <div id="xml-drop" class="dropzone">
+            <strong>Drop a Blackmagic streaming XML here</strong>
+            <span class="hint">— or click to choose, or paste below</span>
+            <input id="xml-file" type="file" accept=".xml,text/xml,application/xml" hidden />
+          </div>
+          <label style="margin-top:12px;">Or paste XML directly
+            <textarea id="xml-text" rows="6" placeholder="<?xml version=&quot;1.0&quot;?>
+<streaming><service><name>…</name><key>…</key><servers>…</servers><profiles>…</profiles></service></streaming>"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="xml-apply" class="primary">Load XML</button>
+          </div>
+          <div id="xml-status" class="paste-status" hidden></div>
+        </div>
+
+        <!-- TAB: FIND ON LAN -->
+        <div class="tab-panel" data-panel="find" hidden>
+          <p class="hint">Scan the local network for Blackmagic devices advertising mDNS (<code>_blackmagic._tcp</code>). Useful when the ATEM or a Streaming Bridge is on your LAN.</p>
+          <div class="button-row">
+            <button id="lan-discover" class="primary">Scan LAN</button>
+          </div>
+          <div id="discover-results" class="hint" style="margin-top:8px;"></div>
+        </div>
+      </section>
+
+      <!-- ---------- OVERLAYS --------------------------------- -->
+      <section class="card overlay-card">
+        <div class="card-title"><span>Overlays</span></div>
+        <div class="row-2">
+          <label>Title
+            <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
+          </label>
+          <label>Subtitle
+            <input id="ov-subtitle" type="text" placeholder="Backup · source name" />
+          </label>
+        </div>
+        <label>Logo image (PNG / JPG)
+          <input id="ov-logo" type="text" placeholder="/Users/you/Pictures/logo.png" />
+        </label>
+        <label class="check">
+          <input id="ov-clock" type="checkbox" />
+          <span>Show clock (HH:MM:SS, bottom-left)</span>
+        </label>
+      </section>
+
+      <!-- ---------- SRT ADVANCED ----------------------------- -->
+      <details class="card collapsible srt-only">
+        <summary class="card-title">SRT Advanced</summary>
+        <div class="row-3">
+          <label>Mode
+            <select id="srt-mode">
+              <option value="caller">caller (push)</option>
+              <option value="listener">listener (pull)</option>
+              <option value="rendezvous">rendezvous</option>
+            </select>
+          </label>
+          <label>Latency (ms)
+            <input id="srt-latency" type="number" min="20" max="8000" step="20" placeholder="500" />
+          </label>
+          <label class="srt-listener-only" hidden>Listen Port
+            <input id="srt-listen-port" type="number" min="1" max="65535" placeholder="9710" />
+          </label>
+        </div>
+        <label>Streamid override <span class="hint">(blank = use BMD default)</span>
+          <input id="streamid-override" type="text" placeholder="#!::bmd_uuid=…,u=KEY" />
+        </label>
+        <label class="check">
+          <input id="streamid-legacy" type="checkbox" />
+          <span>Use legacy <code>r=KEY,m=publish</code> form
+            <span class="hint">(third-party convention; default off matches real BMD encoders)</span>
+          </span>
+        </label>
+        <p class="hint guide">
+          <strong>500 ms latency</strong> is a safe default for public-internet pushes. Drop to
+          120–200 ms on a low-RTT LAN, raise to 1000+ ms on flaky connections. SRT will use the
+          buffer to retransmit lost packets — too-low latency means dropped packets, too-high
+          means visible delay between source and program output.
+        </p>
+      </details>
+
+    </div><!-- /.config-stack (right) -->
+  </main>
+
+  <footer class="footer">
+    <div>BMD control protocol on TCP <strong>9977</strong> · UI on TCP <strong>8090</strong></div>
+    <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Real-config files — live stream keys and ATEM hostnames live here.
+# config/example.xml is the placeholder users copy from. Anything else
+# under config/ stays out of source control.
+config/*.xml
+!config/example.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+
+# Build / dist (PyInstaller, etc.)
+build/
+dist/
+*.spec.bak
+
+# Runtime artefacts
+/tmp/bmd/
+*.pcap
+*.pcapng
+*.log
