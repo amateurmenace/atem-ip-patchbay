@@ -37,10 +37,22 @@ log = logging.getLogger(__name__)
 # Matches an avfoundation device line: `[avfoundation @ 0x...] [N] Name`.
 _AVF_DEVICE_LINE = re.compile(r"\[[^\]]+\]\s*\[(\d+)\]\s*(.+)$")
 
-# Matches a dshow device line: `[dshow @ 0x...]  "Name"` with an optional
-# trailing `(video)` / `(audio)` marker on older FFmpeg builds.
+# Matches a dshow device line. FFmpeg's prefix changed somewhere
+# around the 7.x → 8.x line: older builds used ``[dshow @ ADDR]``,
+# newer builds (BtbN n8.1, used by the Windows installer) use the
+# generic ``[in#0 @ ADDR]`` for input-devicelisting. We accept both.
+#
+# The trailing kind marker is also more diverse on modern FFmpeg:
+#   (video)         — pure video device
+#   (audio)         — pure audio device
+#   (audio, video)  — combined-input capture (Blackmagic WDM, etc.)
+#   (video, audio)  — same, alternate ordering
+#   (none)          — FFmpeg can't determine the type (OBS Virtual
+#                     Camera shows up this way)
+# We capture the whole parenthesised marker as group(2) and decode
+# it in _resolve_dshow_kind below.
 _DSHOW_DEVICE_LINE = re.compile(
-    r'\[dshow @ [^\]]+\]\s+"([^"]+)"(?:\s+\((video|audio)\))?\s*$'
+    r'\[(?:dshow|in#\d+) @ [^\]]+\]\s+"([^"]+)"(?:\s+\(([^)]*)\))?\s*$'
 )
 
 
@@ -79,15 +91,19 @@ class DeviceList:
 # Patterns are tested in order; first match wins. Keep specific before generic.
 _VIDEO_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("screen", re.compile(r"capture screen|desk view|screen capture|desktop", re.I)),
-    ("capture_card", re.compile(r"ultrastudio|decklink|intensity|aja|magewell|elgato|epiphan", re.I)),
+    # "blackmagic" + "wdm capture" cover the Windows-side dshow names for
+    # DeckLink / UltraStudio / Web Presenter capture (e.g.
+    # "Blackmagic WDM Capture (12)"). NDI is matched in its own row so
+    # NDI Webcam pseudo-cameras don't get bucketed as capture cards.
+    ("capture_card", re.compile(r"ultrastudio|decklink|intensity|aja|magewell|elgato|epiphan|wdm capture|blackmagic", re.I)),
     ("ndi", re.compile(r"\bndi\b", re.I)),
     ("iphone", re.compile(r"iphone|ipad", re.I)),
-    ("virtual", re.compile(r"virtual|obs|sysram|loopback|syphon", re.I)),
+    ("virtual", re.compile(r"virtual|obs|sysram|loopback|syphon|vmix", re.I)),
 ]
 
 _AUDIO_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("ndi", re.compile(r"\bndi\b", re.I)),
-    ("virtual", re.compile(r"virtual|loopback|aggregate|blackhole|soundflower|background music|stereo mix", re.I)),
+    ("virtual", re.compile(r"virtual|loopback|aggregate|blackhole|soundflower|background music|stereo mix|vmix", re.I)),
 ]
 
 
@@ -236,6 +252,11 @@ def _scan_dshow() -> tuple[list[Device], list[Device]]:
 def _parse_dshow(text: str) -> tuple[list[Device], list[Device]]:
     video: list[Device] = []
     audio: list[Device] = []
+    # Legacy section-header fallback: older FFmpeg builds emitted
+    # "DirectShow video devices" / "DirectShow audio devices" headers
+    # and unmarked device lines underneath. Newer builds carry the
+    # kind inline per-device, so this state machine just stays at None
+    # in the modern-format path.
     section: str | None = None
     v_idx = 0
     a_idx = 0
@@ -248,23 +269,48 @@ def _parse_dshow(text: str) -> tuple[list[Device], list[Device]]:
         if "directshow audio devices" in low:
             section = "audio"
             continue
-        # Skip "Alternative name" lines — they reference the same device
-        # via its `@device_pnp_...` GUID and we don't need that.
+        # Alternative-name lines reference the same device by its
+        # `@device_pnp_...` GUID and we don't need them.
         if "alternative name" in low:
             continue
         m = _DSHOW_DEVICE_LINE.search(line)
         if not m:
             continue
         name = m.group(1).strip()
-        kind_marker = m.group(2)  # "video" / "audio" / None
-        kind = kind_marker or section
-        if kind == "video":
+        kind_marker = m.group(2)
+        kinds = _resolve_dshow_kind(kind_marker, section)
+        if "video" in kinds:
             video.append(Device(index=v_idx, name=name, kind="video"))
             v_idx += 1
-        elif kind == "audio":
+        if "audio" in kinds:
             audio.append(Device(index=a_idx, name=name, kind="audio"))
             a_idx += 1
     return video, audio
+
+
+def _resolve_dshow_kind(marker: str | None, section: str | None) -> set[str]:
+    """Translate a dshow kind marker (or legacy section) to a set of kinds.
+
+    Modern FFmpeg emits one of: ``video``, ``audio``, ``audio, video``
+    (the combined-input capture variant — Blackmagic WDM, some Magewell
+    cards), ``video, audio`` (same, reversed), or ``none`` (FFmpeg
+    couldn't determine the device type — OBS Virtual Camera and some
+    NDI inputs report this way). We map combined markers into BOTH
+    lists so the device is selectable as either input. ``none`` is
+    treated as video on the practical observation that virtually every
+    real-world ``(none)`` device in dshow listings is a virtual camera.
+    """
+    if marker is None:
+        return {section} if section in ("video", "audio") else set()
+    parts = {p.strip().lower() for p in marker.split(",")}
+    kinds: set[str] = set()
+    if "video" in parts:
+        kinds.add("video")
+    if "audio" in parts:
+        kinds.add("audio")
+    if "none" in parts and not kinds:
+        kinds.add("video")
+    return kinds
 
 
 # ---------------------------------------------------------------------------
