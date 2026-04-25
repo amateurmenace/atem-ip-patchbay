@@ -73,36 +73,44 @@ const els = {
   relayRtmpApp:       $('#relay-rtmp-app'),
   relayRtmpKey:       $('#relay-rtmp-key'),
 
-  // Destination
-  service:    $('#service'),
-  server:     $('#server'),
-  destUrl:    $('#dest-url'),
-  streamKey:  $('#stream-key'),
-  passphrase: $('#passphrase'),
-  streamid:   $('#streamid'),
-  rtmpUrl:    $('#rtmp-url'),
-  srtOnly:    $$('.srt-only'),
-  rtmpOnly:   $$('.rtmp-only'),
+  // Destination wizard
+  destAddress:    $('#dest-address'),
+  destAux:        $('#dest-aux'),
+  formatDecoded:  $('#format-decoded'),
+  service:     $('#service'),
+  server:      $('#server'),
+  multiServiceRow: $('#multi-service-row'),
+  destUrl:     $('#dest-url'),
+  streamKey:   $('#stream-key'),
+  passphrase:  $('#passphrase'),
+  streamid:    $('#streamid'),
+  rtmpUrl:     $('#rtmp-url'),
+  srtOnly:     $$('.srt-only'),
+  rtmpOnly:    $$('.rtmp-only'),
+  protoSegs:   $$('input[name="dest-proto"]'),
+  codecSegs:   $$('input[name="dest-codec"]'),
 
-  // Paste
+  // Paste (now inside Advanced)
   pasteText:   $('#paste-text'),
   pasteApply:  $('#paste-apply'),
   pasteClear:  $('#paste-clear'),
   pasteStatus: $('#paste-status'),
 
-  // XML import
-  xmlDrop:   $('#xml-drop'),
-  xmlFile:   $('#xml-file'),
-  xmlText:   $('#xml-text'),
-  xmlApply:  $('#xml-apply'),
-  xmlStatus: $('#xml-status'),
+  // XML drop (in wizard)
+  xmlDrop:        $('#xml-drop'),
+  xmlFile:        $('#xml-file'),
+  xmlLoaded:      $('#xml-loaded'),
+  xmlLoadedName:  $('#xml-loaded-name'),
+  xmlClear:       $('#xml-clear'),
+  xmlStatus:      $('#xml-status'),
 
   // LAN discover
   lanDiscover:     $('#lan-discover'),
   discoverResults: $('#discover-results'),
 
   // Encoder
-  videoCodec: $('#video-codec'),
+  // videoCodec used to be a <select id="video-codec"> in the old Encoder
+  // card. The wizard replaced it with the codecSegs segmented control.
   quality:    $('#quality'),
   label:      $('#label'),
 
@@ -579,23 +587,53 @@ function render(snap) {
 
   if (document.activeElement !== els.label) els.label.value = snap.label;
 
+  // Multi-service / multi-server selectors only appear in Advanced
+  // when there are more than one of each. Most users with a single
+  // loaded XML never see these.
   setOptions(els.service, snap.available_services, snap.current_service_name);
   const serverOptions = (snap.available_servers || []).map((s) => ({
     value: s.name,
     label: `${s.name}  ·  ${s.protocol.toUpperCase()}`,
   }));
   setOptions(els.server, serverOptions, snap.current_server_name);
+  const showMultiService = (snap.available_services || []).length > 1
+    || (snap.available_servers || []).length > 1;
+  if (els.multiServiceRow) els.multiServiceRow.hidden = !showMultiService;
+
+  // Address field — show whichever URL is active (custom_url override
+  // wins; otherwise the resolved current_url from the loaded XML).
+  // Don't clobber while the user is mid-typing.
+  if (document.activeElement !== els.destAddress) {
+    els.destAddress.value = snap.custom_url || snap.current_url || '';
+  }
 
   els.destUrl.value = snap.current_url || '';
   if (document.activeElement !== els.streamKey) els.streamKey.value = snap.stream_key;
   if (document.activeElement !== els.passphrase) els.passphrase.value = snap.passphrase;
   els.streamid.textContent = buildStreamidPreview(snap);
   els.rtmpUrl.textContent = buildRtmpPreview(snap);
-  applyProtocolVisibility((snap.current_protocol || '').toLowerCase());
 
-  if (snap.current_url) {
+  // Protocol segmented control — reflects whatever's actually active.
+  const activeProto = (snap.current_protocol || 'srt').toLowerCase();
+  setSegmentedValue(els.protoSegs, activeProto === 'rtmps' ? 'rtmp' : activeProto);
+  applyProtocolVisibility(activeProto);
+
+  // Codec segmented control.
+  setSegmentedValue(els.codecSegs, snap.video_codec || 'h265');
+
+  // XML-loaded chip + service-name display.
+  const loadedName = snap.current_service_name || '';
+  if (loadedName) {
+    els.xmlLoadedName.textContent = loadedName;
+    els.xmlLoaded.hidden = false;
+  } else {
+    els.xmlLoaded.hidden = true;
+  }
+
+  if (snap.current_url || snap.custom_url) {
     const proto = (snap.current_protocol || '').toUpperCase();
-    els.destAux.textContent = `${proto} → ${snap.current_url.replace(/^[a-z]+:\/\//, '')}`;
+    const url = snap.current_url || snap.custom_url;
+    els.destAux.textContent = `${proto} → ${url.replace(/^[a-z]+:\/\//, '')}`;
   } else {
     els.destAux.textContent = 'no destination';
   }
@@ -605,7 +643,6 @@ function render(snap) {
   if (document.activeElement !== els.srtListenPort) els.srtListenPort.value = snap.srt_listen_port || 9710;
   if (document.activeElement !== els.streamidOverride) els.streamidOverride.value = snap.streamid_override || '';
   if (els.streamidLegacy && document.activeElement !== els.streamidLegacy) els.streamidLegacy.checked = !!snap.streamid_legacy;
-  if (els.videoCodec && document.activeElement !== els.videoCodec) els.videoCodec.value = snap.video_codec || 'h265';
   applySrtModeVisibility(snap.srt_mode || 'caller');
 
   buildSourceTiles(snap);
@@ -617,6 +654,7 @@ function render(snap) {
     ], snap.av_audio_index);
   }
   setOptions(els.videoMode, snap.available_video_modes, snap.video_mode);
+  if (els.formatDecoded) els.formatDecoded.textContent = decodeVideoMode(snap.video_mode);
   setOptions(els.quality, snap.available_quality_levels || [], snap.quality_level);
   if (document.activeElement !== els.pipePath) els.pipePath.value = snap.pipe_path || '';
   els.pipeOnly.forEach((e) => (e.hidden = snap.source_id !== 'pipe'));
@@ -758,11 +796,64 @@ async function poll() {
 }
 
 // -----------------------------------------------------------------
-// Tabs
+// Decode "1080p59.94" -> "1920 × 1080 @ 59.94 fps"
 // -----------------------------------------------------------------
-function showTab(name) {
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
-  $$('.tab-panel').forEach((p) => (p.hidden = p.dataset.panel !== name));
+function decodeVideoMode(mode) {
+  if (!mode || mode === 'Auto') return '— × — @ — fps';
+  const m = mode.match(/^(\d+)p([\d.]+)$/);
+  if (!m) return mode;
+  const height = parseInt(m[1], 10);
+  const width = height === 1080 ? 1920 : 1280;
+  return `${width} × ${height} @ ${m[2]} fps`;
+}
+
+// -----------------------------------------------------------------
+// Segmented-control helpers (Protocol / Codec)
+// -----------------------------------------------------------------
+function setSegmentedValue(inputs, value) {
+  for (const r of inputs) r.checked = (r.value === value);
+}
+
+function getSegmentedValue(inputs) {
+  for (const r of inputs) if (r.checked) return r.value;
+  return null;
+}
+
+// Parse what the user typed in the Address field.
+//   "1.2.3.4:1935"        -> add scheme from current Protocol toggle
+//   "srt://1.2.3.4:1935"  -> use as-is, sync Protocol toggle
+//   "rtmp://srv/live"     -> use as-is, sync Protocol toggle
+//   ""                    -> clear custom_url (let XML drive)
+function applyAddressInput(raw) {
+  let addr = (raw || '').trim();
+  if (!addr) {
+    applySettings({ custom_url: '' });
+    return;
+  }
+  const schemeMatch = addr.match(/^([a-z]+):\/\//i);
+  let proto = schemeMatch ? schemeMatch[1].toLowerCase() : null;
+  if (!proto) {
+    proto = getSegmentedValue(els.protoSegs) || 'srt';
+    addr = `${proto}://${addr}`;
+  }
+  // Sync the Protocol toggle to whatever scheme we end up with so the
+  // UI stays consistent. rtmps falls back to "rtmp" for the toggle.
+  setSegmentedValue(els.protoSegs, proto === 'rtmps' ? 'rtmp' : proto);
+  applySettings({ custom_url: addr });
+}
+
+// Switching the Protocol toggle has two effects: pick the matching
+// server out of a loaded XML (if any), AND if a custom URL is in
+// effect, swap its scheme so the user's typed address still works.
+function applyProtocolToggle(proto) {
+  const snap = lastSnapshot || {};
+  const patches = {};
+  const matching = (snap.available_servers || []).find((s) => s.protocol === proto);
+  if (matching) patches.current_server_name = matching.name;
+  if (snap.custom_url) {
+    patches.custom_url = snap.custom_url.replace(/^[a-z]+:\/\//i, `${proto}://`);
+  }
+  if (Object.keys(patches).length) applySettings(patches);
 }
 
 // -----------------------------------------------------------------
@@ -807,14 +898,15 @@ function showStatus(el, ok, msg) {
 }
 
 // -----------------------------------------------------------------
-// XML import flow
+// XML import flow — wizard exposes drop-zone only; the dedicated
+// "paste XML directly" textarea was dropped from the simplified UI.
+// Power users who need to paste XML can drop a .xml file straight in.
 // -----------------------------------------------------------------
 async function applyXmlText(text) {
   if (!text.trim()) {
-    showStatus(els.xmlStatus, false, 'Drop a file or paste XML first.');
+    showStatus(els.xmlStatus, false, 'Drop an XML file first.');
     return;
   }
-  els.xmlApply.disabled = true;
   try {
     const r = await fetch('/api/load_xml_text', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -827,11 +919,8 @@ async function applyXmlText(text) {
     }
     showStatus(els.xmlStatus, true, `Loaded service: ${j.service}`);
     if (j.snapshot) render(j.snapshot);
-    showTab('saved');
   } catch (e) {
     showStatus(els.xmlStatus, false, 'Error: ' + e);
-  } finally {
-    els.xmlApply.disabled = false;
   }
 }
 
@@ -841,9 +930,7 @@ function setupXmlDrop() {
   els.xmlFile.addEventListener('change', async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    const text = await f.text();
-    els.xmlText.value = text;
-    applyXmlText(text);
+    applyXmlText(await f.text());
   });
   ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => {
     e.preventDefault(); e.stopPropagation(); dz.classList.add('drag');
@@ -854,9 +941,7 @@ function setupXmlDrop() {
   dz.addEventListener('drop', async (e) => {
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
     if (!f) return;
-    const text = await f.text();
-    els.xmlText.value = text;
-    applyXmlText(text);
+    applyXmlText(await f.text());
   });
 }
 
@@ -888,7 +973,6 @@ async function runLanDiscover() {
       a.addEventListener('click', (ev) => {
         ev.preventDefault();
         applySettings({ custom_url: a.getAttribute('data-url') });
-        showTab('saved');
       });
     });
   } catch (err) {
@@ -902,31 +986,48 @@ async function runLanDiscover() {
 // Bind everything
 // -----------------------------------------------------------------
 function bind() {
-  $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
-
   els.brandBtn.addEventListener('click', () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
-  // Saved tab
-  els.label.addEventListener('change', () => applySettings({ label: els.label.value }));
+  // Destination wizard — primary inputs
+  els.destAddress.addEventListener('change', () => applyAddressInput(els.destAddress.value));
   els.streamKey.addEventListener('change', () => applySettings({ stream_key: els.streamKey.value }));
   els.passphrase.addEventListener('change', () => applySettings({ passphrase: els.passphrase.value }));
+
+  // Segmented controls — Protocol + Codec
+  els.protoSegs.forEach((r) => r.addEventListener('change', () => {
+    if (r.checked) applyProtocolToggle(r.value);
+  }));
+  els.codecSegs.forEach((r) => r.addEventListener('change', () => {
+    if (r.checked) applySettings({ video_codec: r.value });
+  }));
+
+  // XML drop-zone (in wizard) + clear button
+  setupXmlDrop();
+  if (els.xmlClear) {
+    els.xmlClear.addEventListener('click', () => {
+      // No "unload XML" endpoint exists yet; for now, clearing the
+      // chip just removes the custom_url override (if any) and leaves
+      // the loaded service in place. A future improvement would add
+      // an /api/clear_service that empties state.services.
+      applySettings({ custom_url: '' });
+    });
+  }
+
+  // Advanced — multi-service / multi-server selectors
+  els.label.addEventListener('change', () => applySettings({ label: els.label.value }));
   els.service.addEventListener('change', () => applySettings({ current_service_name: els.service.value }));
   els.server.addEventListener('change', () => applySettings({ current_server_name: els.server.value }));
 
-  // Paste tab
+  // Advanced — paste-anything fallback (kept for power users)
   els.pasteApply.addEventListener('click', applyPaste);
   els.pasteClear.addEventListener('click', () => {
     els.pasteText.value = '';
     els.pasteStatus.hidden = true;
   });
 
-  // XML tab
-  els.xmlApply.addEventListener('click', () => applyXmlText(els.xmlText.value));
-  setupXmlDrop();
-
-  // LAN tab
+  // Advanced — LAN discover button
   els.lanDiscover.addEventListener('click', runLanDiscover);
 
   // Source devices
@@ -958,7 +1059,7 @@ function bind() {
   els.relayRtmpCopy.addEventListener('click', () => copyToClipboard(els.relayRtmpUrl.value, els.relayRtmpCopy));
 
   // Encoder
-  els.videoCodec.addEventListener('change', () => applySettings({ video_codec: els.videoCodec.value }));
+  // Codec wiring is now via els.codecSegs above (segmented control).
 
   // SRT advanced
   els.srtMode.addEventListener('change', () => {

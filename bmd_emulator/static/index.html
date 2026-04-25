@@ -142,31 +142,8 @@
       </div>
     </section>
 
-    <!-- ============== ENCODER =================================== -->
-    <section class="card encoder-card">
-      <div class="card-title"><span>Encoder</span></div>
-      <div class="row-2">
-        <label>Video codec
-          <select id="video-codec">
-            <option value="h265">H.265 · HEVC · libx265 (recommended)</option>
-            <option value="h264">H.264 · libx264</option>
-          </select>
-        </label>
-        <label>Quality preset
-          <select id="quality"></select>
-        </label>
-      </div>
-      <label>Device label <span class="hint">(IDENTITY · sent as <code>bmd_name</code> in streamid)</span>
-        <input id="label" type="text" />
-      </label>
-      <p class="hint guide">
-        <strong>Use H.265 for ATEM Mini built-in Streaming Bridge mode</strong> — it's the codec
-        real BMD encoders and the iPhone Blackmagic Camera both send. Better compression at the
-        same quality, and the ATEM's hardware decoder is tuned for it. Switch to H.264 only when
-        targeting an RTMP receiver (which usually rejects HEVC) or a standalone Streaming Bridge
-        on older firmware.
-      </p>
-    </section>
+    <!-- Encoder card removed — codec / format / quality / label all
+         moved into the new Destination wizard. -->
 
     <!-- ============== LOG ======================================= -->
     <details class="card collapsible log-pane-card">
@@ -180,8 +157,205 @@
 
     </div><!-- /.config-stack (left) -->
 
-    <!-- ============== RIGHT COLUMN : SOURCE + DESTINATION + OVERLAYS -->
+    <!-- ============== RIGHT COLUMN : DESTINATION (TOP) + SOURCE + OVERLAYS -->
     <div class="config-stack">
+
+      <!-- ---------- DESTINATION (now top of right column) --- -->
+      <section class="card destination-card">
+        <div class="card-title">
+          <span>Destination</span>
+          <span class="card-title-aux" id="dest-aux">no destination</span>
+        </div>
+
+        <div class="dest-wizard">
+
+          <div class="dest-row">
+            <label>Address
+              <input id="dest-address" type="text" placeholder="your-atem.local:1935  or  srt://1.2.3.4:1935" autocomplete="off" />
+            </label>
+            <label>Stream key
+              <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="dest-or"><span>or load from a Blackmagic XML</span></div>
+
+          <div id="xml-drop" class="dropzone compact">
+            <strong>Drop a Blackmagic streaming XML</strong>
+            <span class="hint">— or click to choose</span>
+            <input id="xml-file" type="file" accept=".xml,text/xml,application/xml" hidden />
+          </div>
+          <div id="xml-loaded" class="xml-loaded-row" hidden>
+            <span class="loaded-label">Loaded:</span>
+            <strong id="xml-loaded-name">—</strong>
+            <button id="xml-clear" type="button" class="btn-link">clear</button>
+          </div>
+          <div id="xml-status" class="paste-status" hidden></div>
+
+          <div class="dest-toggles">
+            <div class="toggle-group">
+              <span class="toggle-label">Protocol</span>
+              <div class="seg-control" role="radiogroup" aria-label="Protocol">
+                <label class="seg"><input type="radio" name="dest-proto" value="srt" /><span>SRT</span></label>
+                <label class="seg"><input type="radio" name="dest-proto" value="rtmp" /><span>RTMP</span></label>
+              </div>
+            </div>
+            <div class="toggle-group">
+              <span class="toggle-label">Codec</span>
+              <div class="seg-control" role="radiogroup" aria-label="Codec">
+                <label class="seg"><input type="radio" name="dest-codec" value="h265" /><span>H.265</span></label>
+                <label class="seg"><input type="radio" name="dest-codec" value="h264" /><span>H.264</span></label>
+              </div>
+            </div>
+          </div>
+
+          <label class="srt-only">
+            <span class="field-label">SRT passphrase <span class="hint">(optional · AES-encrypted)</span></span>
+            <input id="passphrase" type="password" autocomplete="off" />
+          </label>
+
+          <div class="format-warning">
+            <div class="warning-icon" aria-hidden="true">!</div>
+            <div class="warning-body">
+              <div class="format-label">Switcher video format — must match exactly</div>
+              <div class="format-pick-row">
+                <select id="video-mode" class="format-select"></select>
+                <div class="format-decoded" id="format-decoded">— × — @ — fps</div>
+              </div>
+              <p class="format-explainer">
+                A 1080p30 switcher rejects a 1080p60 stream — it'll connect, but
+                the input shows black. <strong>Set this to whatever your ATEM is
+                set to</strong>, not what you wish it was.
+              </p>
+              <details class="format-help">
+                <summary>How do I find my switcher's format?</summary>
+                <div class="help-body">
+                  <p><strong>ATEM Software Control:</strong> open the app →
+                  <em>Settings</em> (gear icon, top-right) → <em>Video</em> →
+                  <em>Set video standard</em>. Whatever's checked there is what
+                  you pick here.</p>
+                  <p><strong>From the unit itself:</strong> ATEM Mini Extreme G2,
+                  Television Studio HD, and similar models display the current
+                  standard on the front-panel screen — look for
+                  <code>1080p30</code> / <code>1080p59.94</code> / <code>1080p25</code> / etc.</p>
+                  <p><strong>Common defaults:</strong>
+                  <code>1080p30</code> in NTSC regions (US, Canada, Japan),
+                  <code>1080p25</code> in PAL regions (most of Europe, Asia,
+                  Australia), <code>1080p59.94</code> for broadcast-spec setups.</p>
+                  <p class="hint">If you set the wrong format here, the only
+                  symptom is "stream connects but ATEM input shows black /
+                  frozen / corrupt." Try cycling formats one by one until the
+                  ATEM accepts.</p>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <div class="dest-summary">
+            <label>Stream URL
+              <input id="dest-url" type="text" readonly />
+            </label>
+            <details class="srt-only">
+              <summary>Computed SRT streamid</summary>
+              <pre id="streamid">—</pre>
+            </details>
+            <details class="rtmp-only" hidden>
+              <summary>Final RTMP publish URL</summary>
+              <pre id="rtmp-url">—</pre>
+            </details>
+          </div>
+
+          <details class="port-fwd-help">
+            <summary>How does port forwarding work?</summary>
+            <div class="help-body">
+              <p>If your ATEM is at home and you're streaming from
+              somewhere else (a venue, a coffee shop, another office),
+              the stream has to traverse your home router. By default,
+              routers <strong>block unsolicited inbound traffic</strong>
+              — so you need to tell the router to forward SRT/RTMP
+              packets to your ATEM.</p>
+              <ol>
+                <li>Open your router's admin page (commonly
+                  <code>192.168.1.1</code> or <code>192.168.0.1</code>) —
+                  credentials are usually printed on the bottom of the
+                  unit.</li>
+                <li>Find <strong>Port Forwarding</strong> (sometimes
+                  under "NAT", "Virtual Server", or "Advanced").</li>
+                <li>Add a rule: forward
+                  <strong>UDP port 1935</strong> for SRT (or
+                  <strong>TCP port 1935</strong> for RTMP) to your
+                  ATEM's local IP (e.g. <code>192.168.1.50</code>).</li>
+                <li>From the venue, point this app at your home's
+                  <strong>public IP</strong> (look it up via
+                  <a href="https://api.ipify.org" target="_blank" rel="noopener">api.ipify.org</a>),
+                  not the ATEM's local IP.</li>
+              </ol>
+              <p class="hint">Some ISPs (mobile carriers, shared
+              apartment-building connections) use
+              <strong>carrier-grade NAT</strong> which silently blocks
+              all inbound traffic regardless of your forwarding rules.
+              Test by pushing from a phone on cellular data: if the
+              stream reaches your ATEM, you're fine; if not, you'll
+              need an SRT relay (a small VPS, Cloudflare TURN, or
+              OvenMediaEngine) to bridge the gap.</p>
+            </div>
+          </details>
+
+          <details class="dest-advanced">
+            <summary>Advanced (mode, streamid, label, multi-service)</summary>
+            <div class="advanced-body">
+              <div class="row-2 multi-service" id="multi-service-row" hidden>
+                <label>Service
+                  <select id="service"></select>
+                </label>
+                <label>Server
+                  <select id="server"></select>
+                </label>
+              </div>
+              <label>Quality preset
+                <select id="quality"></select>
+              </label>
+              <label>Device label <span class="hint">(IDENTITY · sent as <code>bmd_name</code> in streamid)</span>
+                <input id="label" type="text" />
+              </label>
+              <div class="row-2 srt-only">
+                <label>SRT mode
+                  <select id="srt-mode">
+                    <option value="caller">Caller (we initiate · default)</option>
+                    <option value="listener">Listener (we wait)</option>
+                    <option value="rendezvous">Rendezvous (NAT traversal)</option>
+                  </select>
+                </label>
+                <label>Latency (ms)
+                  <input id="srt-latency" type="number" min="20" max="8000" />
+                </label>
+              </div>
+              <label class="srt-listener-only" hidden>SRT listen port
+                <input id="srt-listen-port" type="number" min="1" max="65535" />
+              </label>
+              <label>Streamid override <span class="hint">(leave empty for the BMD format)</span>
+                <input id="streamid-override" type="text" placeholder="(empty = standard BMD streamid)" />
+              </label>
+              <label class="checkbox-row srt-only">
+                <input id="streamid-legacy" type="checkbox" />
+                <span>Use legacy <code>r=KEY,m=publish,bmd_uuid=…</code> format
+                  <span class="hint">(third-party convention; default off matches real BMD)</span></span>
+              </label>
+              <div class="row-2">
+                <button id="lan-discover" type="button" class="btn-secondary">Find ATEMs on LAN (mDNS)</button>
+                <button id="paste-apply-advanced" type="button" class="btn-secondary" hidden>(legacy paste apply)</button>
+              </div>
+              <textarea id="paste-text" rows="3" placeholder="Optional: paste an SRT URL, key/value lines, JSON, or XML to auto-fill above…"></textarea>
+              <div class="button-row">
+                <button id="paste-apply" class="btn-secondary">Apply pasted text</button>
+                <button id="paste-clear" class="btn-secondary">Clear</button>
+              </div>
+              <div id="paste-status" class="paste-status" hidden></div>
+              <div id="discover-results" class="hint" style="margin-top:8px;"></div>
+            </div>
+          </details>
+        </div>
+      </section>
 
       <!-- ---------- SOURCE ----------------------------------- -->
       <section class="card source-card">
@@ -198,14 +372,10 @@
 
         <div id="source-hint" class="paste-status hint-panel" hidden></div>
 
-        <div class="audio-row">
+        <div class="audio-row single">
           <label class="inline">
             <span class="lbl">Audio</span>
             <select id="av-audio"></select>
-          </label>
-          <label class="inline">
-            <span class="lbl">Format</span>
-            <select id="video-mode"></select>
           </label>
         </div>
 
@@ -279,94 +449,11 @@
         </div>
       </section>
 
-      <!-- ---------- DESTINATION ------------------------------ -->
-      <section class="card destination-card">
-        <div class="card-title"><span>Destination</span>
-          <span class="card-title-aux" id="dest-aux">no destination</span>
-        </div>
-
-        <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="saved" role="tab">Saved</button>
-          <button class="tab" data-tab="paste" role="tab">Paste settings</button>
-          <button class="tab" data-tab="xml" role="tab">Import XML</button>
-          <button class="tab" data-tab="find" role="tab">Find on LAN</button>
-        </div>
-
-        <!-- TAB: SAVED -->
-        <div class="tab-panel" data-panel="saved">
-          <label>Service
-            <select id="service"></select>
-          </label>
-          <label>Server / Protocol
-            <select id="server"></select>
-          </label>
-          <label>Stream key
-            <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" />
-          </label>
-          <label class="srt-only">Passphrase <span class="hint">(optional · AES-encrypted SRT)</span>
-            <input id="passphrase" type="password" />
-          </label>
-          <label>Stream URL
-            <input id="dest-url" type="text" readonly />
-          </label>
-          <details class="srt-only">
-            <summary>Computed SRT streamid</summary>
-            <pre id="streamid">—</pre>
-          </details>
-          <details class="rtmp-only" hidden>
-            <summary>Final RTMP publish URL</summary>
-            <pre id="rtmp-url">—</pre>
-          </details>
-        </div>
-
-        <!-- TAB: PASTE -->
-        <div class="tab-panel" data-panel="paste" hidden>
-          <label>Paste anything streaming-shaped
-            <textarea id="paste-text" rows="6" placeholder="Paste an SRT or RTMP URL, key/value lines, JSON, or an XML config block. Examples:
-
-  srt://207.180.143.114:1935?streamid=#!::u=n1sn-2kpg-9w37-7f54
-
-  Host: 207.180.143.114
-  Port: 1935
-  Key: n1sn-2kpg-9w37-7f54
-  Name: My ATEM
-
-  {&quot;url&quot;:&quot;srt://1.2.3.4:1935&quot;,&quot;key&quot;:&quot;abcd-efgh-…&quot;}"></textarea>
-          </label>
-          <div class="button-row">
-            <button id="paste-apply" class="primary">Use these settings</button>
-            <button id="paste-clear">Clear</button>
-          </div>
-          <div id="paste-status" class="paste-status" hidden></div>
-          <p class="hint">Pasting a URL with embedded <code>streamid=#!::u=KEY</code> auto-extracts the key. Multi-line key/value pastes synthesise a URL from <code>Host</code> + <code>Port</code> + <code>Protocol</code>.</p>
-        </div>
-
-        <!-- TAB: IMPORT XML -->
-        <div class="tab-panel" data-panel="xml" hidden>
-          <div id="xml-drop" class="dropzone">
-            <strong>Drop a Blackmagic streaming XML here</strong>
-            <span class="hint">— or click to choose, or paste below</span>
-            <input id="xml-file" type="file" accept=".xml,text/xml,application/xml" hidden />
-          </div>
-          <label style="margin-top:12px;">Or paste XML directly
-            <textarea id="xml-text" rows="6" placeholder="<?xml version=&quot;1.0&quot;?>
-<streaming><service><name>…</name><key>…</key><servers>…</servers><profiles>…</profiles></service></streaming>"></textarea>
-          </label>
-          <div class="button-row">
-            <button id="xml-apply" class="primary">Load XML</button>
-          </div>
-          <div id="xml-status" class="paste-status" hidden></div>
-        </div>
-
-        <!-- TAB: FIND ON LAN -->
-        <div class="tab-panel" data-panel="find" hidden>
-          <p class="hint">Scan the local network for Blackmagic devices advertising mDNS (<code>_blackmagic._tcp</code>). Useful when the ATEM or a Streaming Bridge is on your LAN.</p>
-          <div class="button-row">
-            <button id="lan-discover" class="primary">Scan LAN</button>
-          </div>
-          <div id="discover-results" class="hint" style="margin-top:8px;"></div>
-        </div>
-      </section>
+      <!-- Old tabbed Destination card replaced by the wizard at the
+           top of this column. The wizard uses xml-drop / xml-file
+           directly (no separate paste-XML textarea); paste-text +
+           paste-apply live inside the wizard's Advanced section for
+           power users. -->
 
       <!-- ---------- OVERLAYS --------------------------------- -->
       <section class="card overlay-card">

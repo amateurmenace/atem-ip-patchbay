@@ -649,6 +649,188 @@ button.big { padding: 14px 18px; font-size: 14px; }
 }
 .relay-config-row input { width: 100%; }
 
+/* ============= DESTINATION WIZARD ====================== */
+.dest-wizard { display: flex; flex-direction: column; gap: 12px; }
+.dest-row { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+.dest-or {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; color: var(--muted-2);
+  letter-spacing: 0.08em; text-transform: uppercase;
+  margin: 4px 0;
+}
+.dest-or::before, .dest-or::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+.dropzone.compact {
+  padding: 14px;
+  text-align: center;
+}
+.xml-loaded-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 200, 110, 0.08);
+  border: 1px solid rgba(0, 200, 110, 0.3);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.xml-loaded-row .loaded-label {
+  color: var(--muted); text-transform: uppercase;
+  font-size: 10px; letter-spacing: 0.08em;
+}
+.xml-loaded-row strong { flex: 1; color: var(--text); }
+.btn-link {
+  background: transparent; border: none; padding: 4px 8px;
+  color: var(--accent); cursor: pointer; font-size: 11px;
+  text-decoration: underline;
+}
+.btn-link:hover { opacity: 0.8; }
+
+.dest-toggles {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  padding: 10px 0;
+}
+.toggle-group {
+  display: flex; align-items: center; gap: 10px;
+}
+.toggle-label {
+  font-size: 10px; color: var(--muted);
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.seg-control {
+  display: inline-flex;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2px;
+}
+.seg-control .seg {
+  position: relative; margin: 0; cursor: pointer;
+}
+.seg-control .seg input {
+  position: absolute; opacity: 0; pointer-events: none;
+}
+.seg-control .seg span {
+  display: block;
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px; font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.seg-control .seg input:checked + span {
+  background: var(--accent);
+  color: var(--bg);
+}
+.seg-control .seg:hover input:not(:checked) + span {
+  color: var(--text);
+}
+
+.field-label {
+  display: block;
+  font-size: 11px; color: var(--muted);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.format-warning {
+  display: flex; gap: 14px;
+  padding: 14px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.45);
+  border-radius: 10px;
+}
+.warning-icon {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 196, 0, 0.25);
+  color: #ffd24d;
+  font-weight: 800; font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
+.warning-body { flex: 1; min-width: 0; }
+.format-label {
+  display: block;
+  font-size: 12px; color: var(--text);
+  letter-spacing: 0.03em;
+  margin-bottom: 8px; font-weight: 700;
+}
+.format-pick-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+.format-select {
+  /* Bigger, more prominent than other selects since matching this
+     is the difference between "stream works" and "ATEM shows black." */
+  font-size: 15px;
+  font-weight: 600;
+  padding: 10px 12px;
+  height: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.format-decoded {
+  display: flex; align-items: center; justify-content: center;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.format-explainer {
+  margin: 0 0 8px;
+  font-size: 12px; color: var(--muted);
+  line-height: 1.5;
+}
+.format-explainer strong { color: var(--text); }
+.format-warning .hint { margin: 4px 0 6px; }
+.format-help, .port-fwd-help, .dest-advanced { font-size: 12px; }
+.format-help summary, .port-fwd-help summary, .dest-advanced summary {
+  cursor: pointer; padding: 4px 0; color: var(--accent);
+}
+.format-help[open] summary, .port-fwd-help[open] summary, .dest-advanced[open] summary {
+  margin-bottom: 8px;
+}
+.help-body { padding: 4px 0 6px; line-height: 1.5; }
+.help-body p { margin: 8px 0; }
+.help-body ol { padding-left: 20px; }
+.help-body ol li { margin: 6px 0; }
+.help-body code {
+  background: var(--panel-2); padding: 1px 5px;
+  border-radius: 3px; font-size: 11px;
+}
+
+.dest-summary {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dest-summary input[readonly] {
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px; color: var(--accent);
+  background: var(--panel);
+}
+
+.advanced-body {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 8px 0;
+}
+.advanced-body textarea {
+  width: 100%; min-height: 60px;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 11px;
+}
+
+.audio-row.single { grid-template-columns: 1fr; }
+
 /* ============= TABS ====================================== */
 .tabs {
   display: flex;
