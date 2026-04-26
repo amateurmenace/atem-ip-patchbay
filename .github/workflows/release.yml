@@ -199,6 +199,13 @@ jobs:
           codesign -dv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/libndi.dylib" 2>&1 | grep -E "Identifier|Authority|TeamId" || true
 
       - name: Notarize + staple .dmg (if Apple credentials are set)
+        # Don't fail the whole job if Apple's notary service rejects
+        # — most failures are recoverable user-side (expired Program
+        # License Agreement, app-specific password rotated, etc.) and
+        # we still want the signed .dmg uploaded as an artifact so
+        # the user can grab it, fix the issue, and notarize locally
+        # if they want a Gatekeeper-clean download.
+        continue-on-error: true
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}

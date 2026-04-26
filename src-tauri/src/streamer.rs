@@ -381,6 +381,7 @@ impl Streamer {
         let source = crate::sources::resolve_source(&self.state)
             .map_err(|e| anyhow!("Source resolve failed: {e}"))?;
         let audio_filter = build_audio_filter(&snap);
+        let video_filter = build_video_filter(&snap, width, height, fps);
         Ok(StreamPlan {
             width,
             height,
@@ -392,7 +393,7 @@ impl Streamer {
             protocol,
             source,
             video_codec: snap.video_codec.to_lowercase(),
-            video_filter: None,
+            video_filter,
             audio_filter,
             audio_output_mono: snap.audio_output_mono,
         })
@@ -929,6 +930,41 @@ fn parse_progress(line: &str) -> Option<Progress> {
     } else {
         None
     }
+}
+
+/// Build an FFmpeg `-vf` video-filter expression for sources whose
+/// native resolution / frame timing doesn't match the configured
+/// output. Today, only the screen-capture path needs it: AVF's
+/// "Capture screen N" device ignores `-video_size`, gives the full
+/// native display resolution (4K-ish on Retina Macs), and reports
+/// 1000k tbr because AVF doesn't propagate a sane frame rate. Both
+/// would make the encoded stream unrecognizable to the ATEM —
+/// which expects exactly the configured video_mode dimensions.
+///
+/// The filter scales-and-letterboxes to the target dimensions
+/// (preserving aspect ratio with black bars rather than stretching),
+/// pins fps to the configured rate so the encoder gets a steady
+/// pacing, and sets SAR=1 so the destination interprets the display
+/// aspect ratio correctly.
+///
+/// Returns None for non-screen sources — NDI's resolution match is
+/// handled in build_ffmpeg_cmd_for_ndi, AVF cameras already advertise
+/// the right modes, pipe / relay deliver whatever the upstream sends
+/// and downscaling there is the producer's job.
+fn build_video_filter(snap: &Snapshot, width: u32, height: u32, fps: u32) -> Option<String> {
+    if snap.source_id != "avfoundation" {
+        return None;
+    }
+    let name = snap.av_video_name.to_lowercase();
+    let is_screen = name.contains("capture screen") || name.contains("desk view");
+    if !is_screen {
+        return None;
+    }
+    Some(format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,\
+         pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,\
+         fps={fps},setsar=1"
+    ))
 }
 
 /// Build an FFmpeg `-af` audio-filter expression. Two reasons a
