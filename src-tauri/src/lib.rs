@@ -1,6 +1,7 @@
 mod device_scanner;
 mod ffmpeg_path;
 mod http;
+mod instance;
 mod ndi_capture;
 mod ndi_runtime;
 mod protocol;
@@ -23,6 +24,17 @@ use crate::streamer::Streamer;
 const HTTP_START_PORT: u16 = 8090;
 const BMD_START_PORT: u16 = 9977;
 
+/// Window title format. Phase 6 surfaces the instance name + bound
+/// ports so a user with multiple instances open can tell windows
+/// apart at a glance.
+fn window_title(instance: &str, http_port: u16, bmd_port: u16) -> String {
+    if instance == "default" {
+        format!("ATEM IP Patchbay  ·  http :{http_port}  ·  bmd :{bmd_port}")
+    } else {
+        format!("ATEM IP Patchbay [{instance}]  ·  http :{http_port}  ·  bmd :{bmd_port}")
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -34,6 +46,18 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Phase 6: parse CLI args and resolve the per-instance
+            // state directory. Surfaces instance_name + bound ports
+            // in the window title and isolates persisted state per
+            // instance.
+            let cli = instance::Cli::from_env();
+            let instance_dir = instance::ensure_instance_dir(&cli.instance_name);
+            log::info!(
+                "instance: {:?} (state dir: {})",
+                cli.instance_name,
+                instance_dir.display()
+            );
 
             let encoder = Arc::new(EncoderState::new());
 
@@ -67,8 +91,9 @@ pub fn run() {
             // Bind synchronously so we know the port before creating
             // the webview. The Axum server itself runs in a tokio task.
             let runtime = tauri::async_runtime::handle();
+            let http_start = cli.http_port.unwrap_or(HTTP_START_PORT);
             let (port, listener) = runtime
-                .block_on(async { crate::http::bind_with_walk(HTTP_START_PORT).await })
+                .block_on(async { crate::http::bind_with_walk(http_start).await })
                 .expect("could not bind HTTP API port");
             log::info!("HTTP API listening on http://127.0.0.1:{port}/");
 
@@ -84,8 +109,9 @@ pub fn run() {
             // streamer monitor task.
             let proto = ProtocolServer::new(encoder.clone(), streamer.clone());
             let proto_for_spawn = proto.clone();
+            let bmd_start = cli.bmd_port.unwrap_or(BMD_START_PORT);
             let bmd_port = runtime
-                .block_on(async move { proto_for_spawn.start(BMD_START_PORT).await })
+                .block_on(async move { proto_for_spawn.start(bmd_start).await })
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
                 })?;
@@ -106,6 +132,10 @@ pub fn run() {
             // Axum is up, then reveal it.
             let url = format!("http://127.0.0.1:{port}/");
             if let Some(window) = app.get_webview_window("main") {
+                let title = window_title(&cli.instance_name, port, bmd_port);
+                if let Err(err) = window.set_title(&title) {
+                    log::warn!("failed to set window title: {err}");
+                }
                 if let Err(err) = window.navigate(url.parse().expect("valid http URL")) {
                     log::error!("failed to navigate window to {url}: {err}");
                 }
