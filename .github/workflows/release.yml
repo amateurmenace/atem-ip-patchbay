@@ -62,6 +62,17 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2.0" --locked
 
+      - name: Install NDI SDK (Apple)
+        run: |
+          # The grafton-ndi crate's build.rs needs the NDI SDK headers
+          # at /Library/NDI SDK for Apple/include. NewTek's macOS .pkg
+          # installs them there. Network blip falls through to error
+          # so the failure mode is loud (vs the ci.yml soft-skip).
+          curl -fSL -o /tmp/ndi-sdk.pkg \
+            "https://downloads.ndi.tv/SDK/NDI_SDK_Mac/Install_NDI_SDK_v6_Apple.pkg"
+          sudo installer -pkg /tmp/ndi-sdk.pkg -target /
+          ls -la "/Library/NDI SDK for Apple/include" | head -3
+
       - name: Import signing identity (if secrets are set)
         env:
           CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
@@ -136,6 +147,18 @@ jobs:
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install NDI SDK (Windows)
+        shell: pwsh
+        run: |
+          # NewTek's NDI 6 SDK Windows installer is a small .exe
+          # that lays headers + libs under "C:\Program Files\NDI\NDI 6 SDK".
+          $url = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20SDK.exe"
+          $out = "$env:RUNNER_TEMP\ndi-sdk.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          # /S = silent, /D= = install dir (Inno Setup convention).
+          Start-Process -FilePath $out -ArgumentList "/S" -Wait -NoNewWindow
+          Get-ChildItem "C:\Program Files\NDI\NDI 6 SDK\Include" | Select-Object -First 3
 
       - name: Build .exe + NSIS installer
         working-directory: src-tauri
