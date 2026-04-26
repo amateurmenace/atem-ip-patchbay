@@ -514,9 +514,16 @@ function startNdiPreview(senderName) {
 
   if (ndiPreviewTimer) clearInterval(ndiPreviewTimer);
   let nullStreak = 0;
+  let tickCount = 0;
   const tick = async () => {
+    tickCount += 1;
     try {
       const r = await fetch(`/api/preview?ts=${Date.now()}`);
+      // Per-tick diagnostic every ~2.5s. Drop to >= 999999 to silence
+      // once we've nailed down the bug.
+      if (tickCount % 5 === 0) {
+        console.log(`[ndi-preview] tick #${tickCount}: HTTP ${r.status}, ok=${r.ok}, nullStreak=${nullStreak}`);
+      }
       if (r.status === 204 || !r.ok) {
         nullStreak += 1;
         // After ~6s without frames, swap to a "press Start Stream"
