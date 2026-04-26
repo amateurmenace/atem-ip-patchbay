@@ -16,14 +16,22 @@
 # via right-click → Open). Windows always ships unsigned for now (no
 # EV cert).
 #
-# NDI runtime dependency: the v0.2.0 build does NOT bundle
-# libndi.dylib / Processing.NDI.Lib.x64.dll. End users need NDI
-# Tools (free download from ndi.video) installed for the NDI direct-
-# ingest feature. A future release can vendor the redistributable
-# dylib (NDI SDK License Agreement explicitly permits this with
-# attribution); the binary is large (29 MB) and adding it to the
-# repo or downloading it in CI both have tradeoffs that are easier
-# to reason about once the rest of the pipeline is settled.
+# Notarization secrets (also opt-in; only run when ALL three are set
+# AND signing succeeds):
+#   APPLE_ID                 — Apple ID email associated with the cert
+#   APPLE_PASSWORD           — app-specific password from appleid.apple.com
+#                              (Sign-In & Security → App-Specific Passwords)
+#   APPLE_TEAM_ID            — Team ID (e.g. 6M536MV7GT, last paren of the
+#                              signing identity)
+# When set, the .dmg gets submitted to Apple's notary service and
+# stapled before upload. End users on macOS 10.15+ launch with no
+# Gatekeeper prompt at all.
+#
+# NDI runtime dependency: libndi.dylib is now bundled into
+# Contents/Frameworks/ via tauri.conf.json's bundle.macOS.frameworks
+# config. End users no longer need NDI Tools installed for direct
+# NDI ingest. The build still pulls the SDK headers from NewTek's
+# Apple installer because grafton-ndi's build.rs uses bindgen.
 
 name: Release
 
@@ -137,6 +145,42 @@ jobs:
           ls -lh "src-tauri/target/release/bundle/dmg/"
           ls -lh "src-tauri/target/release/bundle/macos/"
           codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          # Confirm libndi.dylib is bundled and re-signed under our
+          # Developer ID. If this prints nothing, the bundle config
+          # in tauri.conf.json didn't fire.
+          ls -lh "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/" 2>&1 || true
+          codesign -dv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/libndi.dylib" 2>&1 | grep -E "Identifier|Authority|TeamId" || true
+
+      - name: Notarize + staple .dmg (if Apple credentials are set)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          if [ "$HAS_NOTARY" != "true" ]; then
+            echo "Notarization secrets not set — skipping. End users will see Gatekeeper on first launch."
+            exit 0
+          fi
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          if [ -z "$DMG" ]; then
+            echo "No .dmg found to notarize — bailing." >&2
+            exit 1
+          fi
+          echo "Submitting $DMG to Apple's notary service..."
+          # --wait blocks (typically 1-3 minutes) until the notary
+          # service returns a verdict. Output goes to stdout so the
+          # action log captures any rejection reason.
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" \
+            --wait
+          echo "Stapling notarization ticket onto $DMG..."
+          xcrun stapler staple "$DMG"
+          echo "Verifying staple..."
+          xcrun stapler validate "$DMG"
+          spctl --assess --verbose=4 --type install "$DMG" || true
 
       - uses: actions/upload-artifact@v4
         with:
