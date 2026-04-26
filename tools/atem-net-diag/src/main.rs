@@ -795,11 +795,12 @@ impl Cli {
             }
         }
         // Monitor mode short-circuits the URL requirement — tshark
-        // captures from the network interface, not from a remote URL.
-        // UI mode similarly tolerates a missing URL when only
-        // monitoring is configured. Use a sentinel URL so the rest
-        // of the struct types match.
-        if monitor_iface.is_some() && url.is_none() {
+        // captures from a network interface, not from a remote URL.
+        // UI mode also tolerates a missing URL: the dashboard's
+        // config form is the canonical way to set the target, so
+        // `atem-net-diag --ui` alone is a valid bare launch (the
+        // probe loop sleeps until the user submits the form).
+        if (monitor_iface.is_some() || ui_port.is_some()) && url.is_none() {
             return Ok(Self {
                 url: "monitor://".into(),
                 keys,
