@@ -182,7 +182,237 @@ destination at 6.5 Mbps with live stats updates.
   for ~30s-2min, during which new connections with the same key
   fail with generic `Input/output error`. The clean-exit handler
   fixes the common case (Cmd-Q); only force-quit / crash hits
-  this. Document if it bites again.
+  this. Document if it bites again. **Update from Session 3:**
+  user reports this DOES bite — after a few stream tests the
+  ATEM stops accepting reconnects. Worth building a small
+  network-side diagnostic tool (separate machine on the same
+  LAN as the ATEM) to confirm whether the lockout is per-key or
+  destination-wide. Listed in the next-session prompt below.
+
+### Session 3 fixes (commits `ce0f617` → `6529cae`, 2026-04-26 PM)
+
+**NDI direct-ingest now works end-to-end with live in-app preview.**
+Verified streaming a 1080p HEVC/H.264 stream from iPhone NDICAM
+through the patchbay into both a local SRT loopback (clean) and
+a real ATEM destination at 6+ Mbps with the preview pane painting
+live JPEG snapshots at ~2 Hz.
+
+What landed:
+
+- **Stride-strip in `ndi_capture.rs`.** grafton-ndi's
+  `VideoFrame.data` is the raw NDI buffer, allowed to use a
+  per-row stride larger than `width*bpp` for SIMD alignment.
+  FFmpeg's rawvideo demuxer expects tight frames. New
+  `pack_frame` helper memcpys row-by-row when stride > expected;
+  passthrough when tight. iPhone NDICAM at 720p is naturally
+  tight (1280*4 = 5120) so the slow path never fires there, but
+  it's load-bearing for any sender that pads (most desktop NDI
+  tools at non-power-of-two widths).
+- **Per-second NDI telemetry.** `run_capture_loop` now logs
+  sent / empty / errors / channel-cap-remaining each second.
+  Diagnoses "frames not flowing" without unwinding the call
+  stack. First-frame log dumps width/height/pixel_format/stride/
+  data_len/expected_packed so probe-time anomalies are visible.
+- **NDI source upscale.** ATEM hardware decoders only accept
+  the resolution they advertise. NDICAM is 720p; ATEM Mini
+  Extreme expects 1080p. New `video_filter: Option<String>` on
+  `StreamPlan` threads `-vf scale=W:H:flags=lanczos` into the
+  FFmpeg cmd ONLY when source dims differ from configured
+  `video_mode`. Other source paths (AVF, pipe) keep the
+  v0.1.0-parity plain `-map` mapping that the bug-fix bundle
+  restored.
+- **NDI preview is live.** /api/preview already served JPEGs
+  via grafton-ndi's `encode_jpeg` every 15 frames; the JS UI
+  now polls it at 2 Hz and paints into a `position:absolute`
+  `<img>` that overlays the SMPTE bars. Took several rounds to
+  nail down:
+  - CSS `[hidden] { display: none !important }` so `.bars` and
+    `.preview-message` actually hide when JS sets `.hidden = true`
+    (their `display: flex` rules had been overriding the
+    user-agent `[hidden]` rule of equal specificity — silently
+    broken since v0.1.0; only revealed by the new NDI img).
+  - Auto-start the poll from `/api/state`, not just on tile
+    click, so a user landing in NDI source via session-restore
+    + Start sees preview without needing to re-click the tile.
+  - `previewKey` reset in `stopPreview` so the auto-start
+    dedup check is self-healing if anything kills the timer.
+  - Promoted the silent `catch (_e)` in the tick to
+    `console.error` so future poll-loop bugs surface immediately.
+- **HTTP `Cache-Control: no-cache`** on `/static/*` plus
+  re-read `index.html` on every request rather than caching at
+  boot. WebView was happily serving stale JS/CSS for minutes
+  after edits during dev iteration; both fixes together mean
+  plain Cmd-R reflects current disk state.
+- **UI cleanups.** Removed the duplicate per-tile relay-config
+  panels and the duplicate "SRT Advanced" details card (which
+  had duplicated `srt-mode` / `srt-latency` / `srt-listen-port` /
+  `streamid-override` / `streamid-legacy` IDs and triggered a
+  duplicate-id browser warning). Removed the SRT/RTMP receiver
+  tiles from the source gallery — the receive-stream wizard
+  below the gallery is now the single canonical "I want this
+  to be a server" UI, restyled as a high-contrast green CTA.
+  Audio dropdown got an accent border + larger label so it
+  reads as the audio-source control rather than a passive
+  read-only field. Pipe/URL helper clarified with categorized
+  examples (RTSP / HLS / named pipe / UDP). Demo-app disclaimer
+  moved to a quiet dashed-rule strip just above the credit line.
+  Credit reworded to mention MIT / GitHub.
+- **Refresh button** in the topbar (clears caches +
+  `location.reload`). **Cmd-R / F5 keybind** in JS — Tauri
+  WebView ships with no menu bar and no built-in reload
+  shortcut.
+- **Info.plist for production builds.** New
+  `src-tauri/Info.plist` with `NSCameraUsageDescription`,
+  `NSMicrophoneUsageDescription`, `NSLocalNetworkUsageDescription`.
+  Bundled by `cargo tauri build`, so the production .app
+  prompts for camera/mic. `cargo tauri dev` still doesn't have
+  these because the dev binary isn't bundled — see "Open issues
+  from Session 3" below.
+
+### Open issues from Session 3
+
+- **Camera (FaceTime / connected iPhone) preview unavailable
+  in `cargo tauri dev`.** macOS WKWebView's `getUserMedia` path
+  needs the parent app's Info.plist with
+  `NSCameraUsageDescription`. The dev binary isn't bundled so
+  no Info.plist is around it; macOS silently denies camera
+  access without showing a prompt. The Info.plist additions
+  land properly in `cargo tauri build` — production .app DOES
+  prompt and DOES work (untested in Session 3 because dylib
+  bundling needs to land first). Workarounds for dev: open
+  http://127.0.0.1:8090 in **Safari** (Safari has its own
+  Info.plist with camera descriptions); OR launch
+  `cargo tauri dev` from the user's own Terminal so the
+  FFmpeg-AVF subprocess inherits Terminal's TCC grant for
+  STREAMING (browser preview still unavailable).
+  - The next-session prompt proposes a server-side preview
+    path (FFmpeg snapshots a JPEG every ~500ms when source is
+    AVF, served via the same /api/preview endpoint NDI uses)
+    that would make in-app preview work for cameras in dev
+    mode AND in production .app, regardless of WebView
+    permission state.
+- **NDI dylib bundling NOT in the .app yet.** Same as before
+  Session 3 — `cargo tauri build` produces a Hardened-runtime
+  .app that crashes on launch with `Library not loaded:
+  @rpath/libndi.dylib`. Fix: `bundle.macOS.frameworks` +
+  `install_name_tool`. Until this lands, **standalone .app
+  testing is broken for NDI features**.
+- **Production .app NOT yet rebuilt + tested with Info.plist
+  additions.** Need to do this and verify camera/mic permission
+  prompts surface correctly + that NDI dylib bundling fix lands
+  before the .app is usable end-to-end.
+- **Mac signing secrets aren't uploaded.** Same as before
+  Session 3.
+- **Notarization deferred.** Same as before Session 3.
+
+### Session 4 priorities (next pickup)
+
+User-stated priorities, in roughly intended order. Most are
+parallelizable and the user is fine with picking the right
+one to start with based on what's quickest to validate.
+
+1. **Hardware-accelerated encoding (Apple Silicon VideoToolbox).**
+   NDI streams in particular are CPU-intensive at the moment
+   because libx264 / libx265 run on CPU at preset=veryfast. On
+   M-series Macs, FFmpeg ships with `h264_videotoolbox` and
+   `hevc_videotoolbox` encoders that go through the Apple ANE +
+   GPU. Likely a small change in `streamer.rs build_ffmpeg_cmd`:
+   detect macOS, swap `-c:v libx264/libx265` for the
+   `*_videotoolbox` variants, drop `-x264-params` / `-x265-params`
+   (videotoolbox has its own knobs like `-allow_sw 0`,
+   `-realtime true`, `-profile:v main`). Bitrate / GOP / no-bframes
+   flags carry over. Verify the BMD streamid handshake still
+   accepts the resulting NAL unit pattern (the BMD parity work
+   from the bug-fix bundle was against libx264; videotoolbox
+   produces slightly different SPS/PPS).
+   - Check: `ffmpeg -hide_banner -encoders | grep videotoolbox`
+   - On Windows: `h264_qsv` / `h264_amf` / `h264_nvenc` depending
+     on GPU vendor; defer to a later cycle unless Windows test
+     forces the issue.
+2. **Pre-stream live preview button.** Currently NDI preview
+   starts the moment a tile is clicked (poll begins, but only
+   shows JPEGs once an NDI stream is actually running and the
+   capture loop has encoded one). For cameras / pipes / SRT
+   listeners there's no preview at all without streaming. User
+   wants a "Preview" button next to "Start Stream" that:
+   - Spins up a low-bandwidth NDI receiver for NDI sources
+     (`ReceiverBandwidth::Lowest`), or a server-side FFmpeg
+     snapshot loop for AVF / pipe / relay sources
+   - Exposes JPEGs through `/api/preview` the same way the
+     current streaming path does
+   - Tears down cleanly when the user hits Stop Preview OR
+     starts a real stream
+   - **Must not interfere with the streaming path** — the
+     real Start Stream tears the preview down before
+     touching the encoder, so the SDK handle / AVF device
+     isn't double-claimed.
+   See "Option B: select-time preview" in the Session 3
+   conversation for the design sketch.
+3. **Dante Virtual Sound Card audio with channel selection.**
+   Dante VSC shows up in the AVF audio device list (the user
+   confirmed this works as a generic audio source), but right
+   now we just pick channel 1+2. Real Dante use cases need to
+   route specific receive channels (often 4 / 8 / 16 / 64 of
+   them) onto the L/R of the outgoing stream. FFmpeg's
+   `pan` audio filter can do this if we know the source
+   layout; e.g.
+   `-af pan="stereo|c0=c4|c1=c5"` to pull Dante channels 5+6
+   as the stereo output. UI: when audio source name matches
+   `Dante` (or the user's renamed VSC name), expose a small
+   channel picker — start with two `<select>`s for L/R that
+   list 1..N channels (N = device's reported channel count).
+   - Probe channels via `ffmpeg -f avfoundation -list_devices
+     true -i ""` or by looking at the audio device's input
+     channel count (CoreAudio API → `kAudioDevicePropertyStreamConfiguration`).
+   - State: new `audio_pan_l: u8` / `audio_pan_r: u8` fields.
+4. **Test the Windows app** in earnest. CI builds NSIS
+   installers but the only Windows test in v0.1.0 was
+   commit `b9f1995`-era. v0.2.0 hasn't been driven through
+   real Windows hardware. Likely surface area: DirectShow
+   device enumeration, the FFmpeg path resolver
+   (`%LOCALAPPDATA%/...` rather than `/opt/homebrew`), the
+   NDI dylib path (`Processing.NDI.Lib.x64.dll` vs
+   `libndi.dylib`), and Tauri's Windows window-title /
+   acrylic theming.
+5. **Notarize + release v0.2.0.** Sequence:
+   a. Resolve NDI dylib bundling (issue #2 from Session 3).
+   b. User exports Developer ID cert via Keychain Access
+      → `gh secret set` for `MACOS_CERTIFICATE_P12`,
+      `MACOS_CERTIFICATE_PWD`, `MACOS_KEYCHAIN_PWD`,
+      `MACOS_SIGN_IDENTITY`.
+   c. Add `xcrun notarytool submit ... --wait` + `xcrun
+      stapler staple` to `release.yml`.
+   d. Tag `v0.2.0-alpha.4` (or `v0.2.0-beta.1` if confidence
+      is high). CI builds, signs, notarizes, attaches to
+      release.
+   e. Smoke-test the published .dmg on a clean Mac
+      (or a separate user account) to verify camera
+      permission prompt + NDI works without `NDI Tools`
+      pre-installed.
+6. **Merge `tauri-rewrite` into `main`.** `main` is currently
+   frozen at `v0.1.0-alpha.1` (Python). The Rust rewrite is
+   the new product; `main` should reflect that. Squash-merge
+   or fast-forward depending on whether the user wants the
+   per-commit history visible on `main`. Don't delete
+   `main`'s v0.1.0 tag — keep `v0.1.0-alpha.1` reachable for
+   anyone hitting the older binary.
+7. **ATEM network diagnostic tool.** User reports the ATEM
+   stops accepting new SRT connections after a few stream
+   tests. Build a small standalone tool (separate
+   binary/script in `tools/` or its own repo) that runs on
+   a peer machine on the same LAN as the ATEM and reports:
+   - Active SRT sessions on the ATEM (libsrt's
+     `srt_getsockstate` against a known SRT control port,
+     OR passive packet capture of port 1935 traffic via
+     pcap/tshark)
+   - Bandwidth per session, source IP, time connected
+   - Recent connection attempts (success/reject + reason)
+   - Whether a key-specific lock is held (the receiver-state
+     lockout from issue 3)
+   Output as a tiny TUI or a single-page web UI. Pure Rust
+   feels right (libsrt-rs / pcap crate). Could also start
+   simpler: a `tshark -i en0 'port 1935' -V` wrapper with
+   light parsing.
 
 ### v0.2.0 release attempt — `tauri-rewrite` tags
 
@@ -531,36 +761,44 @@ device-list cache. Low priority.
 - SRT/RTMP relay sources (`srt_listen` / `rtmp_listen`) — turn the
   patchbay into a server for OBS / Larix / iPhone to publish into.
 
-## Latest commits
+## Latest commits (v0.2.0 / `tauri-rewrite`)
+
+Run `git log --oneline -20 tauri-rewrite` for the live list.
+Session 3 added (newest first):
 
 ```
-b29b9f6 Fix two AVFoundation source bugs surfaced by NDI Virtual Camera
-e6eae96 Make NDI sender clicks discoverable + actionable
-8e9f52e GH Actions: CI smoke + tag-driven release pipeline
-390594a Redesign Destination as a top-of-column wizard
-607271d Port-walk fallback so a stale instance can't silently brick a launch
-5bbaf59 Fix dshow parser for modern FFmpeg output format
-b9f1995 Fix three Windows-build bugs found on first real run
-d671b51 Add macOS PyInstaller build pipeline (signed .dmg)
-75b9304 Add SRT/RTMP relay sources — turn the patchbay into a server
-1f56183 Initial commit: ATEM IP Patchbay v0.1.0
+6529cae ndi preview: stop swallowing tick errors + reset previewKey on stopPreview
+677d7ad ndi preview: per-tick diagnostic log
+f471f35 fix: re-read index.html on each request + remove duplicate SRT advanced block
+7600ad7 ui: tone down disclaimer + reword credit with MIT/GitHub line
+e6b4c48 ui: drop SRT/RTMP receive tiles, restyle wizard as prominent green CTA
+5d9f90f ui: remove duplicate relay panels, refresh button, prominent audio, demo-app text relocation
+14773a7 ui: NDI preview defenses against stale CSS cache + diagnostic logs
+6677bf9 ui: auto-start NDI preview poll from state, not just from tile click
+a01bc1a http: send Cache-Control: no-cache on /static/*
+d9d9202 ui: NDI tile + preview render bugs (CSS hidden, img overlay, isActive)
+e5ab4c0 ui: bind Cmd/Ctrl-R + F5 to location.reload() for the Tauri WebView
+c9a3057 ui: keep NDI preview poll alive when waiting-message hint shows
+754e741 streamer: scale NDI sources to the configured video_mode
+ce0f617 ndi_capture: strip line-stride padding, add per-second telemetry
+51c1158 CLAUDE.md: correct NDI issue — discovery works, receive doesn't
 ```
 
 ## What's next (priority order if picking up cold)
 
-1. **Fix NDI Virtual Camera streaming** — see "Currently-open issues #1".
-   Either find the missing FFmpeg flag / pixel-format / permission
-   piece, or definitively rule it out as a code bug and improve the
-   "no frames received" UX so the user understands they need to bind
-   NDI Virtual Input to NDICAM in its menu bar.
-2. **Notarize the Mac `.dmg`** so first-launch downloaders don't get
-   the Gatekeeper warning. One-time `xcrun notarytool
-   store-credentials` setup + a build-script step.
-3. **Cut `v0.1.0-alpha.1` tag** (`git tag v0.1.0-alpha.1 && git push
-   --tags`) and let the GH Actions release pipeline produce both
-   binaries.
-4. Polish: format-probe caching; placeholder-URL warning; default-
-   device names at boot.
+See **"Session 4 priorities"** under the v0.2.0 direction
+section above for the full list. Quick summary:
+
+1. Hardware-accelerated encoding (Apple Silicon VideoToolbox)
+   to drop NDI encoder CPU load.
+2. Pre-stream live preview button (NDI low-bandwidth receiver
+   or server-side AVF JPEG snapshot loop).
+3. Dante VSC channel selection via FFmpeg `pan` filter.
+4. Test the Windows .exe build for real.
+5. NDI dylib bundling → notarize → release v0.2.0.
+6. Merge `tauri-rewrite` into `main`.
+7. Build an ATEM-side network diagnostic tool to characterise
+   the receiver-lockout bug.
 
 ## v0.2.0 candidate features
 
