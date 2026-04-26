@@ -213,6 +213,41 @@ impl EncoderState {
         }
     }
 
+    /// Capture a read-only view of just the source-relevant fields.
+    /// Avoids exposing the inner RwLock and lets sources::resolve_source
+    /// build an FFmpeg command without holding the lock.
+    pub fn source_selection(&self) -> SourceSelection {
+        let inner = self.inner.read().unwrap();
+        let dimensions = video_dimensions(&inner.video_mode);
+        SourceSelection {
+            source_id: inner.source_id.clone(),
+            dimensions,
+            av_video_index: inner.av_video_index,
+            av_audio_index: inner.av_audio_index,
+            av_video_name: inner.av_video_name.clone(),
+            av_audio_name: inner.av_audio_name.clone(),
+            pipe_path: inner.pipe_path.clone(),
+            relay_bind_host: inner.relay_bind_host.clone(),
+            relay_srt_port: inner.relay_srt_port,
+            relay_srt_latency_us: inner.relay_srt_latency_us,
+            relay_srt_passphrase: inner.relay_srt_passphrase.clone(),
+            relay_rtmp_port: inner.relay_rtmp_port,
+            relay_rtmp_app: inner.relay_rtmp_app.clone(),
+            relay_rtmp_key: inner.relay_rtmp_key.clone(),
+        }
+    }
+
+    /// Set the AVFoundation / DirectShow defaults from a fresh device
+    /// scan. Called once at boot from Tauri's setup() so the source
+    /// dropdowns have something selected on first launch.
+    pub fn apply_default_devices(&self, video_index: i32, video_name: &str, audio_index: i32, audio_name: &str) {
+        let mut inner = self.inner.write().unwrap();
+        inner.av_video_index = video_index;
+        inner.av_video_name = video_name.to_string();
+        inner.av_audio_index = audio_index;
+        inner.av_audio_name = audio_name.to_string();
+    }
+
     /// Apply a partial settings update from the HTTP API. Each `Some`
     /// field overwrites the corresponding inner field; `None` leaves it
     /// unchanged. Validation happens here — unknown video modes / codecs
@@ -426,6 +461,30 @@ fn round1(x: f32) -> f32 {
 
 fn round2(x: f32) -> f32 {
     (x * 100.0).round() / 100.0
+}
+
+// ---- Source selection view -------------------------------------------------
+//
+// A frozen snapshot of just the source-relevant fields, so sources::
+// resolve_source can build an FFmpeg command without holding the
+// EncoderState lock during the (slow, IO-heavy) device probe.
+
+#[derive(Debug, Clone)]
+pub struct SourceSelection {
+    pub source_id: String,
+    pub dimensions: (u32, u32, u32),
+    pub av_video_index: i32,
+    pub av_audio_index: i32,
+    pub av_video_name: String,
+    pub av_audio_name: String,
+    pub pipe_path: String,
+    pub relay_bind_host: String,
+    pub relay_srt_port: u16,
+    pub relay_srt_latency_us: u32,
+    pub relay_srt_passphrase: String,
+    pub relay_rtmp_port: u16,
+    pub relay_rtmp_app: String,
+    pub relay_rtmp_key: String,
 }
 
 // ---- Settings update DTO ---------------------------------------------------

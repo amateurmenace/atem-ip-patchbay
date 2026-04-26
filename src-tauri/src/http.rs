@@ -69,7 +69,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
         .route("/api/log", get(api_log_stub))
-        .route("/api/devices", get(api_devices_stub))
+        .route("/api/devices", get(api_devices))
         .route("/api/discover", get(api_discover_stub))
         .route("/api/ndi-senders", get(api_ndi_senders_stub))
         .route("/api/start", post(api_start_stub))
@@ -117,20 +117,13 @@ async fn api_log_stub() -> impl IntoResponse {
     })
 }
 
-/// Phase 2 will replace this with real AVFoundation / DirectShow scan output.
-#[derive(Serialize)]
-struct DevicesStub {
-    video: Vec<String>,
-    audio: Vec<String>,
-    backend: String,
-}
-
-async fn api_devices_stub(Query(_q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    Json(DevicesStub {
-        video: vec![],
-        audio: vec![],
-        backend: "unimplemented (Phase 2)".into(),
-    })
+/// AVFoundation (Mac) / DirectShow (Win) device scan, served from the
+/// 60-second-TTL cache in [`crate::device_scanner`]. `?force=1` bypasses
+/// the cache.
+async fn api_devices(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
+    let devs = crate::device_scanner::list_capture_devices(force);
+    Json(devs)
 }
 
 /// Phase 4 will replace these with real NDI discovery via the

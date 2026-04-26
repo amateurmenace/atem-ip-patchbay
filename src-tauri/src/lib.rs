@@ -1,4 +1,7 @@
+mod device_scanner;
+mod ffmpeg_path;
 mod http;
+mod sources;
 mod state;
 mod xml;
 
@@ -25,7 +28,16 @@ pub fn run() {
             }
 
             let encoder = Arc::new(EncoderState::new());
+
+            // Tell the FFmpeg path resolver where the bundled sidecar
+            // lives. Phase 9 adds bundle.externalBin; for now this just
+            // primes the lookup so dev builds prefer $PATH.
+            if let Ok(resource_dir) = app.handle().path().resource_dir() {
+                ffmpeg_path::set_resource_root(resource_dir);
+            }
+
             load_default_xml_files(app.handle(), &encoder);
+            apply_default_devices_at_boot(&encoder);
 
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
@@ -74,6 +86,26 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Run an initial AVF / DirectShow scan and pre-select the most
+/// reasonable video + audio defaults so the source dropdowns aren't
+/// empty on first launch. Mirrors run.py's boot-time scan.
+fn apply_default_devices_at_boot(encoder: &EncoderState) {
+    let devs = device_scanner::list_capture_devices(true);
+    let v = device_scanner::find_default_video(&devs);
+    let a = device_scanner::find_default_audio(&devs);
+    if v.is_none() && a.is_none() {
+        return;
+    }
+    let v_index = v.map(|d| d.index).unwrap_or(0);
+    let v_name = v.map(|d| d.name.clone()).unwrap_or_default();
+    let a_index = a.map(|d| d.index).unwrap_or(-1);
+    let a_name = a.map(|d| d.name.clone()).unwrap_or_default();
+    log::info!(
+        "default devices picked: video=[{v_index}] {v_name:?}, audio=[{a_index}] {a_name:?}"
+    );
+    encoder.apply_default_devices(v_index, &v_name, a_index, &a_name);
 }
 
 /// Look for an existing config dir alongside the binary (prod path) or
