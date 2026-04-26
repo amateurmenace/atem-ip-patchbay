@@ -896,6 +896,30 @@ button.big { padding: 14px 18px; font-size: 14px; }
 }
 .paste-status.error { background: rgba(255, 77, 77, 0.10); border-color: rgba(255, 77, 77, 0.45); color: #ffb6a6; }
 
+/* Helper line below an input — used in the Destination wizard's Address
+   field to call out the port-matters gotcha and the expected URL shape.
+   Renders smaller and lower-contrast than the label so it doesn't fight
+   the input visually. */
+.field-help {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted, #9aa1ad);
+  font-weight: 400;
+}
+.field-help code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: #b6e1c1;
+}
+.field-help strong {
+  color: #e6e6ea;
+  font-weight: 600;
+}
+
 .dropzone {
   display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 6px;

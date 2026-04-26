@@ -181,14 +181,47 @@ impl EncoderState {
     /// - `Some(true)`: always become current (UI imports clear `custom_url`
     ///   so the new service drives the destination).
     /// - `Some(false)`: register but don't switch.
+    ///
+    /// Disambiguation: if the loaded service's `name` collides with one
+    /// already in the registry (common when a user has multiple XMLs
+    /// pointing at the same ATEM that all use service.name="ATEM Mini
+    /// Extreme ISO G2"), the new entry's name is suffixed with the
+    /// XML filename stem so both show up as separate dropdown entries.
     pub fn add_service_from_xml(&self, path: &Path, make_active: Option<bool>) -> Result<()> {
-        let svc = load_service(path)?;
+        let mut svc = load_service(path)?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file");
+        {
+            let inner = self.inner.read().unwrap();
+            if inner.services.contains_key(&svc.name) {
+                svc.name = format!("{} [{}]", svc.name, stem);
+            }
+        }
         self.register_service(svc, make_active);
         Ok(())
     }
 
     pub fn add_service_from_xml_text(&self, text: &str, make_active: bool) -> Result<()> {
-        let svc = load_service_text(text)?;
+        let mut svc = load_service_text(text)?;
+        // Same disambiguation as the file path; pasted text has no
+        // filename so we use a "(pasted N)" suffix where N is the
+        // first integer that doesn't collide.
+        {
+            let inner = self.inner.read().unwrap();
+            if inner.services.contains_key(&svc.name) {
+                let mut n = 2;
+                loop {
+                    let candidate = format!("{} (pasted {n})", svc.name);
+                    if !inner.services.contains_key(&candidate) {
+                        svc.name = candidate;
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+        }
         self.register_service(svc, Some(make_active));
         Ok(())
     }

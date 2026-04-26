@@ -43,21 +43,31 @@
   <!-- ========================================================== -->
   <section class="hero">
     <div class="hero-headline">
-      Turn any video source into a remote input that streams into your
-      <strong>ATEM Extreme G2</strong>, <strong>Television Studio</strong>, or
-      <strong>Streaming Decoder</strong> over ethernet via SRT.
+      Turn multiple worldwide video sources, from iPhones to Drones to
+      <strong>NDI</strong>, into remote inputs that stream directly into your
+      <strong>ATEM Switcher</strong> or <strong>Blackmagic Streaming Decoders / Bridges</strong>
+      over the single ethernet cable. Even route Dante audio onto a video source
+      that maps directly to one of your switcher's SDI or HDMI inputs!
     </div>
     <div class="hero-cols">
       <div class="hero-col">
         <div class="hero-col-title">What it does</div>
         <p>
-          NDI, SDI, HDMI, non-Blackmagic SRT and RTMP streams can all be
-          converted into the special Blackmagic flavor of SRT using this app,
-          for free. This is more of a demo app showing what is now possible,
-          a proof of concept, and should only be used in real productions at
+          If you have an <strong>ATEM Mini Extreme ISO G2</strong>,
+          <strong>Television Studio HD8 ISO</strong>, or an upcoming qualifying
+          ST2110 ATEM Switcher, you can change a local input into a remote
+          input that can be sent over the public Internet directly to your
+          switcher from anywhere in the world. Blackmagic Streaming Decoder
+          and Streaming Bridges can also receive sources from anywhere with a
+          stable enough internet connection (~2.5–3.5 Mbps upload), but
+          previously this was limited to just other Blackmagic hardware. Now,
+          NDI, SDI, HDMI, non-Blackmagic SRT and RTMP streams, etc. can all
+          be converted into the special Blackmagic flavor of SRT using this
+          app. This is more of a demo app showing what is now possible, a
+          proof of concept, and should only be used in real productions at
           your own risk. It is free forever, until it either gets stopped by
-          Blackmagic or they fully embrace opening up their stream decoding
-          ecosystem.
+          Blackmagic or they fully embrace opening up their powerful stream
+          decoding ecosystem.
         </p>
       </div>
       <div class="hero-col">
@@ -171,7 +181,8 @@
 
           <div class="dest-row">
             <label>Address
-              <input id="dest-address" type="text" placeholder="your-atem.local:1935  or  srt://1.2.3.4:1935" autocomplete="off" />
+              <input id="dest-address" type="text" placeholder="srt://your-atem-or-relay:1935" autocomplete="off" />
+              <span class="field-help">Format: <code>srt://your-atem-or-relay:port</code> (default port is <strong>1935</strong>; check your ATEM's Streaming Bridge settings — picking the wrong port is the #1 reason streams don't reach the switcher).</span>
             </label>
             <label>Stream key
               <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" autocomplete="off" />
