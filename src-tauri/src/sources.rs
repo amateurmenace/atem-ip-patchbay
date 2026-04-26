@@ -116,19 +116,41 @@ pub fn avfoundation(
         } else {
             description.to_string()
         },
-        ffmpeg_input_args: vec![
-            "-f".into(),
-            "avfoundation".into(),
-            "-framerate".into(),
-            fps_str.clone(),
-            "-video_size".into(),
-            actual_size,
-            "-capture_cursor".into(),
-            "1".into(),
-            "-i".into(),
-            token,
-        ],
-        combined_av: true,
+        ffmpeg_input_args: {
+            let mut args = vec![
+                "-f".into(),
+                "avfoundation".into(),
+                "-framerate".into(),
+                fps_str.clone(),
+                "-video_size".into(),
+                actual_size,
+                "-capture_cursor".into(),
+                "1".into(),
+                "-i".into(),
+                token,
+            ];
+            // Video-only AVF inputs (screen capture, plain camera
+            // when no audio device is paired in the token, virtual
+            // cameras without mic emulation) have no audio stream,
+            // so the streamer's `-map 0:a:0` would fail with
+            // "Stream map '' matches no streams" the moment the
+            // pipeline starts. Append a silent lavfi input as
+            // track 1 and downstream combined_av=false flips the
+            // mapping to `1:a:0`. Cameras WITH a paired audio
+            // device in the token get the combined-AV path as
+            // before — combined_av stays true.
+            let has_paired_audio = !audio_name.is_empty();
+            if !has_paired_audio {
+                args.extend([
+                    "-f".into(),
+                    "lavfi".into(),
+                    "-i".into(),
+                    "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+                ]);
+            }
+            args
+        },
+        combined_av: !audio_name.is_empty(),
         notes: note,
         ..Default::default()
     }
