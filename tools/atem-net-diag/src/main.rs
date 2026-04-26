@@ -89,15 +89,8 @@ fn main() {
         }
         last_state = Some(state_bool);
 
-        // Sleep in 100ms slices so Ctrl-C is responsive even with
-        // long intervals.
-        let mut remaining = cli.interval;
-        while !stop.load(Ordering::Acquire) && remaining > Duration::from_millis(100) {
-            std::thread::sleep(Duration::from_millis(100));
-            remaining = remaining.saturating_sub(Duration::from_millis(100));
-        }
+        std::thread::sleep(cli.interval);
     }
-    println!("[{}] stopped", clock_now());
 }
 
 #[derive(Debug)]
@@ -240,31 +233,7 @@ fn clock_now() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Minimal Ctrl-C handler — uses libc::signal directly so we don't
-/// pull in the `ctrlc` crate for one tiny call. Signal handlers
-/// can only do async-signal-safe work; here we just flip an atomic
-/// flag the main loop checks.
-#[cfg(unix)]
-fn ctrlc_lite<F: Fn() + Send + Sync + 'static>(f: F) {
-    use std::sync::Mutex;
-    static HANDLER: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
-    *HANDLER.lock().unwrap() = Some(Box::new(f));
-    extern "C" fn handle(_sig: i32) {
-        if let Ok(g) = HANDLER.lock() {
-            if let Some(h) = g.as_ref() {
-                h();
-            }
-        }
-    }
-    unsafe {
-        // SIGINT = 2
-        libc::signal(2, handle as usize);
-    }
-}
-
-#[cfg(not(unix))]
-fn ctrlc_lite<F: Fn() + Send + Sync + 'static>(_f: F) {
-    // Windows: skip the handler. Ctrl-C terminates the process
-    // anyway and the only state we'd lose is a final "stopped" log
-    // line, which is fine.
-}
+// Ctrl-C handling intentionally left to the OS — terminating the
+// process at SIGINT is exactly the right behavior for a probe
+// loop. No need to pull in the `ctrlc` crate or a libc dep for a
+// graceful "stopped" log line.

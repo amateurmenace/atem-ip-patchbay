@@ -43,3 +43,9 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/Cargo.lock.bak
+
+# Stand-alone tools — each has its own Cargo build, but the build
+# artefacts and the per-tool Cargo.lock (no shared workspace lock)
+# stay out of source control.
+tools/*/target/
+tools/*/Cargo.lock
