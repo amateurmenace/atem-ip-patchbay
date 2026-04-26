@@ -129,6 +129,18 @@ struct Inner {
     av_audio_index: i32,
     av_video_name: String,
     av_audio_name: String,
+    /// "auto" | "custom" | "silent". Drives the Audio Mixer card on
+    /// the UI side and the audio routing on the streamer side. "auto"
+    /// (the default) tells the streamer to use the video source's
+    /// embedded audio — for AVF combined cams that's the same input;
+    /// for NDI, pipe, relay it's whatever audio the source exposes.
+    /// "custom" pulls audio from the AVF device named by
+    /// av_audio_index/av_audio_name, replacing the source's audio.
+    /// "silent" forces a muted output regardless of source.
+    audio_mode: String,
+    /// True -> downmix the encoded AAC stream to mono via `-ac 1`.
+    /// Default false (stereo). Independent of audio_mode.
+    audio_output_mono: bool,
     /// 1-indexed channel numbers routed to the L/R of the outgoing
     /// stereo AAC stream when the active audio device is multi-channel
     /// (Dante VSC, CoreAudio aggregate). Defaults 1 and 2 give plain
@@ -194,6 +206,8 @@ impl EncoderState {
                 av_audio_index: -1,
                 av_video_name: String::new(),
                 av_audio_name: String::new(),
+                audio_mode: "auto".into(),
+                audio_output_mono: false,
                 audio_pan_l: 1,
                 audio_pan_r: 2,
                 pipe_path: String::new(),
@@ -323,16 +337,30 @@ impl EncoderState {
     /// Capture a read-only view of just the source-relevant fields.
     /// Avoids exposing the inner RwLock and lets sources::resolve_source
     /// build an FFmpeg command without holding the lock.
+    ///
+    /// audio_mode adjusts what the source resolver sees: when the user
+    /// has selected "auto" or "silent", we report av_audio_index = -1
+    /// so the resolver builds a combined-AV / source-audio path
+    /// regardless of what's stored in inner.av_audio_index. The stored
+    /// value is preserved so the user can flip back to "custom" and
+    /// recover their picked device without re-selecting.
     pub fn source_selection(&self) -> SourceSelection {
         let inner = self.inner.read().unwrap();
         let dimensions = video_dimensions(&inner.video_mode);
+        let custom_audio = inner.audio_mode.as_str() == "custom";
+        let av_audio_index = if custom_audio { inner.av_audio_index } else { -1 };
+        let av_audio_name = if custom_audio {
+            inner.av_audio_name.clone()
+        } else {
+            String::new()
+        };
         SourceSelection {
             source_id: inner.source_id.clone(),
             dimensions,
             av_video_index: inner.av_video_index,
-            av_audio_index: inner.av_audio_index,
+            av_audio_index,
             av_video_name: inner.av_video_name.clone(),
-            av_audio_name: inner.av_audio_name.clone(),
+            av_audio_name,
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
             relay_bind_host: inner.relay_bind_host.clone(),
@@ -454,6 +482,14 @@ impl EncoderState {
         if let Some(v) = update.audio_pan_r {
             inner.audio_pan_r = v.max(1);
         }
+        if let Some(v) = &update.audio_mode {
+            if matches!(v.as_str(), "auto" | "custom" | "silent") {
+                inner.audio_mode = v.clone();
+            }
+        }
+        if let Some(v) = update.audio_output_mono {
+            inner.audio_output_mono = v;
+        }
         if let Some(v) = &update.pipe_path {
             inner.pipe_path = v.clone();
         }
@@ -573,6 +609,8 @@ impl EncoderState {
             av_audio_index: inner.av_audio_index,
             av_video_name: inner.av_video_name.clone(),
             av_audio_name: inner.av_audio_name.clone(),
+            audio_mode: inner.audio_mode.clone(),
+            audio_output_mono: inner.audio_output_mono,
             audio_pan_l: inner.audio_pan_l,
             audio_pan_r: inner.audio_pan_r,
             pipe_path: inner.pipe_path.clone(),
@@ -757,6 +795,9 @@ pub struct SettingsUpdate {
     pub av_video_name: Option<String>,
     pub av_audio_index: Option<i32>,
     pub av_audio_name: Option<String>,
+    // Audio Mixer card — 2026-04-26.
+    pub audio_mode: Option<String>,
+    pub audio_output_mono: Option<bool>,
     // Multi-channel audio L/R routing (Dante VSC, CoreAudio aggregate).
     pub audio_pan_l: Option<u8>,
     pub audio_pan_r: Option<u8>,
@@ -826,6 +867,8 @@ pub struct Snapshot {
     pub av_audio_index: i32,
     pub av_video_name: String,
     pub av_audio_name: String,
+    pub audio_mode: String,
+    pub audio_output_mono: bool,
     pub audio_pan_l: u8,
     pub audio_pan_r: u8,
     pub pipe_path: String,

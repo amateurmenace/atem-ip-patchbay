@@ -52,12 +52,17 @@ pub struct StreamPlan {
     /// plain-mapping behavior the bug-fix bundle restored.
     pub video_filter: Option<String>,
     /// Optional `-af` filter expression applied to the mapped audio
-    /// stream. Currently only set when the source is a multi-channel
-    /// AVF audio device (Dante VSC, CoreAudio aggregate) — emits a
-    /// `pan=stereo|c0=cN|c1=cM` filter so the user can route a
-    /// specific channel pair to the outgoing stereo AAC stream
-    /// instead of FFmpeg auto-downmixing all N channels.
+    /// stream. Set in two cases (and chained when both apply):
+    /// - Multi-channel AVF audio device (Dante VSC, CoreAudio
+    ///   aggregate) -> `pan=stereo|c0=cN|c1=cM` so the user picks
+    ///   which channel pair goes to L/R.
+    /// - audio_mode == "silent" -> `volume=0` so the encoded AAC
+    ///   stream is muted regardless of source.
     pub audio_filter: Option<String>,
+    /// True when the user has set Audio Mixer -> Mono. Drives the
+    /// `-ac 1` arg on the AAC encoder so the output is a single
+    /// summed channel instead of stereo.
+    pub audio_output_mono: bool,
 }
 
 impl StreamPlan {
@@ -354,6 +359,7 @@ impl Streamer {
             video_codec: snap.video_codec.to_lowercase(),
             video_filter: None,
             audio_filter,
+            audio_output_mono: snap.audio_output_mono,
         })
     }
 
@@ -572,12 +578,17 @@ impl Streamer {
             cmd.push("-af".into());
             cmd.push(filter.into());
         }
-        // Audio — AAC-LC 48k stereo.
+        // Audio — AAC-LC 48k. Channels: stereo by default, mono
+        // (single summed channel) when the user has set Audio Mixer
+        // -> Mono. Real BMD devices accept either, so this is purely
+        // a content choice for the operator (e.g. radio-style talk
+        // streams where mono saves bitrate for the same intelligibility).
+        let ac = if plan.audio_output_mono { "1" } else { "2" };
         cmd.extend([
             "-c:a".into(), "aac".into(),
             "-b:a".into(), plan.audio_bitrate.to_string(),
             "-ar".into(), "48000".into(),
-            "-ac".into(), "2".into(),
+            "-ac".into(), ac.into(),
         ]);
 
         // Container + transport.
@@ -849,32 +860,46 @@ fn parse_progress(line: &str) -> Option<Progress> {
     }
 }
 
-/// Build an FFmpeg `-af` audio-filter expression when the active
-/// audio source is a multi-channel device that needs explicit L/R
-/// channel selection. Returns None for normal stereo mics + non-AVF
-/// sources (NDI, test pattern, pipe, relay) where FFmpeg's default
-/// channel handling already does the right thing.
+/// Build an FFmpeg `-af` audio-filter expression. Two reasons a
+/// filter gets emitted (chained when both apply):
 ///
-/// The detection is name-based: any AVF audio device whose name
-/// matches "dante" or "aggregate" gets the pan filter applied.
-/// Without it, FFmpeg auto-downmixes all N channels into stereo
-/// using its built-in matrix — which mixes everything together
-/// (front+rear+center+LFE) and is rarely what a Dante operator wants.
-/// With it, the user-selected channel pair routes cleanly to L/R.
+/// 1. The active source is an AVF multi-channel audio device
+///    (Dante VSC, CoreAudio aggregate) AND the user is in Custom
+///    audio mode — emits `pan=stereo|c0=cN|c1=cM` so the picked
+///    channel pair goes to L/R instead of FFmpeg auto-downmixing
+///    all N channels. Without this, Dante operators get every
+///    routed channel summed together which is rarely useful.
+///
+/// 2. Audio Mixer mode is "silent" — emits `volume=0` so the
+///    encoded AAC track is muted regardless of source. We keep an
+///    audio track (rather than not encoding one) because BMD
+///    decoders expect to see one in the MPEG-TS PMT.
+///
+/// Returns None when neither condition fires (normal stereo mics,
+/// auto mode, etc.) so FFmpeg's default channel handling applies.
 fn build_audio_filter(snap: &Snapshot) -> Option<String> {
-    if snap.source_id != "avfoundation" {
-        return None;
+    let mut chain: Vec<String> = Vec::new();
+
+    if snap.source_id == "avfoundation" && snap.audio_mode == "custom" {
+        let name = snap.av_audio_name.to_lowercase();
+        if name.contains("dante") || name.contains("aggregate") {
+            // 1-indexed in state (matches user-facing UI), 0-indexed
+            // in FFmpeg. max(1) defends against a UI bug submitting 0.
+            let l = snap.audio_pan_l.max(1) - 1;
+            let r = snap.audio_pan_r.max(1) - 1;
+            chain.push(format!("pan=stereo|c0=c{l}|c1=c{r}"));
+        }
     }
-    let name = snap.av_audio_name.to_lowercase();
-    let is_multichannel = name.contains("dante") || name.contains("aggregate");
-    if !is_multichannel {
-        return None;
+
+    if snap.audio_mode == "silent" {
+        chain.push("volume=0".into());
     }
-    // 1-indexed in state (matches user-facing UI), 0-indexed in
-    // FFmpeg. max(1) defends against a UI bug submitting 0.
-    let l = snap.audio_pan_l.max(1) - 1;
-    let r = snap.audio_pan_r.max(1) - 1;
-    Some(format!("pan=stereo|c0=c{l}|c1=c{r}"))
+
+    if chain.is_empty() {
+        None
+    } else {
+        Some(chain.join(","))
+    }
 }
 
 fn build_rtmp_url(base_url: &str, stream_key: &str) -> String {

@@ -34,6 +34,9 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
+      <button id="kill-orphans" type="button" class="refresh-btn"
+              title="If a previous run crashed or was force-quit, an FFmpeg subprocess can keep streaming to the destination in the background. The Stop button can't reach it (the parent process is gone). This finds and kills any leftover FFmpeg streams from this app."
+              aria-label="Kill orphan FFmpeg streams">✖ Kill orphans</button>
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
@@ -90,15 +93,8 @@
       or they fully embrace opening up their powerful stream decoding
       ecosystem.
     </div>
-    <div class="hero-credit">
-      Made by <a href="https://weirdmachine.org" target="_blank" rel="noopener">Stephen Walter</a>
-      and Claude using public Blackmagic Design Streaming Protocols.
-      Open source under the
-      <a href="https://github.com/amateurmenace/atem-ip-patchbay/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-      —
-      <a href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">source on GitHub</a>;
-      issues and pull requests welcome.
-    </div>
+    <!-- Hero credit moved to the page footer to keep this band tight on the credits-vs-disclaimer
+         distinction. -->
   </section>
 
   <!-- ========================================================== -->
@@ -227,36 +223,77 @@
           <details class="port-fwd-help">
             <summary>How does port forwarding work?</summary>
             <div class="help-body">
-              <p>If your ATEM is at home and you're streaming from
-              somewhere else (a venue, a coffee shop, another office),
-              the stream has to traverse your home router. By default,
-              routers <strong>block unsolicited inbound traffic</strong>
-              — so you need to tell the router to forward SRT/RTMP
-              packets to your ATEM.</p>
+              <p>Wherever your ATEM lives — a home studio, a corporate
+              office, a venue's IT closet, a church multipurpose room —
+              the stream has to traverse the router or firewall sitting
+              in front of it. By default these devices
+              <strong>block unsolicited inbound traffic</strong>, so
+              somebody has to tell the device to forward SRT/RTMP
+              packets to your ATEM. Who that "somebody" is depends on
+              who controls the network.</p>
+
+              <p><strong>If you control the router (home / small office)</strong></p>
               <ol>
-                <li>Open your router's admin page (commonly
+                <li>Open the router's admin page (commonly
                   <code>192.168.1.1</code> or <code>192.168.0.1</code>) —
                   credentials are usually printed on the bottom of the
                   unit.</li>
                 <li>Find <strong>Port Forwarding</strong> (sometimes
-                  under "NAT", "Virtual Server", or "Advanced").</li>
+                  labeled "NAT", "Virtual Server", or "Advanced").</li>
                 <li>Add a rule: forward
                   <strong>UDP port 1935</strong> for SRT (or
                   <strong>TCP port 1935</strong> for RTMP) to your
                   ATEM's local IP (e.g. <code>192.168.1.50</code>).</li>
-                <li>From the venue, point this app at your home's
+                <li>From the remote site, point this app at your home's
                   <strong>public IP</strong> (look it up via
                   <a href="https://api.ipify.org" target="_blank" rel="noopener">api.ipify.org</a>),
                   not the ATEM's local IP.</li>
               </ol>
-              <p class="hint">Some ISPs (mobile carriers, shared
-              apartment-building connections) use
-              <strong>carrier-grade NAT</strong> which silently blocks
-              all inbound traffic regardless of your forwarding rules.
-              Test by pushing from a phone on cellular data: if the
-              stream reaches your ATEM, you're fine; if not, you'll
-              need an SRT relay (a small VPS, Cloudflare TURN, or
-              OvenMediaEngine) to bridge the gap.</p>
+
+              <p><strong>If IT / facilities controls the network (work, venue, church, school)</strong></p>
+              <p>Open a ticket or email IT/AV with everything they need
+              to act on it in one go — guess the answer wrong and
+              you'll bounce twice for clarification:</p>
+              <ul class="port-ask">
+                <li><strong>What:</strong> "Inbound port forward,
+                  external <code>UDP 1935</code> (SRT) — or
+                  <code>TCP 1935</code> if we're using RTMP — to the
+                  ATEM at <em>internal IP X.X.X.X</em>, port
+                  <code>1935</code>."</li>
+                <li><strong>Why:</strong> "We're sending live video to
+                  the ATEM from outside the building (remote camera,
+                  off-site contributor, stage rig at another address).
+                  Without the forward, the connection lands at the
+                  edge router and never reaches the ATEM."</li>
+                <li><strong>Risk profile:</strong> "Single port,
+                  forwarded to one device — the ATEM only listens for
+                  the BMD-flavored SRT/RTMP handshake; no shell, no
+                  filesystem, no general-purpose service exposed."</li>
+                <li><strong>What we need from you:</strong> the
+                  <strong>public IP or hostname</strong> we should
+                  point our encoder at, and confirmation when the
+                  rule is in place. SRT also needs the firewall to
+                  allow <em>outbound</em> UDP on the same port if it
+                  filters egress.</li>
+                <li><strong>If they push back:</strong> ask whether
+                  they can give the ATEM a static internal IP (so the
+                  rule stays valid across reboots), and whether they
+                  have an existing pinhole / DMZ pattern they prefer
+                  for AV gear — most enterprise networks already have
+                  one for video conferencing systems.</li>
+              </ul>
+
+              <p class="hint">Some networks (mobile carrier hotspots,
+              shared apartment building connections, certain hotel /
+              coffee-shop wifi, schools behind a single content
+              filter) use <strong>carrier-grade NAT</strong> which
+              silently blocks all inbound traffic regardless of any
+              port-forward rule. Test by pushing from a phone on
+              cellular data: if the stream reaches your ATEM,
+              forwarding works; if not, you'll need an SRT relay
+              (a small VPS, Cloudflare TURN, OvenMediaEngine, or this
+              app's own SRT receiver mode running on a publicly-
+              reachable host) to bridge the gap.</p>
             </div>
           </details>
 
@@ -413,9 +450,9 @@
         </div>
       </section>
 
-      <!-- ---------- SOURCE ----------------------------------- -->
+      <!-- ---------- VIDEO SOURCE ----------------------------- -->
       <section class="card source-card">
-        <div class="card-title"><span>Source</span>
+        <div class="card-title"><span>Video Source</span>
           <span>
             <a href="#" class="card-title-aux" id="ndi-rescan">scan NDI</a>
             <a href="#" class="card-title-aux" id="rescan-devices" style="margin-left:10px;">rescan</a>
@@ -517,33 +554,97 @@
           </div>
         </details>
 
-        <div class="audio-row single">
-          <label class="inline">
-            <span class="lbl">Audio</span>
-            <select id="av-audio"></select>
+      </section>
+
+      <!-- ---------- AUDIO MIXER (separate card) -------------- -->
+      <section class="card audio-mixer-card">
+        <div class="card-title"><span>Audio Mixer</span></div>
+
+        <p class="audio-mixer-disclaimer">
+          By default we pull audio straight from the Video Source you picked above
+          (a webcam's built-in mic, an NDI sender's audio, the audio track of a
+          pipe or relay stream, etc.). You can also embed a different audio source
+          — a USB interface, a separate microphone, or
+          <strong>Dante Virtual Soundcard</strong> for routing specific Dante
+          receive channels into this stream.
+        </p>
+
+        <div class="audio-mode-row" role="radiogroup" aria-label="Audio mode">
+          <label class="audio-mode-opt">
+            <input type="radio" name="audio-mode" value="auto" checked />
+            <span class="audio-mode-label">
+              <strong>Auto</strong>
+              <span class="audio-mode-sub">Use the Video Source's audio</span>
+            </span>
+          </label>
+          <label class="audio-mode-opt">
+            <input type="radio" name="audio-mode" value="custom" />
+            <span class="audio-mode-label">
+              <strong>Custom audio source</strong>
+              <span class="audio-mode-sub">Pick a different audio device</span>
+            </span>
+          </label>
+          <label class="audio-mode-opt">
+            <input type="radio" name="audio-mode" value="silent" />
+            <span class="audio-mode-label">
+              <strong>Silent</strong>
+              <span class="audio-mode-sub">Mute the outgoing audio track</span>
+            </span>
           </label>
         </div>
 
-        <!-- Channel selector for multi-channel audio devices (Dante VSC,
-             CoreAudio aggregate). Hidden by default; shown by app.js
-             when the active audio device's name matches "dante" or
-             "aggregate". 1-indexed, matching what Dante operators see
-             in Dante Controller. -->
-        <div class="audio-pan-row" id="audio-pan-row" hidden>
-          <label class="inline">
-            <span class="lbl">Channels (L · R)</span>
-            <span class="audio-pan-fields">
-              <input id="audio-pan-l" type="number" min="1" max="64" value="1" inputmode="numeric" aria-label="Left channel">
-              <span class="audio-pan-sep">·</span>
-              <input id="audio-pan-r" type="number" min="1" max="64" value="2" inputmode="numeric" aria-label="Right channel">
-            </span>
-          </label>
-          <p class="hint">
-            Multi-channel device detected (Dante / aggregate). Pick which channel
-            pair routes to the L/R of the outgoing stereo stream — for example
-            <code>5 · 6</code> for Dante channels 5 and 6. Default <code>1 · 2</code>
-            uses the first two channels (front stereo).
+        <!-- Custom-mode controls. Hidden by app.js whenever audio-mode != "custom"
+             so the panel only surfaces when the user has chosen to override. -->
+        <div class="audio-custom" id="audio-custom" hidden>
+          <div class="audio-row single">
+            <label class="inline">
+              <span class="lbl">Audio device</span>
+              <select id="av-audio"></select>
+            </label>
+          </div>
+
+          <!-- Channel selector for multi-channel audio devices (Dante VSC,
+               CoreAudio aggregate). Hidden by default; shown by app.js
+               when the active audio device's name matches "dante" or
+               "aggregate". 1-indexed, matching what Dante operators see
+               in Dante Controller. -->
+          <div class="audio-pan-row" id="audio-pan-row" hidden>
+            <label class="inline">
+              <span class="lbl">Channels (L · R)</span>
+              <span class="audio-pan-fields">
+                <input id="audio-pan-l" type="number" min="1" max="64" value="1" inputmode="numeric" aria-label="Left channel">
+                <span class="audio-pan-sep">·</span>
+                <input id="audio-pan-r" type="number" min="1" max="64" value="2" inputmode="numeric" aria-label="Right channel">
+              </span>
+            </label>
+            <p class="hint">
+              Multi-channel device detected (Dante / aggregate). Pick which channel
+              pair routes to the L/R of the outgoing stereo stream — for example
+              <code>5 · 6</code> for Dante channels 5 and 6. Default <code>1 · 2</code>
+              uses the first two channels (front stereo).
+            </p>
+          </div>
+
+          <p class="hint audio-mix-future">
+            <strong>Coming soon:</strong> volume mixing (custom + source side-by-side),
+            replace L only / R only, and per-leg gain. Today, picking a custom audio
+            source replaces the Video Source's audio entirely. For non-AVF video
+            sources (NDI direct, pipes, relay) the custom path will be wired in a
+            follow-up — for now, custom audio works with AVF cameras and screen
+            captures.
           </p>
+        </div>
+
+        <div class="audio-output-row" role="radiogroup" aria-label="Output channels">
+          <span class="lbl">Output</span>
+          <label class="seg">
+            <input type="radio" name="audio-output" value="stereo" checked />
+            <span>Stereo</span>
+          </label>
+          <label class="seg">
+            <input type="radio" name="audio-output" value="mono" />
+            <span>Mono <span class="hint-inline">(L+R summed)</span></span>
+          </label>
         </div>
 
         <details class="dante-help">
@@ -552,8 +653,8 @@
             <p>
               <a href="https://my.audinate.com/products/software/dante-virtual-soundcard" target="_blank" rel="noopener">Dante Virtual Soundcard</a>
               (DVSC) lets a regular Mac receive any Dante stream on your AVB / AES67 network and expose
-              the receive channels as a CoreAudio device — which then shows up in this app's Audio
-              dropdown above. To set it up the first time:
+              the receive channels as a CoreAudio device — which then shows up in this card's Audio
+              device dropdown when you switch to Custom mode. To set it up the first time:
             </p>
             <ol>
               <li>Install <strong>Dante Virtual Soundcard</strong> from Audinate (paid licence —
@@ -565,10 +666,11 @@
                 (this app's encoder is locked to 48 kHz), then click <strong>Start</strong>.</li>
               <li>Open <a href="https://my.audinate.com/products/software/dante-controller" target="_blank" rel="noopener">Dante Controller</a>
                 and route channels from the Dante transmitter (your console / stage box / DAW) to
-                this Mac's receive channels. The L/R picker that appears below the Audio dropdown
-                here is <em>this Mac's receive-channel numbers</em>, exactly what you see in Dante
-                Controller's grid for this machine.</li>
-              <li>Pick "Dante Virtual Soundcard" from the Audio dropdown above. The
+                this Mac's receive channels. The L/R picker that appears once you pick a
+                multi-channel device is <em>this Mac's receive-channel numbers</em>, exactly what
+                you see in Dante Controller's grid for this machine.</li>
+              <li>Switch this card to <strong>Custom audio source</strong> above, then pick
+                "Dante Virtual Soundcard" from the Audio device dropdown. The
                 <strong>Channels (L · R)</strong> picker will appear — set it to whichever pair
                 you want on the outgoing stream (e.g. 5 · 6 for stage L/R).</li>
             </ol>
@@ -582,7 +684,6 @@
             </p>
           </div>
         </details>
-
       </section>
 
       <!-- Old tabbed Destination card replaced by the wizard at the
@@ -771,8 +872,22 @@
 
   <footer class="footer">
     <a class="footer-brand" href="https://weirdmachine.org" target="_blank" rel="noopener" aria-label="weirdmachine.org">
-      <img src="/static/weirdmachine-logo.png" alt="Weird Machine" class="footer-logo" />
+      <!-- Drop a real PNG at /static/weirdmachine-logo.png and the
+           image takes over from the text fallback automatically. The
+           onerror handler hides the <img> so a missing file doesn't
+           leave a broken-image icon. -->
+      <img src="/static/weirdmachine-logo.png" alt="" class="footer-logo"
+           onerror="this.style.display='none'" />
+      <span class="footer-logo-text">WEIRD MACHINE</span>
     </a>
+    <div class="footer-credit">
+      Made by <a href="https://weirdmachine.org" target="_blank" rel="noopener">Stephen Walter</a>
+      and Claude using public Blackmagic Design Streaming Protocols.
+      Open source under the
+      <a href="https://github.com/amateurmenace/atem-ip-patchbay/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a> —
+      <a href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">source on GitHub</a>;
+      issues and pull requests welcome.
+    </div>
     <div>BMD control protocol on TCP <strong>9977</strong> · UI on TCP <strong>8090</strong></div>
     <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
   </footer>

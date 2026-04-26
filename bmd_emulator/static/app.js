@@ -16,6 +16,7 @@ const els = {
   statusPill: $('#status-pill'),
   duration:   $('#duration'),
   refreshApp: $('#refresh-app'),
+  killOrphans: $('#kill-orphans'),
   monitorAux: $('#monitor-aux'),
   destAux:    $('#dest-aux'),
   connAux:    $('#conn-aux'),
@@ -59,6 +60,9 @@ const els = {
   audioPanRow:    $('#audio-pan-row'),
   audioPanL:      $('#audio-pan-l'),
   audioPanR:      $('#audio-pan-r'),
+  audioCustom:    $('#audio-custom'),
+  audioModeRadios:    $$('input[name="audio-mode"]'),
+  audioOutputRadios:  $$('input[name="audio-output"]'),
   videoMode:      $('#video-mode'),
   pipeOnly:       $$('.pipe-only'),
   pipePath:       $('#pipe-path'),
@@ -319,16 +323,34 @@ function showPreviewMessage(html) {
   els.previewBars.hidden = true;
 }
 
+// Sync the Audio Mixer card's mode + output radios from state and
+// drive the Custom panel's visibility. Called from render() on every
+// state poll so the controls stay in sync if something changes the
+// backend audio_mode out of band (settings paste, /api/settings POST
+// from elsewhere, etc.).
+function updateAudioMixer(snap) {
+  const mode = snap.audio_mode || 'auto';
+  els.audioModeRadios.forEach((r) => { r.checked = (r.value === mode); });
+  if (els.audioCustom) els.audioCustom.hidden = mode !== 'custom';
+
+  const wantMono = !!snap.audio_output_mono;
+  els.audioOutputRadios.forEach((r) => {
+    r.checked = (r.value === (wantMono ? 'mono' : 'stereo'));
+  });
+}
+
 // Show/hide the multi-channel audio pan picker based on whether the
 // active audio device looks like a multi-channel device (Dante VSC,
-// CoreAudio aggregate). Same heuristic the streamer uses on the Rust
-// side so the UI lines up exactly with when the FFmpeg pan filter
-// fires. For normal stereo mics the row stays hidden — surface it
-// only when the user actually has a routing decision to make.
+// CoreAudio aggregate) AND we're in Custom mode (Auto/Silent skip
+// the AVF audio device entirely). Same heuristic the streamer uses
+// on the Rust side so the UI lines up exactly with when the FFmpeg
+// pan filter fires.
 function updateAudioPanRow(snap) {
   if (!els.audioPanRow) return;
   const name = (snap.av_audio_name || '').toLowerCase();
-  const isMultichannel = (snap.source_id === 'avfoundation') &&
+  const inCustom = (snap.audio_mode || 'auto') === 'custom';
+  const isMultichannel = inCustom &&
+    (snap.source_id === 'avfoundation') &&
     (name.includes('dante') || name.includes('aggregate'));
   els.audioPanRow.hidden = !isMultichannel;
   if (!isMultichannel) return;
@@ -939,6 +961,7 @@ function render(snap) {
       ...knownDevices.audio.map((d) => ({ value: d.index, label: `[${d.index}] ${d.name}` })),
     ], snap.av_audio_index);
   }
+  updateAudioMixer(snap);
   updateAudioPanRow(snap);
   setOptions(els.videoMode, snap.available_video_modes, snap.video_mode);
   if (els.formatDecoded) els.formatDecoded.textContent = decodeVideoMode(snap.video_mode);
@@ -1360,6 +1383,56 @@ function bind() {
   // Audio channel pan (multi-channel devices like Dante VSC).
   // 'change' fires on blur or Enter — fine for number inputs since
   // partial typing shouldn't fire a settings update mid-keystroke.
+  // Audio mode + output radios. Mode change drives the Custom panel
+  // visibility (and on the backend, the audio routing). Output is
+  // independent — stereo/mono just adjusts -ac on the encoder.
+  els.audioModeRadios.forEach((r) => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      applySettings({ audio_mode: r.value });
+      els.audioCustom.hidden = r.value !== 'custom';
+    });
+  });
+  els.audioOutputRadios.forEach((r) => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      applySettings({ audio_output_mono: r.value === 'mono' });
+    });
+  });
+
+  // Kill orphan FFmpeg streams from prior runs (typically after a
+  // cargo tauri dev rebuild SIGKILLed the binary mid-stream and
+  // FFmpeg, in its own process group, kept pushing). Confirm-then-
+  // hit so the click can't fire by accident.
+  if (els.killOrphans) {
+    els.killOrphans.addEventListener('click', async () => {
+      const ok = confirm(
+        "Kill any leftover FFmpeg streams from prior runs of this app?\n\n" +
+        "If a previous run crashed, was force-quit, or got rebuilt while " +
+        "streaming, the FFmpeg subprocess can keep streaming to your ATEM " +
+        "in the background. The Stop button can't reach those (the parent " +
+        "process is gone). This finds and kills any leftover FFmpeg " +
+        "streams pushing this app's BMD-flavored SRT URLs.\n\n" +
+        "Safe to run anytime — won't touch unrelated FFmpeg jobs."
+      );
+      if (!ok) return;
+      els.killOrphans.disabled = true;
+      try {
+        const r = await fetch('/api/kill-orphans', { method: 'POST' });
+        const j = await r.json();
+        if (j.error) {
+          alert('Kill failed: ' + j.error);
+        } else {
+          alert(j.message || ('Killed: ' + (j.killed ?? '?')));
+        }
+      } catch (e) {
+        alert('Kill failed: ' + e.message);
+      } finally {
+        els.killOrphans.disabled = false;
+      }
+    });
+  }
+
   els.audioPanL.addEventListener('change', () => {
     const v = Math.max(1, parseInt(els.audioPanL.value, 10) || 1);
     els.audioPanL.value = v;
