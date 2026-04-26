@@ -1,0 +1,15 @@
+[package]
+name = "atem-net-diag"
+version = "0.1.0"
+edition = "2021"
+description = "ATEM SRT/RTMP reachability + connection-state probe — runs on a peer machine on the same LAN as the ATEM and logs whether it's currently accepting connections"
+license = "MIT"
+
+[[bin]]
+name = "atem-net-diag"
+path = "src/main.rs"
+
+[dependencies]
+# Intentionally none — tool shells out to ffmpeg for the SRT/RTMP
+# handshake probe and uses std for everything else. Keeps the
+# binary tiny and the build surface zero-dependency.

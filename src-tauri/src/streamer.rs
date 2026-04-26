@@ -364,8 +364,12 @@ impl Streamer {
     }
 
     /// Variant of build_ffmpeg_cmd for NDI sources — input is rawvideo
-    /// on pipe:0 (frame format determined by the upstream probe), with
-    /// silent audio from lavfi.
+    /// on pipe:0 (frame format determined by the upstream probe).
+    /// Audio source depends on Audio Mixer mode: "custom" + a picked
+    /// AVF audio device routes through `-f avfoundation -i :name`,
+    /// every other case uses lavfi anullsrc (silent — gets muted to
+    /// match user intent for the silent path, passes through as
+    /// silence-where-audio-would-be for auto).
     fn build_ffmpeg_cmd_for_ndi(&self, plan: &StreamPlan, fmt: &NdiVideoFormat) -> Vec<String> {
         let size = format!("{}x{}", fmt.width, fmt.height);
         let fps = fmt.fps().to_string();
@@ -375,15 +379,47 @@ impl Streamer {
             "-s".into(), size,
             "-r".into(), fps,
             "-i".into(), "pipe:0".into(),
-            "-f".into(), "lavfi".into(),
-            "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
         ];
+
+        let snap = self.state.snapshot();
+        let custom_audio_name = if snap.audio_mode == "custom" && !snap.av_audio_name.is_empty() {
+            Some(snap.av_audio_name.clone())
+        } else {
+            None
+        };
+
+        if cfg!(target_os = "macos") {
+            if let Some(audio_name) = custom_audio_name.as_deref() {
+                // AVFoundation audio-only input. The leading colon in
+                // ":<name>" tells avfoundation there's no video for
+                // this input, just the named audio device. This is
+                // how Dante VSC / a USB interface / a separate mic
+                // gets composited onto an NDI video feed.
+                log::info!("NDI + custom AVF audio: routing through {audio_name:?}");
+                input_args.extend([
+                    "-f".into(), "avfoundation".into(),
+                    "-i".into(), format!(":{audio_name}"),
+                ]);
+            } else {
+                input_args.extend([
+                    "-f".into(), "lavfi".into(),
+                    "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+                ]);
+            }
+        } else {
+            // Non-Mac path stays on lavfi — DirectShow audio injection
+            // for an NDI video source is a separate piece of work.
+            input_args.extend([
+                "-f".into(), "lavfi".into(),
+                "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+            ]);
+        }
 
         // Build a temp Source so the existing build_ffmpeg_cmd
         // pathway works — overwrite the input args with the NDI ones.
         let mut adjusted = plan.clone();
         adjusted.source.ffmpeg_input_args = input_args.split_off(0);
-        adjusted.source.combined_av = false; // separate inputs (pipe + lavfi)
+        adjusted.source.combined_av = false; // separate inputs (pipe + audio)
 
         // Scale to the configured video_mode when the NDI source's
         // native resolution doesn't match. ATEM hardware decoders only
@@ -880,7 +916,13 @@ fn parse_progress(line: &str) -> Option<Progress> {
 fn build_audio_filter(snap: &Snapshot) -> Option<String> {
     let mut chain: Vec<String> = Vec::new();
 
-    if snap.source_id == "avfoundation" && snap.audio_mode == "custom" {
+    // Pan filter applies in Custom audio mode whenever the picked
+    // AVF audio device is multi-channel (Dante VSC, CoreAudio
+    // aggregate). Independent of which source provides the video —
+    // NDI + Dante is the headline use case (camera over NDI, console
+    // over Dante, both arriving at this Mac, both routed into one
+    // outgoing stream).
+    if snap.audio_mode == "custom" {
         let name = snap.av_audio_name.to_lowercase();
         if name.contains("dante") || name.contains("aggregate") {
             // 1-indexed in state (matches user-facing UI), 0-indexed

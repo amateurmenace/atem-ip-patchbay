@@ -338,29 +338,20 @@ impl EncoderState {
     /// Avoids exposing the inner RwLock and lets sources::resolve_source
     /// build an FFmpeg command without holding the lock.
     ///
-    /// audio_mode adjusts what the source resolver sees: when the user
-    /// has selected "auto" or "silent", we report av_audio_index = -1
-    /// so the resolver builds a combined-AV / source-audio path
-    /// regardless of what's stored in inner.av_audio_index. The stored
-    /// value is preserved so the user can flip back to "custom" and
-    /// recover their picked device without re-selecting.
+    /// Pass the raw audio fields through; the source resolver +
+    /// streamer apply audio_mode-specific routing themselves so the
+    /// stored device pick is preserved across mode changes.
     pub fn source_selection(&self) -> SourceSelection {
         let inner = self.inner.read().unwrap();
         let dimensions = video_dimensions(&inner.video_mode);
-        let custom_audio = inner.audio_mode.as_str() == "custom";
-        let av_audio_index = if custom_audio { inner.av_audio_index } else { -1 };
-        let av_audio_name = if custom_audio {
-            inner.av_audio_name.clone()
-        } else {
-            String::new()
-        };
         SourceSelection {
             source_id: inner.source_id.clone(),
             dimensions,
             av_video_index: inner.av_video_index,
-            av_audio_index,
+            av_audio_index: inner.av_audio_index,
             av_video_name: inner.av_video_name.clone(),
-            av_audio_name,
+            av_audio_name: inner.av_audio_name.clone(),
+            audio_mode: inner.audio_mode.clone(),
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
             relay_bind_host: inner.relay_bind_host.clone(),
@@ -756,6 +747,13 @@ pub struct SourceSelection {
     pub av_audio_index: i32,
     pub av_video_name: String,
     pub av_audio_name: String,
+    /// Audio Mixer mode. Drives whether the source resolver / streamer
+    /// uses the video source's embedded audio ("auto"), pulls audio
+    /// from a separate AVF device ("custom") even when the video
+    /// source isn't AVF, or emits a silent track ("silent"). The
+    /// av_audio_* fields are populated regardless of mode so a flip
+    /// between auto -> custom doesn't lose the user's device pick.
+    pub audio_mode: String,
     pub pipe_path: String,
     pub ndi_source_name: String,
     pub relay_bind_host: String,
