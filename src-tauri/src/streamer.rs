@@ -227,6 +227,41 @@ impl Streamer {
             .take()
             .ok_or_else(|| anyhow!("ffmpeg stderr was not piped"))?;
 
+        // Spawn a tiny bash watchdog that polls our PID every second
+        // and SIGTERMs the FFmpeg process group when it sees us go
+        // away. Catches the cargo-tauri-dev rebuild SIGKILL path and
+        // any other "parent died ungracefully" scenario the in-
+        // process exit handlers can't cover. Without this, FFmpeg
+        // gets reparented to launchd and keeps streaming forever
+        // (the orphan-stream bug). The watchdog also exits cleanly
+        // if FFmpeg dies first (normal Stop) so we don't leak one
+        // bash process per stream.
+        #[cfg(unix)]
+        if let Some(ff_pid) = child.id() {
+            let parent_pid = std::process::id();
+            let cmd = format!(
+                "while kill -0 {parent_pid} 2>/dev/null && kill -0 {ff_pid} 2>/dev/null; do sleep 1; done; \
+                 if kill -0 {parent_pid} 2>/dev/null; then exit 0; fi; \
+                 kill -TERM -{ff_pid} 2>/dev/null; sleep 1; \
+                 kill -KILL -{ff_pid} 2>/dev/null"
+            );
+            match std::process::Command::new("/bin/bash")
+                .arg("-c")
+                .arg(&cmd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => log::info!(
+                    "FFmpeg watchdog armed: parent={parent_pid} -> ffmpeg pgid={ff_pid}"
+                ),
+                Err(e) => log::warn!(
+                    "FFmpeg watchdog spawn failed (parent crash will leave orphans): {e}"
+                ),
+            }
+        }
+
         // Wire the NDI -> FFmpeg stdin pipe via a small drainer task.
         if let (Some(_), Some(rx)) = (ndi_capture.as_ref(), ndi_frame_rx) {
             let stdin = child
