@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ATEM IP Patchbay</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ========================================================== -->
+  <!-- TOP NAV                                                     -->
+  <!-- ========================================================== -->
+  <header class="topbar">
+   <div class="topbar-inner">
+    <button class="brand" id="brand-btn" type="button" aria-label="ATEM IP Patchbay home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <g class="bm-bars">
+          <rect class="bm-bar" x="2"  y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="7"  y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="12" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="17" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="22" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+          <rect class="bm-bar" x="27" y="6"  width="3" height="20" rx="1" fill="currentColor"/>
+        </g>
+        <circle class="bm-dot" cx="3.5"  cy="16" r="1.8" fill="var(--accent)"/>
+        <circle class="bm-dot" cx="28.5" cy="16" r="1.8" fill="var(--accent)"/>
+      </svg>
+      <div class="title-block">
+        <h1>ATEM IP Patchbay</h1>
+        <div class="kicker">Proof of concept · free forever</div>
+      </div>
+    </button>
+    <div class="status-block">
+      <div class="status-pill" id="status-pill">IDLE</div>
+      <div class="duration" id="duration">00:00:00:00</div>
+      <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
+    </div>
+   </div>
+  </header>
+
+  <!-- ========================================================== -->
+  <!-- HERO                                                        -->
+  <!-- ========================================================== -->
+  <section class="hero">
+    <div class="hero-headline">
+      Turn multiple worldwide video sources, from iPhones to Drones to
+      <strong>NDI</strong>, into remote inputs that stream directly into your
+      <strong>ATEM Switcher</strong> or <strong>Blackmagic Streaming Decoders / Bridges</strong>
+      over the single ethernet cable. Even route Dante audio onto a video source
+      that maps directly to one of your switcher's SDI or HDMI inputs!
+    </div>
+    <div class="hero-cols">
+      <div class="hero-col">
+        <div class="hero-col-title">What it does</div>
+        <p>
+          If you have an <strong>ATEM Mini Extreme ISO G2</strong>,
+          <strong>Television Studio HD8 ISO</strong>, or an upcoming qualifying
+          ST2110 ATEM Switcher, you can change a local input into a remote
+          input that can be sent over the public Internet directly to your
+          switcher from anywhere in the world. Blackmagic Streaming Decoder
+          and Streaming Bridges can also receive sources from anywhere with a
+          stable enough internet connection (~2.5–3.5 Mbps upload), but
+          previously this was limited to just other Blackmagic hardware. Now,
+          NDI, SDI, HDMI, non-Blackmagic SRT and RTMP streams, etc. can all
+          be converted into the special Blackmagic flavor of SRT using this
+          app.
+        </p>
+      </div>
+      <div class="hero-col">
+        <div class="hero-col-title">How it happened</div>
+        <p>
+          Made possible in part by the latest update to the iOS Blackmagic
+          Camera App, which for the first time let that excellent free app
+          stream directly into an input on a qualifying ATEM. Because it's
+          software and not Blackmagic hardware, they seem to have lessened
+          some of the handshake requirements between sender and receiver, so
+          it was much easier to deconstruct what was essential and what was
+          just noise. Then Claude and I (mostly Claude) built an emulator of
+          a streaming encoder and eventually stumbled onto the winning
+          combination that got a signal into the ATEM Mini Extreme ISO G2
+          that inspired this journey.
+        </p>
+      </div>
+    </div>
+    <div class="hero-disclaimer">
+      This is more of a demo app showing what is now possible, a proof of
+      concept, and should only be used in real productions at your own
+      risk. It is free forever, until it either gets stopped by Blackmagic
+      or they fully embrace opening up their powerful stream decoding
+      ecosystem.
+    </div>
+    <div class="hero-credit">
+      Made by <a href="https://weirdmachine.org" target="_blank" rel="noopener">Stephen Walter</a>
+      and Claude using public Blackmagic Design Streaming Protocols.
+      Open source under the
+      <a href="https://github.com/amateurmenace/atem-ip-patchbay/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+      —
+      <a href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">source on GitHub</a>;
+      issues and pull requests welcome.
+    </div>
+  </section>
+
+  <!-- ========================================================== -->
+  <!-- MAIN GRID                                                   -->
+  <!-- ========================================================== -->
+  <main class="grid">
+
+    <!-- ============== LEFT COLUMN : MONITOR + TELEMETRY ========= -->
+    <div class="config-stack">
+    <section class="card monitor">
+      <div class="card-title"><span>Monitor</span><span class="card-title-aux" id="monitor-aux">no source</span></div>
+
+      <div class="preview-frame" id="preview-frame">
+        <video id="preview-video" autoplay playsinline muted hidden></video>
+        <div class="bars" id="preview-bars" aria-hidden="true">
+          <div class="bar bar-white"></div>
+          <div class="bar bar-yellow"></div>
+          <div class="bar bar-cyan"></div>
+          <div class="bar bar-green"></div>
+          <div class="bar bar-magenta"></div>
+          <div class="bar bar-red"></div>
+          <div class="bar bar-blue"></div>
+        </div>
+        <div class="preview-message" id="preview-message" hidden></div>
+        <div class="live-badge" id="live-badge" hidden>● LIVE</div>
+        <div class="preview-overlay">
+          <div class="ovl-row"><span>SOURCE</span> <strong id="ovl-source">—</strong></div>
+          <div class="ovl-row"><span>FORMAT</span> <strong id="ovl-res">1080p30</strong></div>
+          <div class="ovl-row"><span>PROFILE</span> <strong id="ovl-profile">—</strong></div>
+          <div class="ovl-row"><span>BITRATE</span> <strong id="ovl-bitrate">0 kbps</strong></div>
+        </div>
+      </div>
+
+      <div class="controls-row">
+        <button id="btn-start" class="primary big">▶ Start Stream</button>
+        <button id="btn-stop" class="big">■ Stop</button>
+      </div>
+
+      <div id="error" class="error" hidden></div>
+    </section>
+
+    <!-- ============== TELEMETRY ================================= -->
+    <section class="card telemetry">
+      <div class="card-title"><span>Connection</span><span class="card-title-aux" id="conn-aux">—</span></div>
+
+      <div class="telemetry-grid">
+        <div class="tm-cell"><span>Bitrate</span><strong id="tm-bitrate">0 kbps</strong><em id="tm-bitrate-bar" class="bar-strip"></em></div>
+        <div class="tm-cell"><span>FPS</span><strong id="tm-fps">0</strong><em id="tm-fps-target" class="sub">target —</em></div>
+        <div class="tm-cell"><span>Encoder speed</span><strong id="tm-speed">—</strong><em id="tm-speed-note" class="sub">idle</em></div>
+        <div class="tm-cell"><span>Frames sent</span><strong id="tm-frames">0</strong><em class="sub" id="tm-quality">q=—</em></div>
+        <div class="tm-cell"><span>Dropped</span><strong id="tm-dropped">0</strong><em class="sub">since start</em></div>
+        <div class="tm-cell"><span>Duration</span><strong id="tm-duration">00:00:00:00</strong><em class="sub" id="tm-elapsed">—</em></div>
+      </div>
+
+      <div class="telemetry-note hint">
+        <strong>Reading this:</strong> When the encoder reports <strong>speed ≥ 1.0×</strong> and
+        bitrate matches your profile target, the Mac is keeping up. The ATEM's silent acceptance is
+        confirmed by zero dropped frames and a steady FPS — if the ATEM rejected the stream,
+        FFmpeg would surface a connection error in the log within 1–2 seconds.
+      </div>
+    </section>
+
+    <!-- Encoder card removed — codec / format / quality / label all
+         moved into the new Destination wizard. -->
+
+    <!-- ============== LOG ======================================= -->
+    <details class="card collapsible log-pane-card">
+      <summary class="card-title">FFmpeg log <span class="muted">(last 50 lines)</span></summary>
+      <pre id="log">No process started yet.</pre>
+      <details>
+        <summary>Last command</summary>
+        <pre id="cmd"></pre>
+      </details>
+    </details>
+
+    </div><!-- /.config-stack (left) -->
+
+    <!-- ============== RIGHT COLUMN : DESTINATION (TOP) + SOURCE + OVERLAYS -->
+    <div class="config-stack">
+
+      <!-- ---------- DESTINATION (now top of right column) --- -->
+      <section class="card destination-card">
+        <div class="card-title">
+          <span>Destination</span>
+          <span class="card-title-aux" id="dest-aux">no destination</span>
+        </div>
+
+        <div class="dest-wizard">
+
+          <div class="dest-row">
+            <label>Address
+              <input id="dest-address" type="text" placeholder="srt://your-atem-or-relay:1935" autocomplete="off" />
+              <span class="field-help">Format: <code>srt://your-atem-or-relay:port</code> (default port is <strong>1935</strong>; check your ATEM's Streaming Bridge settings — picking the wrong port is the #1 reason streams don't reach the switcher).</span>
+            </label>
+            <label>Stream key
+              <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="dest-or"><span>or load from a Blackmagic XML</span></div>
+
+          <div id="xml-drop" class="dropzone compact">
+            <strong>Drop a Blackmagic streaming XML</strong>
+            <span class="hint">— or click to choose</span>
+            <input id="xml-file" type="file" accept=".xml,text/xml,application/xml" hidden />
+          </div>
+          <div id="xml-loaded" class="xml-loaded-row" hidden>
+            <span class="loaded-label">Loaded:</span>
+            <strong id="xml-loaded-name">—</strong>
+            <button id="xml-clear" type="button" class="btn-link">clear</button>
+          </div>
+          <div id="xml-status" class="paste-status" hidden></div>
+
+          <div class="dest-toggles">
+            <div class="toggle-group">
+              <span class="toggle-label">Protocol</span>
+              <div class="seg-control" role="radiogroup" aria-label="Protocol">
+                <label class="seg"><input type="radio" name="dest-proto" value="srt" /><span>SRT</span></label>
+                <label class="seg"><input type="radio" name="dest-proto" value="rtmp" /><span>RTMP</span></label>
+              </div>
+            </div>
+            <div class="toggle-group">
+              <span class="toggle-label">Codec</span>
+              <div class="seg-control" role="radiogroup" aria-label="Codec">
+                <label class="seg"><input type="radio" name="dest-codec" value="h265" /><span>H.265</span></label>
+                <label class="seg"><input type="radio" name="dest-codec" value="h264" /><span>H.264</span></label>
+              </div>
+            </div>
+            <div class="toggle-group">
+              <span class="toggle-label">Quality</span>
+              <div class="seg-control seg-control-quality" id="quality-seg" role="radiogroup" aria-label="Quality">
+                <!-- Filled by app.js from snap.quality_options. Each
+                     option's label includes the projected bitrate at
+                     the current video_mode. -->
+              </div>
+            </div>
+          </div>
+
+          <label class="srt-only">
+            <span class="field-label">SRT passphrase <span class="hint">(optional · AES-encrypted)</span></span>
+            <input id="passphrase" type="password" autocomplete="off" />
+          </label>
+
+          <div class="format-warning">
+            <div class="warning-icon" aria-hidden="true">!</div>
+            <div class="warning-body">
+              <div class="format-label">Switcher video format — must match exactly</div>
+              <div class="format-pick-row">
+                <select id="video-mode" class="format-select"></select>
+                <div class="format-decoded" id="format-decoded">— × — @ — fps</div>
+              </div>
+              <p class="format-explainer">
+                A 1080p30 switcher rejects a 1080p60 stream — it'll connect, but
+                the input shows black. <strong>Set this to whatever your ATEM is
+                set to</strong>, not what you wish it was.
+              </p>
+              <details class="format-help">
+                <summary>How do I find my switcher's format?</summary>
+                <div class="help-body">
+                  <p><strong>ATEM Software Control:</strong> open the app →
+                  <em>Settings</em> (gear icon, top-right) → <em>Video</em> →
+                  <em>Set video standard</em>. Whatever's checked there is what
+                  you pick here.</p>
+                  <p><strong>From the unit itself:</strong> ATEM Mini Extreme G2,
+                  Television Studio HD, and similar models display the current
+                  standard on the front-panel screen — look for
+                  <code>1080p30</code> / <code>1080p59.94</code> / <code>1080p25</code> / etc.</p>
+                  <p><strong>Common defaults:</strong>
+                  <code>1080p30</code> in NTSC regions (US, Canada, Japan),
+                  <code>1080p25</code> in PAL regions (most of Europe, Asia,
+                  Australia), <code>1080p59.94</code> for broadcast-spec setups.</p>
+                  <p class="hint">If you set the wrong format here, the only
+                  symptom is "stream connects but ATEM input shows black /
+                  frozen / corrupt." Try cycling formats one by one until the
+                  ATEM accepts.</p>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <div class="dest-summary">
+            <label>Stream URL
+              <input id="dest-url" type="text" readonly />
+            </label>
+            <details class="srt-only">
+              <summary>Computed SRT streamid</summary>
+              <pre id="streamid">—</pre>
+            </details>
+            <details class="rtmp-only" hidden>
+              <summary>Final RTMP publish URL</summary>
+              <pre id="rtmp-url">—</pre>
+            </details>
+          </div>
+
+          <details class="port-fwd-help">
+            <summary>How does port forwarding work?</summary>
+            <div class="help-body">
+              <p>If your ATEM is at home and you're streaming from
+              somewhere else (a venue, a coffee shop, another office),
+              the stream has to traverse your home router. By default,
+              routers <strong>block unsolicited inbound traffic</strong>
+              — so you need to tell the router to forward SRT/RTMP
+              packets to your ATEM.</p>
+              <ol>
+                <li>Open your router's admin page (commonly
+                  <code>192.168.1.1</code> or <code>192.168.0.1</code>) —
+                  credentials are usually printed on the bottom of the
+                  unit.</li>
+                <li>Find <strong>Port Forwarding</strong> (sometimes
+                  under "NAT", "Virtual Server", or "Advanced").</li>
+                <li>Add a rule: forward
+                  <strong>UDP port 1935</strong> for SRT (or
+                  <strong>TCP port 1935</strong> for RTMP) to your
+                  ATEM's local IP (e.g. <code>192.168.1.50</code>).</li>
+                <li>From the venue, point this app at your home's
+                  <strong>public IP</strong> (look it up via
+                  <a href="https://api.ipify.org" target="_blank" rel="noopener">api.ipify.org</a>),
+                  not the ATEM's local IP.</li>
+              </ol>
+              <p class="hint">Some ISPs (mobile carriers, shared
+              apartment-building connections) use
+              <strong>carrier-grade NAT</strong> which silently blocks
+              all inbound traffic regardless of your forwarding rules.
+              Test by pushing from a phone on cellular data: if the
+              stream reaches your ATEM, you're fine; if not, you'll
+              need an SRT relay (a small VPS, Cloudflare TURN, or
+              OvenMediaEngine) to bridge the gap.</p>
+            </div>
+          </details>
+
+          <details class="dest-advanced">
+            <summary>Advanced (mode, streamid, label, multi-service)</summary>
+            <div class="advanced-body">
+              <div class="row-2 multi-service" id="multi-service-row" hidden>
+                <label>Service
+                  <select id="service"></select>
+                </label>
+                <label>Server
+                  <select id="server"></select>
+                </label>
+              </div>
+              <!-- Quality preset is now a top-level segmented control
+                   above (Phase 8b). The hidden <select> stays so any
+                   legacy JS that reads/writes #quality keeps working
+                   (it mirrors the segmented control). -->
+              <select id="quality" hidden></select>
+              <label>Device label <span class="hint">(IDENTITY · sent as <code>bmd_name</code> in streamid)</span>
+                <input id="label" type="text" />
+              </label>
+              <div class="row-2 srt-only">
+                <label>SRT mode
+                  <select id="srt-mode">
+                    <option value="caller">Caller (we initiate · default)</option>
+                    <option value="listener">Listener (we wait)</option>
+                    <option value="rendezvous">Rendezvous (NAT traversal)</option>
+                  </select>
+                </label>
+                <label>Latency (ms)
+                  <input id="srt-latency" type="number" min="20" max="8000" />
+                </label>
+              </div>
+              <label class="srt-listener-only" hidden>SRT listen port
+                <input id="srt-listen-port" type="number" min="1" max="65535" />
+              </label>
+              <label>Streamid override <span class="hint">(leave empty for the BMD format)</span>
+                <input id="streamid-override" type="text" placeholder="(empty = standard BMD streamid)" />
+              </label>
+              <label class="checkbox-row srt-only">
+                <input id="streamid-legacy" type="checkbox" />
+                <span>Use legacy <code>r=KEY,m=publish,bmd_uuid=…</code> format
+                  <span class="hint">(third-party convention; default off matches real BMD)</span></span>
+              </label>
+              <div class="row-2">
+                <button id="lan-discover" type="button" class="btn-secondary">Find ATEMs on LAN (mDNS)</button>
+                <button id="paste-apply-advanced" type="button" class="btn-secondary" hidden>(legacy paste apply)</button>
+              </div>
+              <textarea id="paste-text" rows="3" placeholder="Optional: paste an SRT URL, key/value lines, JSON, or XML to auto-fill above…"></textarea>
+              <div class="button-row">
+                <button id="paste-apply" class="btn-secondary">Apply pasted text</button>
+                <button id="paste-clear" class="btn-secondary">Clear</button>
+              </div>
+              <div id="paste-status" class="paste-status" hidden></div>
+              <div id="discover-results" class="hint" style="margin-top:8px;"></div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ---------- SOURCE ----------------------------------- -->
+      <section class="card source-card">
+        <div class="card-title"><span>Source</span>
+          <span>
+            <a href="#" class="card-title-aux" id="ndi-rescan">scan NDI</a>
+            <a href="#" class="card-title-aux" id="rescan-devices" style="margin-left:10px;">rescan</a>
+          </span>
+        </div>
+
+        <div id="source-tiles" class="tile-grid" aria-label="Pick a video source">
+          <!-- tiles inserted by JS -->
+        </div>
+
+        <div id="source-hint" class="paste-status hint-panel" hidden></div>
+
+        <!-- Phase 8b: receive-stream mini-wizard. Promotes the
+             relay-listener tiles (srt_listen / rtmp_listen) into a
+             discoverable flow. Clicking expands a panel with the
+             publish URL and per-app instructions. Activating
+             selects the underlying tile and shows its config panel
+             below. -->
+        <details class="receive-wizard" id="receive-wizard">
+          <summary>
+            <span class="rw-icon" aria-hidden="true">↓</span>
+            <span class="rw-title">Receive a stream from a camera, drone, OBS, or phone</span>
+          </summary>
+          <div class="rw-body">
+            <div class="rw-protocol">
+              <span class="rw-step">1</span>
+              <span class="rw-step-label">Pick a protocol</span>
+              <div class="seg-control" role="radiogroup" aria-label="Receive protocol">
+                <label class="seg"><input type="radio" name="rw-proto" value="srt_listen" checked /><span>SRT</span></label>
+                <label class="seg"><input type="radio" name="rw-proto" value="rtmp_listen" /><span>RTMP</span></label>
+              </div>
+            </div>
+
+            <div class="rw-url">
+              <span class="rw-step">2</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">Copy this URL into your camera, drone, or encoder app</span>
+                <div class="rw-url-row">
+                  <input id="rw-publish-url" type="text" readonly />
+                  <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+                </div>
+                <p class="rw-hint">
+                  Replace <code>0.0.0.0</code> with this machine's LAN IP if your encoder isn't on the same machine.
+                  Default port is 9710 for SRT, 1935 for RTMP — change them in the panel below if needed.
+                </p>
+              </div>
+            </div>
+
+            <div class="rw-apps">
+              <span class="rw-step">3</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">App-specific setup</span>
+                <select id="rw-app-pick" class="rw-app-select">
+                  <option value="">— pick your encoder app —</option>
+                  <option value="obs">OBS Studio</option>
+                  <option value="larix">Larix Broadcaster (iPhone/Android)</option>
+                  <option value="dji">DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</option>
+                  <option value="ffmpeg">FFmpeg command line</option>
+                  <option value="iphone-bm">Blackmagic Camera app (iPhone)</option>
+                </select>
+                <div id="rw-app-instructions" class="rw-app-body" hidden></div>
+              </div>
+            </div>
+
+            <div class="rw-start">
+              <span class="rw-step">4</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">Start the receiver — wait for your encoder to connect, then it'll re-stream to your ATEM destination above</span>
+                <button id="rw-start-receiver" type="button" class="primary">Start Receiver</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <div class="audio-row single">
+          <label class="inline">
+            <span class="lbl">Audio</span>
+            <select id="av-audio"></select>
+          </label>
+        </div>
+
+        <div class="pipe-only" hidden>
+          <label>
+            <span class="lbl">Where should we read the video from?</span>
+            <input id="pipe-path" type="text" placeholder="rtsp://192.168.1.50/stream  ·  http://example.com/live.m3u8  ·  /tmp/feed.ts" />
+          </label>
+          <p class="hint">
+            Anything FFmpeg can open works here — paste the URL or file path your source emits to.
+            Common patterns:
+          </p>
+          <ul class="pipe-examples">
+            <li><strong>RTSP camera:</strong> <code>rtsp://username:password@192.168.1.50/stream</code></li>
+            <li><strong>HLS / HTTP stream:</strong> <code>http://server.example.com/live/playlist.m3u8</code></li>
+            <li><strong>Named pipe / file:</strong> <code>/tmp/feed.ts</code> (write into this from GStreamer, NDI Tools, OBS recorder, etc.)</li>
+            <li><strong>UDP MPEG-TS:</strong> <code>udp://0.0.0.0:1234</code></li>
+          </ul>
+          <p class="hint">
+            For an SRT or RTMP source where this app should be the receiver, use the
+            <strong>Receive a stream</strong> wizard above instead — it sets up the listener
+            and shows the publish URL to paste into your encoder.
+          </p>
+        </div>
+
+      </section>
+
+      <!-- Old tabbed Destination card replaced by the wizard at the
+           top of this column. The wizard uses xml-drop / xml-file
+           directly (no separate paste-XML textarea); paste-text +
+           paste-apply live inside the wizard's Advanced section for
+           power users. -->
+
+      <!-- ---------- OVERLAYS --------------------------------- -->
+      <section class="card overlay-card">
+        <div class="card-title"><span>Overlays</span></div>
+        <div class="row-2">
+          <label>Title
+            <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
+          </label>
+          <label>Subtitle
+            <input id="ov-subtitle" type="text" placeholder="Backup · source name" />
+          </label>
+        </div>
+        <label>Logo image (PNG / JPG)
+          <input id="ov-logo" type="text" placeholder="/Users/you/Pictures/logo.png" />
+        </label>
+        <label class="check">
+          <input id="ov-clock" type="checkbox" />
+          <span>Show clock (HH:MM:SS, bottom-left)</span>
+        </label>
+      </section>
+
+      <!-- The standalone "SRT Advanced" details card was a duplicate
+           of the same fields living inside the destination wizard
+           above (srt-mode / srt-latency / srt-listen-port /
+           streamid-override / streamid-legacy). Removed to clear
+           the duplicate-id browser warnings. -->
+
+    </div><!-- /.config-stack (right) -->
+  </main>
+
+  <!-- ========================================================== -->
+  <!-- BOTTOM USER GUIDE (Phase 8b)                                -->
+  <!-- ========================================================== -->
+  <section class="user-guide">
+    <h2 class="user-guide-title">How it works</h2>
+
+    <div class="guide-flow" aria-label="Data flow diagram">
+      <svg viewBox="0 0 760 140" xmlns="http://www.w3.org/2000/svg" role="img"
+           aria-label="Source flows into this app, which re-encodes to BMD-flavored SRT and forwards over the network to your ATEM switcher or Blackmagic Streaming Decoder/Bridge.">
+        <!-- Source box -->
+        <rect x="10" y="40" width="160" height="60" rx="8"
+              fill="#161821" stroke="#3a3f50" stroke-width="1.5" />
+        <text x="90" y="65" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Source</text>
+        <text x="90" y="84" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">camera · NDI · drone · OBS</text>
+        <!-- Arrow 1 -->
+        <line x1="170" y1="70" x2="220" y2="70" stroke="#9aa1ad" stroke-width="1.5"
+              marker-end="url(#arrow)" />
+        <text x="195" y="60" fill="#9aa1ad" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">~50 ms</text>
+        <!-- App box -->
+        <rect x="225" y="30" width="200" height="80" rx="8"
+              fill="#1d2030" stroke="#5a8aff" stroke-width="1.5" />
+        <text x="325" y="58" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">ATEM IP Patchbay</text>
+        <text x="325" y="76" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">re-encode H.264/265</text>
+        <text x="325" y="92" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">BMD-flavored SRT</text>
+        <!-- Arrow 2 -->
+        <line x1="425" y1="70" x2="490" y2="70" stroke="#9aa1ad" stroke-width="1.5"
+              marker-end="url(#arrow)" />
+        <text x="457" y="60" fill="#9aa1ad" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">200–500 ms</text>
+        <text x="457" y="86" fill="#6b7280" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Internet · LAN</text>
+        <!-- Destination box -->
+        <rect x="495" y="30" width="255" height="80" rx="8"
+              fill="#161821" stroke="#3a3f50" stroke-width="1.5" />
+        <text x="622" y="58" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">ATEM</text>
+        <text x="622" y="76" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Switcher · Streaming Bridge</text>
+        <text x="622" y="92" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Streaming Decoder</text>
+        <!-- Arrowhead def -->
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa1ad" />
+          </marker>
+        </defs>
+      </svg>
+    </div>
+
+    <div class="guide-grid">
+      <div class="guide-card">
+        <h3>Latency budget</h3>
+        <ul class="guide-facts">
+          <li><strong>SRT push</strong> — 200–500 ms typical (we set <code>latency=500000 µs</code> by default)</li>
+          <li><strong>Encoder</strong> — 50–100 ms (libx265/x264, <code>preset veryfast tune zerolatency</code>)</li>
+          <li><strong>Total end-to-end</strong> — 250–600 ms typical</li>
+          <li><strong>Bandwidth</strong> — 2.5 Mbps (Low) · 4.5 Mbps (Medium) · 6 Mbps (High); 1080p60 needs ~1.5× more</li>
+          <li class="warn">Avoid: 5+ second buffering when SRT latency is set too high</li>
+        </ul>
+      </div>
+
+      <div class="guide-card">
+        <h3>FAQ</h3>
+        <details class="faq-item">
+          <summary>Stream connects but ATEM input shows black</summary>
+          <p>Format mismatch. The switcher's video standard (1080p30, 1080p59.94, etc.) must match
+          what we're sending exactly. Pick the right value in the <em>Switcher video format</em>
+          dropdown above the Address field.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the minimum upload bandwidth I need?</summary>
+          <p>2.5 Mbps for the Low quality preset, 4.5 for Medium, 6 for High. 1080p60 needs roughly
+          1.5× those numbers. Don't push more than ~70% of your measured upload speed — the rest
+          covers protocol overhead and bursty I-frames.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I use this with a non-ATEM Blackmagic device?</summary>
+          <p>Yes. Web Presenter HD/4K, Streaming Bridge, and Streaming Decoder all accept the same
+          BMD-flavored SRT handshake. Web Presenters consume RTMP too, which is in the Protocol
+          chooser above.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is this Blackmagic-approved?</summary>
+          <p>No. This is community work. The protocol and XML formats are publicly documented but
+          BMD doesn't endorse third-party encoders. Use in real productions at your own risk.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Why does my source appear delayed by ~500 ms on the ATEM?</summary>
+          <p>That's SRT's latency budget — the receiver buffers half a second so packet retransmits
+          have time to land. Reduce <code>SRT latency</code> in the Advanced section if your network
+          is fast and stable; raise it on flaky connections.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the difference between NDI direct and the bridge workflow?</summary>
+          <p>Direct NDI (v0.2.0) bypasses NDI Virtual Camera entirely — frames stream from the NDI
+          sender straight into our encoder via the NewTek SDK. No menu-bar setup. The old bridge
+          workflow (NDI Virtual Camera + AVF) had a known frame=0 hang with FFmpeg.</p>
+        </details>
+      </div>
+    </div>
+
+    <div class="guide-links">
+      <a class="guide-link" href="mailto:stephen@weirdmachine.org?subject=ATEM%20IP%20Patchbay">
+        <span aria-hidden="true">✉</span> Email Stephen
+      </a>
+      <a class="guide-link" href="https://weirdmachine.org" target="_blank" rel="noopener">
+        <span aria-hidden="true">↗</span> weirdmachine.org
+      </a>
+      <a class="guide-link" href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">
+        <span aria-hidden="true">↗</span> GitHub repo
+      </a>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div>BMD control protocol on TCP <strong>9977</strong> · UI on TCP <strong>8090</strong></div>
+    <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+# v0.2.0 release pipeline — Tauri (Rust + JS UI).
+# Triggered by pushing a tag matching v* from tauri-rewrite (or any
+# branch with this workflow file). Builds signed Mac arm64 .dmg and
+# Windows x64 NSIS installer + portable .exe via cargo-tauri, then
+# attaches everything to a GitHub Release.
+#
+# Mac code-signing is opt-in via repository secrets (same pattern as
+# v0.1.0):
+#   MACOS_SIGN_IDENTITY      — full identity name
+#                              ("Developer ID Application: NAME (TEAMID)")
+#   MACOS_CERTIFICATE_P12    — base64-encoded .p12 export of the cert
+#   MACOS_CERTIFICATE_PWD    — password set when exporting the .p12
+#   MACOS_KEYCHAIN_PWD       — fresh password for the throwaway runner keychain
+# When those aren't set, the .dmg ships unsigned and end users get
+# Gatekeeper "unidentified developer" on first launch (recoverable
+# via right-click → Open). Windows always ships unsigned for now (no
+# EV cert).
+#
+# NDI runtime dependency: the v0.2.0 build does NOT bundle
+# libndi.dylib / Processing.NDI.Lib.x64.dll. End users need NDI
+# Tools (free download from ndi.video) installed for the NDI direct-
+# ingest feature. A future release can vendor the redistributable
+# dylib (NDI SDK License Agreement explicitly permits this with
+# attribution); the binary is large (29 MB) and adding it to the
+# repo or downloading it in CI both have tradeoffs that are easier
+# to reason about once the rest of the pipeline is settled.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed by gh release create
+
+jobs:
+
+  # ---------------------------------------------------------------
+  # macOS arm64 — produces "ATEM IP Patchbay_<version>_aarch64.dmg"
+  # ---------------------------------------------------------------
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-macos-arm64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install NDI SDK (Apple)
+        run: |
+          # The grafton-ndi crate's build.rs needs the NDI SDK headers
+          # at /Library/NDI SDK for Apple/include. NewTek's macOS .pkg
+          # installs them there. Network blip falls through to error
+          # so the failure mode is loud (vs the ci.yml soft-skip).
+          curl -fSL -o /tmp/ndi-sdk.pkg \
+            "https://downloads.ndi.tv/SDK/NDI_SDK_Mac/Install_NDI_SDK_v6_Apple.pkg"
+          sudo installer -pkg /tmp/ndi-sdk.pkg -target /
+          ls -la "/Library/NDI SDK for Apple/include" | head -3
+
+      - name: Import signing identity (if secrets are set)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KC_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "MACOS_CERTIFICATE_P12 not set — building unsigned. Users will see Gatekeeper on first launch."
+            exit 0
+          fi
+          # Decode the base64 cert into a temp file.
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          # Throwaway keychain — never touches the runner's default.
+          security create-keychain -p "$KC_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PWD" build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" build.keychain
+          # Make our keychain the default + first in the search list so
+          # `security find-identity` and tauri-cli pick up the cert.
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm /tmp/cert.p12
+
+      - name: Disable signing in tauri.conf.json (no cert configured)
+        if: ${{ env.HAS_CERT != 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+        run: |
+          # When no cert is in the runner's keychain, tauri-cli's
+          # codesign call against the hardcoded "Developer ID
+          # Application: Stephen Walter (6M536MV7GT)" identity fails
+          # with "specified item could not be found in the keychain".
+          # Strip the signingIdentity field so the build produces an
+          # unsigned .app — Gatekeeper warns on first launch
+          # (recoverable via right-click -> Open), same as v0.1.0
+          # without a configured cert.
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('src-tauri/tauri.conf.json')
+          d = json.loads(p.read_text())
+          mac = d.get('bundle', {}).get('macOS', {})
+          mac.pop('signingIdentity', None)
+          p.write_text(json.dumps(d, indent=2) + '\n')
+          print('removed signingIdentity from tauri.conf.json')
+          "
+
+      - name: Build .app + .dmg
+        env:
+          # When the cert IS configured, APPLE_SIGNING_IDENTITY (and
+          # bundle.macOS.signingIdentity in tauri.conf.json) drive the
+          # signing. The env var lets Phase 9's MACOS_SIGN_IDENTITY
+          # secret override the hardcoded identity in the conf.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        working-directory: src-tauri
+        run: cargo tauri build
+
+      - name: Sanity-check the bundle
+        run: |
+          ls -lh "src-tauri/target/release/bundle/dmg/"
+          ls -lh "src-tauri/target/release/bundle/macos/"
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Windows x64 — produces "ATEM IP Patchbay_<version>_x64-setup.exe"
+  # via the NSIS bundle target. Unsigned for now.
+  # ---------------------------------------------------------------
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-windows-x64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install NDI SDK (Windows)
+        shell: pwsh
+        run: |
+          # NewTek's NDI 6 SDK Windows installer is a small .exe
+          # that lays headers + libs under "C:\Program Files\NDI\NDI 6 SDK".
+          $url = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20SDK.exe"
+          $out = "$env:RUNNER_TEMP\ndi-sdk.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          # /S = silent, /D= = install dir (Inno Setup convention).
+          Start-Process -FilePath $out -ArgumentList "/S" -Wait -NoNewWindow
+          Get-ChildItem "C:\Program Files\NDI\NDI 6 SDK\Include" | Select-Object -First 3
+
+      - name: Build .exe + NSIS installer
+        working-directory: src-tauri
+        run: cargo tauri build
+
+      - name: Sanity-check the artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem src-tauri\target\release\bundle\nsis | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Pull both artifacts together and create the GitHub Release.
+  # ---------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history for --generate-notes
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/macos-arm64/*.dmg \
+            artifacts/windows-x64/*.exe
