@@ -291,6 +291,54 @@ struct Cli {
     csv_path: Option<String>,
 }
 
+/// Build a BMD-flavored SRT URL from an `srt://host:port` base + a
+/// stream key. The streamid is the URL-encoded form of
+/// `#!::bmd_uuid=<random>,bmd_name=ATEM-net-diag,u=<key>` — same
+/// shape the main app sends, so the receiver's accept rules see
+/// the same handshake. Caller-mode + 500ms latency match what the
+/// streamer uses by default.
+fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String> {
+    // Split off any query string / streamid the user may have already
+    // included; we're going to overwrite it.
+    let host_port = base.split('?').next().unwrap_or(base);
+    if !host_port.starts_with("srt://") {
+        return Err(format!(
+            "--key requires an srt:// base URL, got {base:?}"
+        ));
+    }
+    // A fixed pseudo-UUID per-process is fine — the receiver doesn't
+    // care, it just needs to PARSE the streamid. Use a constant
+    // tag-style identifier so log lines are matchable across runs.
+    let bmd_uuid = "00000000-0000-0000-0000-617465616d646";
+    // bmd_name is a label the receiver may show in its UI; identifies
+    // this probe so the operator can spot diag traffic vs real streams.
+    let bmd_name = "ATEM-net-diag";
+    let streamid = format!("#!::bmd_uuid={bmd_uuid},bmd_name={bmd_name},u={key}");
+    let encoded = url_encode(&streamid);
+    Ok(format!(
+        "{host_port}?mode=caller&latency=500000&streamid={encoded}"
+    ))
+}
+
+/// Minimal URL-component percent-encoding for the streamid value.
+/// Intentionally aggressive (encodes everything but unreserved
+/// chars) — the receiver decodes per RFC 3986 so over-encoding is
+/// safe; under-encoding (e.g. leaving `=` or `,` unescaped) breaks
+/// the URL parser.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        let safe =
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
 impl Cli {
     fn parse() -> Result<Self, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -301,6 +349,7 @@ impl Cli {
             return Err(usage());
         }
         let mut url: Option<String> = None;
+        let mut key: Option<String> = None;
         let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
         let mut summary_every = DEFAULT_SUMMARY_EVERY;
         let mut csv_path: Option<String> = None;
@@ -331,18 +380,31 @@ impl Cli {
                     iter.next()
                         .ok_or_else(|| "--csv needs a path".to_string())?,
                 );
+            } else if a == "--key" {
+                key = Some(
+                    iter.next()
+                        .ok_or_else(|| "--key needs a value".to_string())?,
+                );
             } else if !a.starts_with('-') && url.is_none() {
                 url = Some(a);
             } else {
                 return Err(format!("unknown argument: {a}"));
             }
         }
-        let url = url.ok_or_else(usage)?;
+        let mut url = url.ok_or_else(usage)?;
         if !(url.starts_with("srt://") || url.starts_with("rtmp://") || url.starts_with("rtmps://"))
         {
             return Err(format!(
                 "URL should start with srt:// or rtmp(s):// — got {url}"
             ));
+        }
+        // --key K rebuilds the URL with the BMD-flavored streamid the
+        // main app sends. SRT-only — RTMP keys go in the URL path,
+        // not the streamid, so --key on rtmp:// is a no-op.
+        if let Some(k) = key {
+            if url.starts_with("srt://") {
+                url = build_bmd_srt_url(&url, &k)?;
+            }
         }
         Ok(Self {
             url,
@@ -367,6 +429,10 @@ flags:
     --no-summary         Don't print periodic summaries
     --csv FILE           Append every probe to FILE as CSV (auto-creates with
                          header: unix_seconds,clock,outcome,latency_ms)
+    --key K              Build a BMD-flavored streamid (#!::bmd_uuid=...,u=K)
+                         and append it to the SRT URL — the same handshake
+                         the main app sends. Use this to probe-with-a-key
+                         without hand-crafting the streamid.
     -h, --help           Show this help
 
 what to look for:
