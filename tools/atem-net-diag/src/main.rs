@@ -28,6 +28,8 @@
 //!     `--pcap <iface>` mode that wraps tshark with a port 1935
 //!     filter and parses HSv5 control packets.
 
+mod dashboard;
+
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -50,6 +52,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if let Some(port) = cli.ui_port {
+        dashboard::run(&cli, port);
+    }
 
     if let Some(iface) = cli.monitor_iface.as_deref() {
         run_monitor(&cli, iface);
@@ -165,7 +171,7 @@ fn do_probe(cli: &Cli, key: &str, url: &str, tracker: &mut Tracker) {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ProbeOutcome {
+pub(crate) enum ProbeOutcome {
     Connected,
     Rejected,
     Timeout,
@@ -196,18 +202,18 @@ struct Tracker {
 }
 
 #[derive(Default)]
-struct Stats {
-    total_probes: u64,
-    connected: u64,
-    rejected: u64,
-    timeout: u64,
-    latency_min_ms: u64,
-    latency_max_ms: u64,
-    latency_sum_ms: u64,
+pub(crate) struct Stats {
+    pub total_probes: u64,
+    pub connected: u64,
+    pub rejected: u64,
+    pub timeout: u64,
+    pub latency_min_ms: u64,
+    pub latency_max_ms: u64,
+    pub latency_sum_ms: u64,
 }
 
 impl Stats {
-    fn record(&mut self, outcome: &ProbeOutcome, latency_ms: u64) {
+    pub fn record(&mut self, outcome: &ProbeOutcome, latency_ms: u64) {
         self.total_probes += 1;
         match outcome {
             ProbeOutcome::Connected => self.connected += 1,
@@ -251,7 +257,7 @@ impl Stats {
 /// Spawn FFmpeg with a tight read window against the URL. Exit code
 /// 0 = handshake + first packet read worked = receiver is accepting.
 /// Anything else = receiver rejected, timed out, or unreachable.
-fn probe(url: &str) -> ProbeOutcome {
+pub(crate) fn probe(url: &str) -> ProbeOutcome {
     let started = Instant::now();
     let status = Command::new("ffmpeg")
         .args([
@@ -297,20 +303,20 @@ fn ffmpeg_available() -> bool {
 
 // ---- Monitor mode (tshark wrapper) ------------------------------------------
 
-const TSHARK_PATHS: &[&str] = &[
+pub(crate) const TSHARK_PATHS: &[&str] = &[
     "/Applications/Wireshark.app/Contents/MacOS/tshark",
     "/usr/local/bin/tshark",
     "/opt/homebrew/bin/tshark",
     "/usr/bin/tshark",
 ];
 
-const DEFAULT_MONITOR_PORTS: &[u16] = &[1935, 9710, 9977, 1936];
+pub(crate) const DEFAULT_MONITOR_PORTS: &[u16] = &[1935, 9710, 9977, 1936];
 const MONITOR_PRINT_EVERY: Duration = Duration::from_secs(5);
 /// Hide flows we haven't seen a packet for in this long. Stale rows
 /// pile up over a long-running session otherwise.
 const FLOW_STALE_THRESHOLD: Duration = Duration::from_secs(60);
 
-fn find_tshark() -> Option<&'static str> {
+pub(crate) fn find_tshark() -> Option<&'static str> {
     for p in TSHARK_PATHS {
         if std::path::Path::new(p).is_file() {
             return Some(*p);
@@ -467,18 +473,18 @@ fn run_monitor(cli: &Cli, iface: &str) {
 }
 
 #[derive(Debug, Clone)]
-struct PacketInfo {
-    src_ip: String,
-    src_port: u16,
-    dst_ip: String,
-    dst_port: u16,
-    is_udp: bool,
-    protocol: String,
-    bytes: u64,
+pub(crate) struct PacketInfo {
+    pub src_ip: String,
+    pub src_port: u16,
+    pub dst_ip: String,
+    pub dst_port: u16,
+    pub is_udp: bool,
+    pub protocol: String,
+    pub bytes: u64,
 }
 
 impl PacketInfo {
-    fn flow_key(&self) -> FlowKey {
+    pub fn flow_key(&self) -> FlowKey {
         FlowKey {
             src_ip: self.src_ip.clone(),
             src_port: self.src_port,
@@ -491,26 +497,26 @@ impl PacketInfo {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct FlowKey {
-    src_ip: String,
-    src_port: u16,
-    dst_ip: String,
-    dst_port: u16,
-    is_udp: bool,
-    protocol: String,
+pub(crate) struct FlowKey {
+    pub src_ip: String,
+    pub src_port: u16,
+    pub dst_ip: String,
+    pub dst_port: u16,
+    pub is_udp: bool,
+    pub protocol: String,
 }
 
 #[derive(Default)]
-struct FlowStats {
-    total_bytes: u64,
-    total_packets: u64,
-    window_bytes: u64,
-    window_packets: u64,
-    last_seen: Option<Instant>,
+pub(crate) struct FlowStats {
+    pub total_bytes: u64,
+    pub total_packets: u64,
+    pub window_bytes: u64,
+    pub window_packets: u64,
+    pub last_seen: Option<Instant>,
 }
 
 impl FlowStats {
-    fn record(&mut self, bytes: u64) {
+    pub fn record(&mut self, bytes: u64) {
         self.total_bytes += bytes;
         self.total_packets += 1;
         self.window_bytes += bytes;
@@ -519,7 +525,7 @@ impl FlowStats {
     }
 }
 
-fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
+pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
     // 9 fields separated by commas:
     // time, ip.src, tcp.srcport, udp.srcport, ip.dst, tcp.dstport, udp.dstport, proto, frame.len
     let fields: Vec<&str> = line.split(',').collect();
@@ -660,7 +666,7 @@ fn csv_write_row(path: &str, key: &str, outcome: &ProbeOutcome, latency_ms: u64)
 /// stream key. The streamid is the URL-encoded form of
 /// `#!::bmd_uuid=<random>,bmd_name=ATEM-net-diag,u=<key>` — same
 /// shape the main app sends.
-fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String> {
+pub(crate) fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String> {
     let host_port = base.split('?').next().unwrap_or(base);
     if !host_port.starts_with("srt://") {
         return Err(format!("--key requires an srt:// base URL, got {base:?}"));
@@ -689,17 +695,20 @@ fn url_encode(s: &str) -> String {
 }
 
 #[derive(Debug)]
-struct Cli {
-    url: String,
-    keys: Vec<String>,
-    interval: Duration,
-    summary_every: u32,
-    csv_path: Option<String>,
+pub(crate) struct Cli {
+    pub url: String,
+    pub keys: Vec<String>,
+    pub interval: Duration,
+    pub summary_every: u32,
+    pub csv_path: Option<String>,
     /// Some(iface) when --monitor is set; runs the tshark wrapper
     /// instead of the probe loop. URL/keys still required by parser
     /// but ignored in monitor mode.
-    monitor_iface: Option<String>,
-    monitor_ports: Vec<u16>,
+    pub monitor_iface: Option<String>,
+    pub monitor_ports: Vec<u16>,
+    /// Some(port) when --ui is set. Spins up the embedded HTTP
+    /// dashboard at http://127.0.0.1:port/ instead of the CLI.
+    pub ui_port: Option<u16>,
 }
 
 impl Cli {
@@ -718,9 +727,24 @@ impl Cli {
         let mut csv_path: Option<String> = None;
         let mut monitor_iface: Option<String> = None;
         let mut monitor_ports: Vec<u16> = Vec::new();
+        let mut ui_port: Option<u16> = None;
         let mut iter = args.into_iter();
         while let Some(a) = iter.next() {
-            if a == "--monitor" {
+            if a == "--ui" {
+                // Optional port arg; default 8092.
+                let next = iter.clone().next();
+                let port = if let Some(v) = next {
+                    if let Ok(p) = v.parse::<u16>() {
+                        iter.next();
+                        p
+                    } else {
+                        8092
+                    }
+                } else {
+                    8092
+                };
+                ui_port = Some(port);
+            } else if a == "--monitor" {
                 monitor_iface = Some(iter.next().unwrap_or_else(|| {
                     if cfg!(target_os = "macos") {
                         "en0".into()
@@ -765,16 +789,19 @@ impl Cli {
         }
         // Monitor mode short-circuits the URL requirement — tshark
         // captures from the network interface, not from a remote URL.
-        // Use a sentinel URL so the rest of the struct types match.
-        if monitor_iface.is_some() {
+        // UI mode similarly tolerates a missing URL when only
+        // monitoring is configured. Use a sentinel URL so the rest
+        // of the struct types match.
+        if monitor_iface.is_some() && url.is_none() {
             return Ok(Self {
-                url: url.unwrap_or_else(|| "monitor://".into()),
+                url: "monitor://".into(),
                 keys,
                 interval,
                 summary_every,
                 csv_path,
                 monitor_iface,
                 monitor_ports,
+                ui_port,
             });
         }
         let url = url.ok_or_else(usage)?;
@@ -804,6 +831,7 @@ impl Cli {
             csv_path,
             monitor_iface,
             monitor_ports,
+            ui_port,
         })
     }
 }
@@ -844,6 +872,14 @@ flags:
                          listener), 9977 (BMD ctrl), 1936. Repeat to add
                          multiple. Without --monitor, this flag has no
                          effect.
+    --ui [PORT]          Spin up a visual dashboard at http://127.0.0.1:PORT
+                         (default 8092) and open it in your browser. The
+                         dashboard polls /api/state every 1s and shows
+                         per-key probe status, recent probe timeline, and
+                         (if --monitor is also set) the live flow table.
+                         Combine with all the other flags — probes still
+                         run in the background, the UI is just a passive
+                         consumer of the same state. Ctrl-C to quit.
     -h, --help           Show this help
 
 what to look for:

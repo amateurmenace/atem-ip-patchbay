@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>atem-net-diag · live</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0e0f12;
+      --panel: #16181f;
+      --panel-2: #1d2030;
+      --line: #2a2d36;
+      --text: #e6e6ea;
+      --muted: #9aa1ad;
+      --muted-2: #6b7280;
+      --signal: #4ea7ff;
+      --accent: #ff8a38;
+      --good: #46c986;
+      --bad: #e35c5c;
+      --warn: #f3c44b;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); font-size: 13px;
+    }
+    code, pre, .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; }
+    a { color: var(--signal); }
+    h1, h2 { margin: 0; font-weight: 700; }
+    h1 { font-size: 18px; letter-spacing: 0.04em; }
+    h2 { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+    header {
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 16px;
+      background: var(--panel);
+    }
+    header .pill {
+      font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+      padding: 3px 9px; border-radius: 11px; background: rgba(78,167,255,0.18); color: var(--signal);
+    }
+    header .target { color: var(--muted); font-size: 12px; }
+    header .target code { color: var(--text); }
+    header .uptime { margin-left: auto; color: var(--muted); font-size: 12px; }
+    main {
+      padding: 18px 22px; display: grid; gap: 16px;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 14px 16px;
+    }
+    .card.full { grid-column: 1 / -1; }
+    .card .empty {
+      color: var(--muted); font-size: 12px; padding: 12px 0;
+    }
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .key-card {
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 11px 13px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .key-card .name { font-weight: 700; color: var(--text); font-size: 13px; word-break: break-all; }
+    .key-card .meta { color: var(--muted); font-size: 11px; }
+    .key-card.connected { border-color: rgba(70,201,134,0.55); box-shadow: 0 0 0 1px rgba(70,201,134,0.15); }
+    .key-card.rejected { border-color: rgba(227,92,92,0.55); box-shadow: 0 0 0 1px rgba(227,92,92,0.15); }
+    .key-card.timeout { border-color: rgba(243,196,75,0.55); box-shadow: 0 0 0 1px rgba(243,196,75,0.15); }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10.5px;
+      font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .badge.connected { background: rgba(70,201,134,0.18); color: var(--good); }
+    .badge.rejected { background: rgba(227,92,92,0.18); color: var(--bad); }
+    .badge.timeout { background: rgba(243,196,75,0.18); color: var(--warn); }
+    .badge.idle { background: rgba(154,161,173,0.18); color: var(--muted); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 6px 8px; }
+    th {
+      color: var(--muted-2); font-weight: 600; text-transform: uppercase; font-size: 10px;
+      letter-spacing: 0.14em; border-bottom: 1px solid var(--line);
+    }
+    tr.row-recent { background: rgba(78,167,255,0.04); }
+    td.mono { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-size: 11.5px; }
+    td.right { text-align: right; }
+    td .small { color: var(--muted); font-size: 11px; }
+
+    .timeline {
+      display: flex; gap: 2px; flex-wrap: wrap;
+    }
+    .pulse {
+      width: 11px; height: 11px; border-radius: 2px;
+      background: var(--muted-2);
+    }
+    .pulse.connected { background: var(--good); }
+    .pulse.rejected { background: var(--bad); }
+    .pulse.timeout { background: var(--warn); }
+
+    .health { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+    .health.alive { background: var(--good); box-shadow: 0 0 8px rgba(70,201,134,0.65); }
+    .health.dead { background: var(--bad); }
+
+    footer {
+      padding: 10px 22px; border-top: 1px solid var(--line);
+      color: var(--muted-2); font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>atem-net-diag</h1>
+    <span class="pill">live</span>
+    <span class="target" id="target">loading…</span>
+    <span class="uptime" id="uptime"></span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Active probes <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="probes-summary"></span></h2>
+      <div class="keys" id="keys"></div>
+      <div class="empty" id="probes-empty" hidden>
+        No probes running. Start the tool with <code>--key KEY</code> (or no key for a bare URL probe) to populate this panel.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Process health</h2>
+      <div id="health"></div>
+    </section>
+
+    <section class="card full">
+      <h2>Recent probe timeline (newest right)</h2>
+      <div class="timeline" id="timeline"></div>
+      <table style="margin-top: 12px;" id="probe-table" hidden>
+        <thead>
+          <tr><th>time</th><th>key</th><th>outcome</th><th class="right">latency</th></tr>
+        </thead>
+        <tbody id="probe-table-body"></tbody>
+      </table>
+      <div class="empty" id="timeline-empty" hidden>(no probes recorded yet)</div>
+    </section>
+
+    <section class="card full">
+      <h2>Live flows <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="flows-summary"></span></h2>
+      <table id="flow-table" hidden>
+        <thead>
+          <tr>
+            <th>source</th>
+            <th>destination</th>
+            <th>proto</th>
+            <th class="right">total bytes</th>
+            <th class="right">recent (5s)</th>
+            <th class="right">idle</th>
+          </tr>
+        </thead>
+        <tbody id="flow-table-body"></tbody>
+      </table>
+      <div class="empty" id="flows-empty">
+        Monitor mode not enabled. Start the tool with <code>--monitor en0</code> (or your LAN interface) to populate this panel.
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Polling every 1s · ATEM IP Patchbay · network diagnostic utility ·
+    <a href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">github</a>
+  </footer>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    function fmtBytes(b) {
+      if (b == null) return '—';
+      if (b < 1024) return b + ' B';
+      if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+      if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+      return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+    function fmtTime(unixSecs) {
+      const d = new Date(unixSecs * 1000);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+    function fmtAgo(secsAgo) {
+      if (secsAgo == null || !isFinite(secsAgo)) return '∞';
+      if (secsAgo < 1) return '<1s';
+      if (secsAgo < 60) return secsAgo.toFixed(0) + 's';
+      if (secsAgo < 3600) return (secsAgo / 60).toFixed(1) + 'm';
+      return (secsAgo / 3600).toFixed(1) + 'h';
+    }
+    function fmtUptime(s) {
+      if (s < 60) return s + 's';
+      if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return h + 'h ' + m + 'm';
+    }
+
+    function renderState(s) {
+      const cfg = s.config || {};
+      const target = cfg.url && cfg.url !== 'monitor://'
+        ? `<code>${cfg.url}</code>`
+        : '<em>(monitor only)</em>';
+      const keysSeg = (cfg.keys && cfg.keys.length)
+        ? ` &middot; ${cfg.keys.length} key(s)` : '';
+      const monSeg = cfg.monitor_iface
+        ? ` &middot; monitor <code>${cfg.monitor_iface}</code>` : '';
+      $('#target').innerHTML = `target: ${target}${keysSeg}${monSeg}`;
+      $('#uptime').textContent = 'uptime ' + fmtUptime(s.now - s.started_at);
+
+      // Active probe per-key cards
+      const keysEl = $('#keys');
+      const empty = $('#probes-empty');
+      const items = Object.entries(s.per_key || {});
+      if (items.length === 0) {
+        empty.hidden = false;
+        keysEl.innerHTML = '';
+      } else {
+        empty.hidden = true;
+        keysEl.innerHTML = items.map(([key, st]) => {
+          const last = st.last_outcome || 'idle';
+          const cls = last === 'connected' ? 'connected'
+                    : last === 'rejected' ? 'rejected'
+                    : last === 'timeout' ? 'timeout' : 'idle';
+          const label = key === '' ? '<em>(no key)</em>' : key;
+          return `
+            <div class="key-card ${cls}">
+              <div class="name mono">${label}</div>
+              <div><span class="badge ${cls}">${last}</span></div>
+              <div class="meta">${st.success_pct.toFixed(1)}% ok · ${st.probes} probes · avg ${st.latency_avg_ms}ms</div>
+              <div class="meta">min ${st.latency_min_ms}ms · max ${st.latency_max_ms}ms</div>
+            </div>`;
+        }).join('');
+      }
+      $('#probes-summary').textContent = items.length
+        ? `${items.length} key${items.length === 1 ? '' : 's'} tracked`
+        : '';
+
+      // Process health
+      const probeStatus = s.probe_thread_alive ? 'alive' : 'idle';
+      const monStatus = s.monitor_thread_alive ? 'alive' : 'off';
+      const lastProbeAgo = s.last_probe_at ? (s.now - s.last_probe_at) : null;
+      const lastFlowAgo = s.last_flow_at ? (s.now - s.last_flow_at) : null;
+      $('#health').innerHTML = `
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+          <div>
+            <span class="health ${s.probe_thread_alive ? 'alive' : 'dead'}"></span>
+            <strong>Active probe</strong>
+            <span style="color:var(--muted);"> &middot; ${probeStatus}</span>
+            <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last: ${fmtAgo(lastProbeAgo)} ago</div>
+          </div>
+          <div>
+            <span class="health ${cfg.monitor_iface && s.monitor_thread_alive ? 'alive' : 'dead'}"></span>
+            <strong>Flow monitor</strong>
+            <span style="color:var(--muted);"> &middot; ${cfg.monitor_iface ? monStatus : 'not enabled'}</span>
+            <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last packet: ${fmtAgo(lastFlowAgo)} ago</div>
+          </div>
+        </div>`;
+
+      // Probe timeline + table
+      const timeline = $('#timeline');
+      const probes = (s.probes || []).slice(-100);
+      if (probes.length === 0) {
+        $('#timeline-empty').hidden = false;
+        $('#probe-table').hidden = true;
+        timeline.innerHTML = '';
+      } else {
+        $('#timeline-empty').hidden = true;
+        $('#probe-table').hidden = false;
+        timeline.innerHTML = probes
+          .map((p) => `<div class="pulse ${p.outcome}" title="${fmtTime(p.timestamp)} · ${p.key || '(no key)'} · ${p.outcome} · ${p.latency_ms}ms"></div>`)
+          .join('');
+        const recent = probes.slice(-20).reverse();
+        $('#probe-table-body').innerHTML = recent
+          .map((p) => `
+            <tr>
+              <td class="mono">${fmtTime(p.timestamp)}</td>
+              <td class="mono">${p.key || '<span class="small">(no key)</span>'}</td>
+              <td><span class="badge ${p.outcome}">${p.outcome}</span></td>
+              <td class="right mono">${p.latency_ms}ms</td>
+            </tr>`).join('');
+      }
+
+      // Flows
+      const flows = s.flows || [];
+      const flowEmpty = $('#flows-empty');
+      const flowTable = $('#flow-table');
+      const flowSummary = $('#flows-summary');
+      if (!cfg.monitor_iface) {
+        flowEmpty.hidden = false;
+        flowEmpty.innerHTML = `Monitor mode not enabled. Start the tool with <code>--monitor en0</code> (or your LAN interface) to populate this panel.`;
+        flowTable.hidden = true;
+        flowSummary.textContent = '';
+      } else if (flows.length === 0) {
+        flowEmpty.hidden = false;
+        flowEmpty.innerHTML = `Listening on <code>${cfg.monitor_iface}</code> for ports <code>${(cfg.monitor_ports.length ? cfg.monitor_ports : [1935, 9710, 9977, 1936]).join(', ')}</code> — no traffic yet.`;
+        flowTable.hidden = true;
+        flowSummary.textContent = '';
+      } else {
+        flowEmpty.hidden = true;
+        flowTable.hidden = false;
+        flowSummary.textContent = `${flows.length} active`;
+        $('#flow-table-body').innerHTML = flows.slice(0, 30).map((f) => {
+          const proto = f.protocol || (f.is_udp ? 'UDP' : 'TCP');
+          const rate = f.recent_bytes ? fmtBytes(Math.round(f.recent_bytes / 5)) + '/s' : '—';
+          return `
+            <tr ${f.recent_bytes > 0 ? 'class="row-recent"' : ''}>
+              <td class="mono">${f.src_ip}:${f.src_port}</td>
+              <td class="mono">${f.dst_ip}:${f.dst_port}</td>
+              <td>${proto}</td>
+              <td class="right mono">${fmtBytes(f.total_bytes)}</td>
+              <td class="right mono">${rate}</td>
+              <td class="right mono">${fmtAgo(f.idle_secs)}</td>
+            </tr>`;
+        }).join('');
+      }
+    }
+
+    async function tick() {
+      try {
+        const r = await fetch('/api/state', { cache: 'no-cache' });
+        if (!r.ok) return;
+        const s = await r.json();
+        renderState(s);
+      } catch (e) {
+        console.error('tick:', e);
+      }
+    }
+    tick();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>
