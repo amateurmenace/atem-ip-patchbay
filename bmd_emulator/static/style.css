@@ -766,8 +766,17 @@ button.big { padding: 14px 18px; font-size: 14px; }
   letter-spacing: 0.04em;
   white-space: nowrap;
   text-align: right;
-  max-width: 220px;
+  max-width: 240px;
   line-height: 1.2;
+}
+.kill-orphans-asterisk {
+  color: var(--accent);
+  font-weight: 700;
+  margin-left: 2px;
+}
+.kill-orphans-hint .kill-orphans-asterisk {
+  margin-left: 0;
+  margin-right: 2px;
 }
 
 /* Port-forwarding callout — sits right under the destination Address
