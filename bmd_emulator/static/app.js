@@ -338,7 +338,7 @@ function updatePreviewButton(snap) {
     if (isStreaming) {
       els.previewBtn.title = 'Streaming — preview pane is already showing the live encoder output.';
     } else if (supported) {
-      els.previewBtn.title = 'Spin up a low-bandwidth NDI receiver so you can see the source before starting the stream.';
+      els.previewBtn.title = 'Spin up an NDI receiver so you can see the source before starting the stream.';
     } else {
       els.previewBtn.title = 'Pre-stream preview is only available for NDI sources today (FFmpeg-snapshot backend for cameras / pipes lands in a follow-up).';
     }

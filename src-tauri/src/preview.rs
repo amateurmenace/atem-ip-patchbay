@@ -1,7 +1,7 @@
 //! Pre-stream live preview backend.
 //!
-//! Spins up a separate, low-bandwidth NDI receiver (no FFmpeg, no
-//! mpsc to the streamer) so the user can see a source BEFORE
+//! Spins up a separate NDI receiver (no FFmpeg, no mpsc to the
+//! streamer) at full bandwidth so the user can see a source BEFORE
 //! clicking Start Stream. Encodes JPEG snapshots into the same
 //! `latest` slot the streaming path uses so the existing
 //! /api/preview poll loop on the JS side just works — the JPEGs
@@ -39,11 +39,12 @@ use tokio::sync::Mutex as TokioMutex;
 /// sampler uses — looks fine at the small Monitor pane size and keeps
 /// the per-frame payload at tens of KB even at 1080p.
 const PREVIEW_JPEG_QUALITY: u8 = 60;
-/// Sample one JPEG every N captured frames. NDI Lowest-bandwidth
-/// senders typically deliver ~15 fps, so stride 5 -> ~3 fps preview,
-/// well above the visual flicker floor and below the JPEG encode cost
-/// budget on M-series.
-const PREVIEW_FRAME_STRIDE: u64 = 5;
+/// Sample one JPEG every N captured frames. With ReceiverBandwidth::
+/// Highest the source rate matches the sender's native (typically
+/// 30/60 fps), so stride 15 -> ~2-4 fps preview — same cadence as
+/// the streaming path's sampler, well above the visual flicker
+/// floor, and inexpensive at JPEG encode time on M-series.
+const PREVIEW_FRAME_STRIDE: u64 = 15;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewStatus {
@@ -111,7 +112,7 @@ impl Preview {
         self.latest.lock().unwrap().clone()
     }
 
-    /// Spin up a low-bandwidth NDI preview for the named sender.
+    /// Spin up a full-bandwidth NDI preview for the named sender.
     /// Idempotent re: an already-running backend — stops the prior
     /// one before starting the new one. Returns once the receiver is
     /// constructed; the first JPEG arrives ~250-1000ms later
@@ -134,16 +135,18 @@ impl Preview {
             &ndi,
             &ReceiverOptions::builder(source)
                 .color(ReceiverColorFormat::BGRX_BGRA)
-                // Lowest-bandwidth mode tells the sender we want a
-                // proxy stream — NDI senders that support it deliver
-                // a downsampled version (~640x360-ish) at reduced
-                // framerate. This is the whole point of the preview
-                // backend: see the source without saturating the
-                // sender's upload or our own encoder budget. A sender
-                // that doesn't support proxy delivers full-quality
-                // frames; we still only sample one per N for JPEG
-                // encode so the cost stays bounded.
-                .bandwidth(ReceiverBandwidth::Lowest)
+                // Highest-bandwidth — the sender's full-quality
+                // stream, same as the streaming path's receiver.
+                // Lowest (the NDI proxy stream, ~640x360 at reduced
+                // fps) is the obvious bandwidth-saving choice but
+                // produces a preview ugly enough that users assume
+                // their camera is broken — the whole point of this
+                // button is to verify the source LOOKS RIGHT before
+                // they commit to a real outbound stream. On a LAN
+                // NDI source the upload cost is negligible; we only
+                // sample one frame per PREVIEW_FRAME_STRIDE for the
+                // JPEG encode so our local CPU cost stays bounded.
+                .bandwidth(ReceiverBandwidth::Highest)
                 .build(),
         )?;
 
