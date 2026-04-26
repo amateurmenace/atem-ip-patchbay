@@ -751,32 +751,42 @@ button.big { padding: 14px 18px; font-size: 14px; }
   font-size: 11.5px;
 }
 
-/* Kill-stuck-streams cluster in the topbar — button plus a tiny
-   inline caption so the user knows what it does without having to
-   hover for the tooltip. */
-.kill-orphans-wrap {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
+/* Recovery card — sits in the left column under Overlays. Big
+   destructive action with a paragraph or two of explanation so the
+   user understands what they're doing before clicking. */
+.recovery-card {
+  /* Inherits .card padding + border. */
 }
-.kill-orphans-hint {
-  font-size: 9.5px;
-  color: var(--muted);
+.recovery-lead {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.recovery-lead code {
+  background: var(--panel-3, rgba(255,255,255,0.04));
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+.recovery-btn {
+  /* Override .primary blue with a destructive red — this kills
+     processes, the visual weight should match. */
+  width: 100%;
+  margin: 6px 0 12px;
+  background: linear-gradient(180deg, #d44b3b 0%, #a8341f 100%);
+  border-color: #a8341f;
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.25);
+  font-size: 15px;
   letter-spacing: 0.04em;
-  white-space: nowrap;
-  text-align: right;
-  max-width: 240px;
-  line-height: 1.2;
 }
-.kill-orphans-asterisk {
-  color: var(--accent);
-  font-weight: 700;
-  margin-left: 2px;
-}
-.kill-orphans-hint .kill-orphans-asterisk {
-  margin-left: 0;
-  margin-right: 2px;
+.recovery-btn:hover { filter: brightness(1.06); }
+.recovery-foot {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 /* Port-forwarding callout — sits right under the destination Address

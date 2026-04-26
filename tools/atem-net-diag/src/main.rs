@@ -4,16 +4,17 @@
 //! machine on the same LAN as the ATEM (or anywhere with line-of-
 //! sight to the receiver) so the user can characterize the
 //! "ATEM stops accepting after a few stream tests" lockout the
-//! main app's clean-exit handler can't cover.
+//! main app's clean-exit handler can't always cover.
 //!
 //! Usage:
-//!   atem-net-diag <srt://host:port[?streamid=...]>           # default 5s interval
-//!   atem-net-diag <srt://...> --interval 2                   # 2s interval
-//!   atem-net-diag <rtmp://host:port/app/key>                 # works on RTMP too
+//!   atem-net-diag <srt://host:port[?streamid=...]>
+//!   atem-net-diag <srt://...> --interval 2 --summary-every 12
+//!   atem-net-diag <rtmp://host:port/app/key> --csv probes.csv
 //!
 //! Output: one line per probe, with state-change moments called out
-//! loudly. Unbuffered so it can pipe into `tee` / a logfile and stay
-//! readable while running.
+//! loudly (=== STATE CHANGE ===). Optional periodic summary line
+//! showing success rate + latency distribution. Optional CSV log of
+//! every probe for offline analysis.
 //!
 //! What this won't do (yet):
 //!   - Inspect bandwidth / per-session stats. That requires a real
@@ -21,15 +22,18 @@
 //!     OR pcap-level inspection. Future iteration may grow a
 //!     `--pcap <iface>` mode that wraps tshark with a port 1935
 //!     filter and parses HSv5 control packets.
-//!   - Distinguish "destination dropped THIS connection" vs
-//!     "destination accepting nobody". The probe is yes/no — the
-//!     transition pattern (CONNECTED → REJECTED → REJECTED → ...)
-//!     is itself a strong diagnostic.
+//!   - Multi-key rotation (probe-with-key-A, probe-with-key-B, ...
+//!     to distinguish per-key lockouts from destination-wide).
+//!     Today, run multiple instances of the tool with different
+//!     URLs in separate terminals if you want this.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const DEFAULT_INTERVAL_SECS: u64 = 5;
+const DEFAULT_SUMMARY_EVERY: u32 = 12;
 /// Per-probe FFmpeg timeout in microseconds (FFmpeg's `-timeout`
 /// flag for SRT/RTMP). 3s is enough for the handshake on a healthy
 /// receiver; longer values just slow down the loop when the
@@ -54,19 +58,35 @@ fn main() {
     }
 
     println!("[{}] probing {}  every {}s", clock_now(), cli.url, cli.interval.as_secs());
+    if cli.summary_every > 0 {
+        println!(
+            "[{}] summary every {} probes ({:.0}s wall-clock)",
+            clock_now(),
+            cli.summary_every,
+            cli.interval.as_secs() as f64 * cli.summary_every as f64,
+        );
+    }
+    if let Some(path) = cli.csv_path.as_deref() {
+        println!("[{}] csv log: {path}", clock_now());
+        // Write header if the file's empty / new.
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() == 0 {
+                csv_write_header(path);
+            }
+        } else {
+            csv_write_header(path);
+        }
+    }
     println!("[{}] (Ctrl-C to stop)", clock_now());
 
+    let mut stats = Stats::default();
     let mut last_state: Option<bool> = None;
     let mut consecutive: u32 = 0;
     loop {
         let started = Instant::now();
         let result = probe(&cli.url);
-        let elapsed_ms = started.elapsed().as_millis();
-        let label = match result {
-            ProbeOutcome::Connected => "CONNECTED",
-            ProbeOutcome::Rejected => "REJECTED ",
-            ProbeOutcome::Timeout => "TIMEOUT  ",
-        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let label = result.label();
         let state_bool = matches!(result, ProbeOutcome::Connected);
         let changed = last_state.is_some() && last_state != Some(state_bool);
         if changed {
@@ -89,15 +109,96 @@ fn main() {
         }
         last_state = Some(state_bool);
 
+        stats.record(&result, elapsed_ms);
+        if let Some(path) = cli.csv_path.as_deref() {
+            csv_write_row(path, &result, elapsed_ms);
+        }
+
+        if cli.summary_every > 0 && stats.total_probes % cli.summary_every as u64 == 0 {
+            println!("[{}] {}", clock_now(), stats.summary_line());
+        }
+
         std::thread::sleep(cli.interval);
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ProbeOutcome {
     Connected,
     Rejected,
     Timeout,
+}
+
+impl ProbeOutcome {
+    fn label(&self) -> &'static str {
+        match self {
+            ProbeOutcome::Connected => "CONNECTED",
+            ProbeOutcome::Rejected => "REJECTED ",
+            ProbeOutcome::Timeout => "TIMEOUT  ",
+        }
+    }
+    fn csv_label(&self) -> &'static str {
+        match self {
+            ProbeOutcome::Connected => "connected",
+            ProbeOutcome::Rejected => "rejected",
+            ProbeOutcome::Timeout => "timeout",
+        }
+    }
+}
+
+#[derive(Default)]
+struct Stats {
+    total_probes: u64,
+    connected: u64,
+    rejected: u64,
+    timeout: u64,
+    /// Latency in ms across all probes regardless of outcome — useful
+    /// for spotting "destination is degrading" before it fully fails.
+    latency_min_ms: u64,
+    latency_max_ms: u64,
+    latency_sum_ms: u64,
+}
+
+impl Stats {
+    fn record(&mut self, outcome: &ProbeOutcome, latency_ms: u64) {
+        self.total_probes += 1;
+        match outcome {
+            ProbeOutcome::Connected => self.connected += 1,
+            ProbeOutcome::Rejected => self.rejected += 1,
+            ProbeOutcome::Timeout => self.timeout += 1,
+        }
+        if self.total_probes == 1 || latency_ms < self.latency_min_ms {
+            self.latency_min_ms = latency_ms;
+        }
+        if latency_ms > self.latency_max_ms {
+            self.latency_max_ms = latency_ms;
+        }
+        self.latency_sum_ms += latency_ms;
+    }
+
+    fn summary_line(&self) -> String {
+        let success_pct = if self.total_probes == 0 {
+            0.0
+        } else {
+            (self.connected as f64 / self.total_probes as f64) * 100.0
+        };
+        let avg_ms = if self.total_probes == 0 {
+            0
+        } else {
+            self.latency_sum_ms / self.total_probes
+        };
+        format!(
+            "summary  probes={}  ok={} ({:.1}%)  reject={}  timeout={}  latency: min={}ms avg={}ms max={}ms",
+            self.total_probes,
+            self.connected,
+            success_pct,
+            self.rejected,
+            self.timeout,
+            self.latency_min_ms,
+            avg_ms,
+            self.latency_max_ms,
+        )
+    }
 }
 
 /// Spawn FFmpeg with a tight read window against the URL. Exit code
@@ -154,10 +255,40 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
+fn csv_write_header(path: &str) {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "unix_seconds,clock,outcome,latency_ms");
+    }
+}
+
+fn csv_write_row(path: &str, outcome: &ProbeOutcome, latency_ms: u64) {
+    if let Ok(mut f) = OpenOptions::new().append(true).open(path) {
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(
+            f,
+            "{},{},{},{}",
+            unix,
+            clock_now(),
+            outcome.csv_label(),
+            latency_ms,
+        );
+    }
+}
+
 #[derive(Debug)]
 struct Cli {
     url: String,
     interval: Duration,
+    summary_every: u32,
+    csv_path: Option<String>,
 }
 
 impl Cli {
@@ -171,6 +302,8 @@ impl Cli {
         }
         let mut url: Option<String> = None;
         let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
+        let mut summary_every = DEFAULT_SUMMARY_EVERY;
+        let mut csv_path: Option<String> = None;
         let mut iter = args.into_iter();
         while let Some(a) = iter.next() {
             if a == "--interval" {
@@ -184,34 +317,65 @@ impl Cli {
                     return Err("--interval must be > 0".into());
                 }
                 interval = Duration::from_secs(secs);
+            } else if a == "--summary-every" {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--summary-every needs a value (probes)".to_string())?;
+                summary_every = v
+                    .parse()
+                    .map_err(|_| format!("--summary-every value not an integer: {v}"))?;
+            } else if a == "--no-summary" {
+                summary_every = 0;
+            } else if a == "--csv" {
+                csv_path = Some(
+                    iter.next()
+                        .ok_or_else(|| "--csv needs a path".to_string())?,
+                );
             } else if !a.starts_with('-') && url.is_none() {
                 url = Some(a);
             } else {
                 return Err(format!("unknown argument: {a}"));
             }
         }
-        let url = url.ok_or_else(|| usage())?;
+        let url = url.ok_or_else(usage)?;
         if !(url.starts_with("srt://") || url.starts_with("rtmp://") || url.starts_with("rtmps://"))
         {
             return Err(format!(
                 "URL should start with srt:// or rtmp(s):// — got {url}"
             ));
         }
-        Ok(Self { url, interval })
+        Ok(Self {
+            url,
+            interval,
+            summary_every,
+            csv_path,
+        })
     }
 }
 
 fn usage() -> String {
     "atem-net-diag — probe an SRT/RTMP destination on a fixed interval, \
-     log connect-state transitions
+     log connect-state transitions and latency
 
 usage:
-    atem-net-diag <srt://host:port[?streamid=...]> [--interval SECONDS]
-    atem-net-diag <rtmp://host:port/app/key> [--interval SECONDS]
+    atem-net-diag <srt://host:port[?streamid=...]> [flags]
+    atem-net-diag <rtmp://host:port/app/key>       [flags]
 
 flags:
-    --interval N      Probe every N seconds (default 5)
-    -h, --help        Show this help
+    --interval N         Probe every N seconds (default 5)
+    --summary-every N    Print a summary every N probes (default 12 == 1min @ 5s)
+    --no-summary         Don't print periodic summaries
+    --csv FILE           Append every probe to FILE as CSV (auto-creates with
+                         header: unix_seconds,clock,outcome,latency_ms)
+    -h, --help           Show this help
+
+what to look for:
+    CONNECTED in a row — destination is happy.
+    REJECTED bursts after a stream — receiver-state lockout (the
+        slot is held for ~30s-2min after a previous source disconnects).
+        Wait it out, or use a different key.
+    TIMEOUT — destination is unreachable. Network / power / wrong IP.
+    State-change moments are called out with === STATE CHANGE ===.
 
 requires:
     ffmpeg in PATH (with libsrt for srt:// URLs)
