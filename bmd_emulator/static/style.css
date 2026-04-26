@@ -751,6 +751,25 @@ button.big { padding: 14px 18px; font-size: 14px; }
   font-size: 11.5px;
 }
 
+/* Kill-stuck-streams cluster in the topbar — button plus a tiny
+   inline caption so the user knows what it does without having to
+   hover for the tooltip. */
+.kill-orphans-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+.kill-orphans-hint {
+  font-size: 9.5px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  text-align: right;
+  max-width: 220px;
+  line-height: 1.2;
+}
+
 /* Port-forwarding callout — sits right under the destination Address
    field. Yellow because it's an info-level "you might miss this"
    prompt, not an error. */

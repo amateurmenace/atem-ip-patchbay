@@ -34,9 +34,11 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
-      <button id="kill-orphans" type="button" class="refresh-btn"
-              title="If a previous run crashed or was force-quit, an FFmpeg subprocess can keep streaming to the destination in the background. The Stop button can't reach it (the parent process is gone). This finds and kills any leftover FFmpeg streams from this app."
-              aria-label="Kill orphan FFmpeg streams">✖ Kill orphans</button>
+      <div class="kill-orphans-wrap">
+        <button id="kill-orphans" type="button" class="refresh-btn"
+                aria-label="Kill orphan FFmpeg streams">✖ Kill stuck streams</button>
+        <span class="kill-orphans-hint">use if Stop didn't work after a crash / force-quit / dev restart</span>
+      </div>
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
