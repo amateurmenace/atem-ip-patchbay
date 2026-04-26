@@ -36,3 +36,10 @@ dist/
 *.pcap
 *.pcapng
 *.log
+
+# Tauri (Rust shell) build artefacts — Phase 0+. The src-tauri/ source
+# tree is tracked, but Cargo build output and Tauri's generated schemas
+# are not.
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/Cargo.lock.bak

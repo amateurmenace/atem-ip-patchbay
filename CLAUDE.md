@@ -13,19 +13,16 @@ doesn't work** (extensively diagnosed; see "Currently-open issues
 
 1. **Direct NDI ingest via the NewTek NDI SDK.** Skip NDI Virtual
    Camera entirely. Receive NDICAM (and any other NDI sender on the
-   network) into our process via the SDK's C library
-   (`libndi.dylib` on Mac, `Processing.NDI.Lib.x64.dll` on Windows
-   — both installed alongside NDI Tools, which the user already
-   has). Two viable bindings: `ndi-python` (community, ctypes
-   wrapper, simplest) or a custom Rust crate if we go Tauri. Either
-   way the receiver runs in our process, frames stream into FFmpeg
-   via stdin or a UNIX socket, no AVCaptureSession involved.
+   network) into our process via the `grafton-ndi` Rust crate (it
+   wraps the SDK's C library — `libndi.dylib` on Mac,
+   `Processing.NDI.Lib.x64.dll` on Windows). The receiver runs in
+   our process, frames stream into FFmpeg via stdin / a UNIX
+   socket, no AVCaptureSession involved.
 2. **Better camera previews.** The current
    `getUserMedia`/AVFoundation preview conflicts with FFmpeg
    capture for some virtual cameras and is constrained by browser
-   sandboxing. Native preview (Tauri's WebView with native frame
-   injection, or a separate native preview window) works against
-   any source we can read.
+   sandboxing. Native preview via Tauri's WebView with frame
+   injection (Phase 7) works against any source we can read.
 3. **Multi-instance.** A single user wants to push *several*
    different sources to *several* different ATEM inputs (or
    destination devices) simultaneously. Each instance owns its own
@@ -38,15 +35,47 @@ doesn't work** (extensively diagnosed; see "Currently-open issues
    x64 is plumbed through CI but lightly tested. v0.2.0 should
    include real Windows + Linux test rigs.
 
-**Architectural decision required**: stay Python (add
-`ndi-python` + a multi-instance launcher, keep PyInstaller
-packaging) OR pivot to **Tauri** (Rust shell + existing JS UI,
-direct NDI via Rust crate, native preview, ~50MB binaries
-cross-platform). Python is the lower-risk path; Tauri unlocks
-better preview UX and tighter NDI integration but is multi-week
-work. **Recommend starting with Python + ndi-python** to ship
-the NDI feature fast, then evaluate Tauri once the multi-instance
-feature stresses what the browser-based UI can do.
+### Architectural decision (made 2026-04-26): Tauri
+
+v0.2.0 is a port from Python to **Tauri (Rust shell + existing JS
+UI)**. v0.1.0 (Python) is frozen on `main` and tagged
+`v0.1.0-alpha.1`; all v0.2.0 work is on the `tauri-rewrite`
+branch.
+
+Why Tauri over staying-with-Python+ndi-python:
+- Native NDI receive via `grafton-ndi` crate (spike-verified —
+  discovered NDICAM on first run).
+- Native preview frame injection unlocks the cleanest UX for
+  virtual cameras (the current pain point).
+- ~3 MB Tauri shell DMG vs ~150 MB PyInstaller bundle (FFmpeg
+  sidecar pushes final size to ~85 MB — still half of v0.1.0).
+- Single Rust+TS stack; type-safe protocol layer; less ambient
+  Python interpreter overhead.
+
+Cost: ~2-3 weeks to port the ~3,000 lines of Python across nine
+phases. Phase 0 (this commit) is just the Tauri shell scaffold;
+Phases 1-9 progressively port `bmd_emulator/*.py` into Rust
+modules under `src-tauri/src/`. The existing JS UI in
+`bmd_emulator/static/` is reused unchanged once Phase 1 wires up
+the embedded Axum HTTP server.
+
+Phase plan:
+- **Phase 0** (✓ scaffold) — `src-tauri/`, signing config
+  (Developer ID `6M536MV7GT`), Mac DMG + Windows NSIS targets,
+  placeholder webui.
+- **Phase 1** — Port `state.py` + `xml_loader.py` + start an
+  embedded Axum HTTP server. Tauri webview navigates to
+  `http://localhost:N`, existing JS UI runs unchanged.
+- **Phase 2** — Port `sources.py` + `device_scanner.py`.
+- **Phase 3** — Port `streamer.py` (FFmpeg subprocess + telemetry).
+- **Phase 4** — NDI direct ingest via `grafton-ndi` (headline).
+- **Phase 5** — Port `protocol.py` (BMD TCP on 9977).
+- **Phase 6** — Multi-instance support.
+- **Phase 7** — Native preview frame injection.
+- **Phase 8** — UI/UX bundle (six user-requested tweaks listed
+  below).
+- **Phase 9** — CI rewrite (`cargo-tauri` matrix replacing
+  PyInstaller).
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -121,6 +150,29 @@ the right `streamid` format works.
 
 ## Run / build commands
 
+### v0.2.0 (Tauri — `tauri-rewrite` branch)
+
+```sh
+# Dev — opens the Tauri window with hot-reload on src-tauri/ changes
+cargo tauri dev
+
+# Mac build (.app + signed .dmg, ~1-2 min after first warm cache)
+cargo tauri build
+# Output: src-tauri/target/release/bundle/{macos,dmg}/...
+
+# Windows build (run on Windows)
+cargo tauri build
+# Output: src-tauri/target/release/bundle/nsis/*.exe
+
+# Compile-check only (fast, no bundle)
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+First `cargo tauri build` from a cold cache takes ~5-10 min
+(~200 crate dependencies). Subsequent builds are 30-90 sec.
+
+### v0.1.0 (Python — `main` branch, frozen at `v0.1.0-alpha.1`)
+
 ```sh
 # Dev server — loads ./config/*.xml, opens browser to localhost:8090
 python3 run.py
@@ -169,14 +221,26 @@ bmd_emulator/
   discover.py                   # mDNS for _ndi._tcp.local.
   paste_parser.py               # parses any-shape destination input
   netinfo.py                    # LAN IP detection for relay-publish URL
-build/
+build/                          # v0.1.0 (Python) PyInstaller pipeline — kept on main
   build.py                      # Make-style orchestrator (Mac OR Windows path)
   macos.spec / windows.spec     # PyInstaller specs
   installer.iss                 # Inno Setup script
   .cache/ .venv/ .work/ dist/   # all gitignored
+src-tauri/                      # v0.2.0 Tauri shell — added in Phase 0 on tauri-rewrite
+  Cargo.toml                    # name=atem-ip-patchbay, tauri 2, tauri-plugin-log
+  tauri.conf.json               # productName, signing identity 6M536MV7GT,
+                                # bundle targets [app, dmg, nsis], minimumSystemVersion 11
+  build.rs                      # tauri_build::build()
+  src/main.rs                   # binary entry — calls atem_ip_patchbay_lib::run()
+  src/lib.rs                    # tauri::Builder::default().setup(...).run(...)
+  capabilities/                 # ACL — what JS can invoke on the Rust side
+  icons/                        # placeholder set from cargo tauri init
+webui/                          # frontendDist target for Tauri (Phase 0 placeholder).
+  index.html                    # Phase 1 swaps this for a redirect to the Axum HTTP server.
 .github/workflows/
-  ci.yml                        # py_compile + HTTP smoke on PR / push to main
-  release.yml                   # tag-driven matrix build + GH release
+  ci.yml                        # py_compile + HTTP smoke on PR / push to main (v0.1.0)
+  release.yml                   # tag-driven matrix build + GH release (v0.1.0; gets
+                                # rewritten in Phase 9 for cargo-tauri matrix)
 ```
 
 ## Conventions
