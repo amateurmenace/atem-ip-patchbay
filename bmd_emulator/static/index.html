@@ -175,6 +175,26 @@
       </details>
     </details>
 
+    <!-- ---------- OVERLAYS (left column, under FFmpeg log) ---- -->
+    <section class="card overlay-card">
+      <div class="card-title"><span>Overlays</span></div>
+      <div class="row-2">
+        <label>Title
+          <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
+        </label>
+        <label>Subtitle
+          <input id="ov-subtitle" type="text" placeholder="Backup · source name" />
+        </label>
+      </div>
+      <label>Logo image (PNG / JPG)
+        <input id="ov-logo" type="text" placeholder="/Users/you/Pictures/logo.png" />
+      </label>
+      <label class="check">
+        <input id="ov-clock" type="checkbox" />
+        <span>Show clock (HH:MM:SS, bottom-left)</span>
+      </label>
+    </section>
+
     </div><!-- /.config-stack (left) -->
 
     <!-- ============== RIGHT COLUMN : DESTINATION (TOP) + SOURCE + OVERLAYS -->
@@ -192,12 +212,53 @@
           <div class="dest-row">
             <label>Address
               <input id="dest-address" type="text" placeholder="srt://your-atem-or-relay:1935" autocomplete="off" />
-              <span class="field-help">Format: <code>srt://your-atem-or-relay:port</code> (default port is <strong>1935</strong>; check your ATEM's Streaming Bridge settings — picking the wrong port is the #1 reason streams don't reach the switcher).</span>
+              <span class="field-help">Format: <code>srt://your-atem-or-relay:port</code> (default port is <strong>1935</strong>; check your ATEM's Streaming Bridge settings).</span>
             </label>
             <label>Stream key
               <input id="stream-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" autocomplete="off" />
             </label>
           </div>
+
+          <p class="port-fwd-callout">
+            Make sure you have port forwarding enabled on your router or gateway — this is the
+            #1 stopping block for people who don't deal with IT regularly.
+          </p>
+
+          <details class="port-fwd-help">
+            <summary>How does port forwarding work?</summary>
+            <div class="help-body">
+              <p>If your ATEM is at home and you're streaming from
+              somewhere else (a venue, a coffee shop, another office),
+              the stream has to traverse your home router. By default,
+              routers <strong>block unsolicited inbound traffic</strong>
+              — so you need to tell the router to forward SRT/RTMP
+              packets to your ATEM.</p>
+              <ol>
+                <li>Open your router's admin page (commonly
+                  <code>192.168.1.1</code> or <code>192.168.0.1</code>) —
+                  credentials are usually printed on the bottom of the
+                  unit.</li>
+                <li>Find <strong>Port Forwarding</strong> (sometimes
+                  under "NAT", "Virtual Server", or "Advanced").</li>
+                <li>Add a rule: forward
+                  <strong>UDP port 1935</strong> for SRT (or
+                  <strong>TCP port 1935</strong> for RTMP) to your
+                  ATEM's local IP (e.g. <code>192.168.1.50</code>).</li>
+                <li>From the venue, point this app at your home's
+                  <strong>public IP</strong> (look it up via
+                  <a href="https://api.ipify.org" target="_blank" rel="noopener">api.ipify.org</a>),
+                  not the ATEM's local IP.</li>
+              </ol>
+              <p class="hint">Some ISPs (mobile carriers, shared
+              apartment-building connections) use
+              <strong>carrier-grade NAT</strong> which silently blocks
+              all inbound traffic regardless of your forwarding rules.
+              Test by pushing from a phone on cellular data: if the
+              stream reaches your ATEM, you're fine; if not, you'll
+              need an SRT relay (a small VPS, Cloudflare TURN, or
+              OvenMediaEngine) to bridge the gap.</p>
+            </div>
+          </details>
 
           <div class="dest-or"><span>or load from a Blackmagic XML</span></div>
 
@@ -294,42 +355,6 @@
             </details>
           </div>
 
-          <details class="port-fwd-help">
-            <summary>How does port forwarding work?</summary>
-            <div class="help-body">
-              <p>If your ATEM is at home and you're streaming from
-              somewhere else (a venue, a coffee shop, another office),
-              the stream has to traverse your home router. By default,
-              routers <strong>block unsolicited inbound traffic</strong>
-              — so you need to tell the router to forward SRT/RTMP
-              packets to your ATEM.</p>
-              <ol>
-                <li>Open your router's admin page (commonly
-                  <code>192.168.1.1</code> or <code>192.168.0.1</code>) —
-                  credentials are usually printed on the bottom of the
-                  unit.</li>
-                <li>Find <strong>Port Forwarding</strong> (sometimes
-                  under "NAT", "Virtual Server", or "Advanced").</li>
-                <li>Add a rule: forward
-                  <strong>UDP port 1935</strong> for SRT (or
-                  <strong>TCP port 1935</strong> for RTMP) to your
-                  ATEM's local IP (e.g. <code>192.168.1.50</code>).</li>
-                <li>From the venue, point this app at your home's
-                  <strong>public IP</strong> (look it up via
-                  <a href="https://api.ipify.org" target="_blank" rel="noopener">api.ipify.org</a>),
-                  not the ATEM's local IP.</li>
-              </ol>
-              <p class="hint">Some ISPs (mobile carriers, shared
-              apartment-building connections) use
-              <strong>carrier-grade NAT</strong> which silently blocks
-              all inbound traffic regardless of your forwarding rules.
-              Test by pushing from a phone on cellular data: if the
-              stream reaches your ATEM, you're fine; if not, you'll
-              need an SRT relay (a small VPS, Cloudflare TURN, or
-              OvenMediaEngine) to bridge the gap.</p>
-            </div>
-          </details>
-
           <details class="dest-advanced">
             <summary>Advanced (mode, streamid, label, multi-service)</summary>
             <div class="advanced-body">
@@ -403,6 +428,33 @@
 
         <div id="source-hint" class="paste-status hint-panel" hidden></div>
 
+        <!-- Pipe-only block sits directly under the source tiles
+             so when the user clicks the URL / Pipe tile, the place
+             they type the URL is right there next to it instead of
+             buried below the receive-stream wizard. The block is
+             hidden by app.js whenever source_id != "pipe". -->
+        <div class="pipe-only" hidden>
+          <label>
+            <span class="lbl">Where should we read the video from?</span>
+            <input id="pipe-path" type="text" placeholder="rtsp://192.168.1.50/stream  ·  http://example.com/live.m3u8  ·  /tmp/feed.ts" />
+          </label>
+          <p class="hint">
+            Anything FFmpeg can open works here — paste the URL or file path your source emits to.
+            Common patterns:
+          </p>
+          <ul class="pipe-examples">
+            <li><strong>RTSP camera:</strong> <code>rtsp://username:password@192.168.1.50/stream</code></li>
+            <li><strong>HLS / HTTP stream:</strong> <code>http://server.example.com/live/playlist.m3u8</code></li>
+            <li><strong>Named pipe / file:</strong> <code>/tmp/feed.ts</code> (write into this from GStreamer, NDI Tools, OBS recorder, etc.)</li>
+            <li><strong>UDP MPEG-TS:</strong> <code>udp://0.0.0.0:1234</code></li>
+          </ul>
+          <p class="hint">
+            For an SRT or RTMP source where this app should be the receiver, use the
+            <strong>SRT / RTMP server</strong> wizard below instead — it sets up the listener
+            and shows the publish URL to paste into your encoder.
+          </p>
+        </div>
+
         <!-- Phase 8b: receive-stream mini-wizard. Promotes the
              relay-listener tiles (srt_listen / rtmp_listen) into a
              discoverable flow. Clicking expands a panel with the
@@ -412,7 +464,7 @@
         <details class="receive-wizard" id="receive-wizard">
           <summary>
             <span class="rw-icon" aria-hidden="true">↓</span>
-            <span class="rw-title">Receive a stream from a camera, drone, OBS, or phone</span>
+            <span class="rw-title"><strong class="rw-prefix">SRT / RTMP SERVER:</strong> Receive a stream from a camera, drone, OBS, or phone</span>
           </summary>
           <div class="rw-body">
             <div class="rw-protocol">
@@ -494,27 +546,42 @@
           </p>
         </div>
 
-        <div class="pipe-only" hidden>
-          <label>
-            <span class="lbl">Where should we read the video from?</span>
-            <input id="pipe-path" type="text" placeholder="rtsp://192.168.1.50/stream  ·  http://example.com/live.m3u8  ·  /tmp/feed.ts" />
-          </label>
-          <p class="hint">
-            Anything FFmpeg can open works here — paste the URL or file path your source emits to.
-            Common patterns:
-          </p>
-          <ul class="pipe-examples">
-            <li><strong>RTSP camera:</strong> <code>rtsp://username:password@192.168.1.50/stream</code></li>
-            <li><strong>HLS / HTTP stream:</strong> <code>http://server.example.com/live/playlist.m3u8</code></li>
-            <li><strong>Named pipe / file:</strong> <code>/tmp/feed.ts</code> (write into this from GStreamer, NDI Tools, OBS recorder, etc.)</li>
-            <li><strong>UDP MPEG-TS:</strong> <code>udp://0.0.0.0:1234</code></li>
-          </ul>
-          <p class="hint">
-            For an SRT or RTMP source where this app should be the receiver, use the
-            <strong>Receive a stream</strong> wizard above instead — it sets up the listener
-            and shows the publish URL to paste into your encoder.
-          </p>
-        </div>
+        <details class="dante-help">
+          <summary>Using Dante?</summary>
+          <div class="help-body">
+            <p>
+              <a href="https://my.audinate.com/products/software/dante-virtual-soundcard" target="_blank" rel="noopener">Dante Virtual Soundcard</a>
+              (DVSC) lets a regular Mac receive any Dante stream on your AVB / AES67 network and expose
+              the receive channels as a CoreAudio device — which then shows up in this app's Audio
+              dropdown above. To set it up the first time:
+            </p>
+            <ol>
+              <li>Install <strong>Dante Virtual Soundcard</strong> from Audinate (paid licence —
+                a perpetual key is around $50). Reboot when it asks you to.</li>
+              <li>Open <strong>Dante Virtual Soundcard</strong> from your menu bar →
+                set <strong>Audio Interface</strong> to <em>Core Audio</em>,
+                <strong>Channels</strong> to whatever your job needs (2 / 8 / 16 / 32 / 64 — match
+                your console / stage box), <strong>Sample Rate</strong> to <strong>48 kHz</strong>
+                (this app's encoder is locked to 48 kHz), then click <strong>Start</strong>.</li>
+              <li>Open <a href="https://my.audinate.com/products/software/dante-controller" target="_blank" rel="noopener">Dante Controller</a>
+                and route channels from the Dante transmitter (your console / stage box / DAW) to
+                this Mac's receive channels. The L/R picker that appears below the Audio dropdown
+                here is <em>this Mac's receive-channel numbers</em>, exactly what you see in Dante
+                Controller's grid for this machine.</li>
+              <li>Pick "Dante Virtual Soundcard" from the Audio dropdown above. The
+                <strong>Channels (L · R)</strong> picker will appear — set it to whichever pair
+                you want on the outgoing stream (e.g. 5 · 6 for stage L/R).</li>
+            </ol>
+            <p class="hint">
+              <strong>Aggregate Devices</strong> (Audio MIDI Setup → "+" → Create Aggregate Device)
+              also work — anything multi-channel that shows up to CoreAudio gets the same picker.
+              Dante AVIO USB adapters work too, since they also expose receive channels via CoreAudio.
+              FFmpeg pulls the selected pair via <code>-af pan="stereo|c0=cN|c1=cM"</code>; without
+              this picker, FFmpeg auto-downmixes <em>all</em> N channels (front + rear + center +
+              LFE all summed), which sounds wrong for live audio routing.
+            </p>
+          </div>
+        </details>
 
       </section>
 
@@ -524,25 +591,9 @@
            paste-apply live inside the wizard's Advanced section for
            power users. -->
 
-      <!-- ---------- OVERLAYS --------------------------------- -->
-      <section class="card overlay-card">
-        <div class="card-title"><span>Overlays</span></div>
-        <div class="row-2">
-          <label>Title
-            <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
-          </label>
-          <label>Subtitle
-            <input id="ov-subtitle" type="text" placeholder="Backup · source name" />
-          </label>
-        </div>
-        <label>Logo image (PNG / JPG)
-          <input id="ov-logo" type="text" placeholder="/Users/you/Pictures/logo.png" />
-        </label>
-        <label class="check">
-          <input id="ov-clock" type="checkbox" />
-          <span>Show clock (HH:MM:SS, bottom-left)</span>
-        </label>
-      </section>
+      <!-- Overlays card moved to the left column under FFmpeg log
+           so the right column (destination + source) doesn't grow
+           past the viewport at 1080p screen heights. -->
 
       <!-- The standalone "SRT Advanced" details card was a duplicate
            of the same fields living inside the destination wizard
@@ -658,12 +709,56 @@
           sender straight into our encoder via the NewTek SDK. No menu-bar setup. The old bridge
           workflow (NDI Virtual Camera + AVF) had a known frame=0 hang with FFmpeg.</p>
         </details>
+        <details class="faq-item">
+          <summary>SRT vs RTMP — which should I pick?</summary>
+          <p><strong>SRT</strong> is the right answer for almost every modern use case.
+          Built by Haivision specifically for unreliable internet links, SRT recovers from
+          packet loss via in-flight retransmits, optionally encrypts the stream end-to-end
+          with AES, and survives jitter that makes RTMP collapse. Real Blackmagic encoders
+          (the Web Presenter line, ATEM Streaming Bridge) all default to SRT for the same
+          reason. Pick SRT unless you're talking to a destination that genuinely doesn't
+          support it.</p>
+          <p><strong>RTMP</strong> is the older Adobe-era protocol — TCP-based, no native
+          encryption, no automatic recovery. Still required for some specific endpoints
+          (legacy Web Presenter HD models, YouTube Live's primary ingest, some older CDN
+          setups). The protocol picker above lets you switch in one click; everything else
+          (key, codec, bitrate) carries over.</p>
+          <p class="hint">If your destination supports both, SRT will hold up over a flaky
+          coffee-shop wifi where RTMP would freeze.</p>
+        </details>
+        <details class="faq-item">
+          <summary>H.264 vs H.265 — which codec?</summary>
+          <p><strong>H.265 (HEVC)</strong> is the right default if your destination supports
+          it. Roughly 30-50% better compression at the same visual quality, which means you
+          can either (a) hit the same quality at lower bandwidth, or (b) use the bandwidth
+          you have for noticeably crisper video. ATEM Mini Extreme G2, Television Studio HD8 ISO,
+          Streaming Bridge, and Web Presenter 4K all decode H.265 natively.</p>
+          <p><strong>H.264</strong> is universal — every BMD device since the original Web
+          Presenter HD plays it, and so does every other RTMP/SRT decoder out there. Pick
+          H.264 when the receiving device is older (Web Presenter HD, original Streaming
+          Bridge), when you're pushing to a non-Blackmagic endpoint that hasn't added HEVC
+          yet, or when you're not sure what's on the other end and want maximum
+          compatibility.</p>
+          <p class="hint">Both codecs run on the Apple ANE + GPU on macOS (we use
+          <code>h264_videotoolbox</code> / <code>hevc_videotoolbox</code>) so encoder CPU
+          cost is in the single digits either way — pick based on the destination, not on
+          your laptop's load.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Why does the encoder feel so light on CPU compared to OBS?</summary>
+          <p>On macOS we route encoding through Apple's hardware video pipeline (the ANE +
+          GPU) via FFmpeg's videotoolbox encoders. OBS uses libx264/libx265 on CPU by
+          default, which costs ~80% of one core at 1080p30. We sit in the single digits
+          for the same output quality, freeing headroom for NDI receive, mux, and SRT
+          pacing. On Windows, the equivalent would be h264_qsv / nvenc / amf — defer to
+          a follow-up.</p>
+        </details>
       </div>
     </div>
 
     <div class="guide-links">
       <a class="guide-link" href="mailto:stephen@weirdmachine.org?subject=ATEM%20IP%20Patchbay">
-        <span aria-hidden="true">✉</span> Email Stephen
+        <span aria-hidden="true">✉</span> Email
       </a>
       <a class="guide-link" href="https://weirdmachine.org" target="_blank" rel="noopener">
         <span aria-hidden="true">↗</span> weirdmachine.org
@@ -675,6 +770,9 @@
   </section>
 
   <footer class="footer">
+    <a class="footer-brand" href="https://weirdmachine.org" target="_blank" rel="noopener" aria-label="weirdmachine.org">
+      <img src="/static/weirdmachine-logo.png" alt="Weird Machine" class="footer-logo" />
+    </a>
     <div>BMD control protocol on TCP <strong>9977</strong> · UI on TCP <strong>8090</strong></div>
     <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
   </footer>
