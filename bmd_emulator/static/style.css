@@ -1246,13 +1246,16 @@ pre {
   transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .receive-wizard:not([open]) {
-  background: linear-gradient(135deg, #1f8a3f 0%, #2ecc71 100%);
-  border-color: #2ecc71;
-  box-shadow: 0 4px 14px rgba(46, 204, 113, 0.25);
+  /* Closed state used to be a bright green CTA — that read as a
+     primary action ahead of Start Stream and dominated the source
+     panel. Now it sits in the same neutral panel-2 the open state
+     uses; the "SRT / RTMP SERVER:" pill on the left provides the
+     visual anchor for what this control is. */
+  background: var(--panel-2, #1d2030);
+  border-color: var(--line, #2a2d36);
 }
 .receive-wizard:not([open]):hover {
-  box-shadow: 0 6px 18px rgba(46, 204, 113, 0.35);
-  filter: brightness(1.05);
+  border-color: var(--accent, #5a8aff);
 }
 .receive-wizard summary {
   cursor: pointer;
@@ -1265,8 +1268,7 @@ pre {
   letter-spacing: 0.01em;
 }
 .receive-wizard:not([open]) summary {
-  color: #fff;
-  font-size: 15px;
+  color: var(--text, #e6e6ea);
 }
 .receive-wizard summary::-webkit-details-marker { display: none; }
 .rw-icon {
@@ -1280,8 +1282,8 @@ pre {
   transition: transform 0.2s;
 }
 .receive-wizard:not([open]) .rw-icon {
-  background: rgba(255, 255, 255, 0.95);
-  color: #1f8a3f;
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
 }
 .receive-wizard[open] .rw-icon { transform: rotate(180deg); }
 .rw-title { font-weight: inherit; }

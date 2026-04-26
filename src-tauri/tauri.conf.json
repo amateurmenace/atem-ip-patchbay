@@ -42,7 +42,10 @@
       "signingIdentity": "Developer ID Application: Stephen Walter (6M536MV7GT)",
       "minimumSystemVersion": "11.0",
       "entitlements": null,
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "frameworks": [
+        "/usr/local/lib/libndi.dylib"
+      ]
     }
   }
 }
