@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
@@ -52,8 +53,18 @@ pub async fn bind_with_walk(start_port: u16) -> Result<(u16, TcpListener)> {
 /// equivalent inside the .app's Resources/).
 pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
     // Static-file path mount — must come before nest_service('/') so the
-    // /static/* prefix routes win over the index fallback.
-    let static_service = ServeDir::new(&static_dir);
+    // /static/* prefix routes win over the index fallback. Wrap with
+    // a no-cache layer because the WebView (and most browsers without
+    // an explicit Cache-Control) will heuristically cache JS/CSS for
+    // ~10% of (now - last-modified). After a few minutes that's long
+    // enough to make every dev-loop edit invisible until force-reload.
+    // Plain Cmd-R now picks up changes.
+    use tower_layer::Layer;
+    let static_service = SetResponseHeaderLayer::overriding(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    )
+    .layer(ServeDir::new(&static_dir));
     let index_path = static_dir.join("index.html");
     let index_html = std::fs::read_to_string(&index_path).unwrap_or_else(|err| {
         log::warn!(

@@ -163,7 +163,9 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tokio",
+ "tower",
  "tower-http 0.5.2",
+ "tower-layer",
  "uuid",
  "which",
 ]
