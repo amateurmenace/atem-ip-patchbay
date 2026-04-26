@@ -725,6 +725,35 @@ button.big { padding: 14px 18px; font-size: 14px; }
   color: var(--text);
 }
 
+/* Phase 8b: quality segmented control — wider segments with a small
+   bitrate sub-line under the High/Medium/Low label. */
+.seg-control-quality .seg.seg-quality span {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 12px;
+  line-height: 1.1;
+}
+.seg-control-quality .seg.seg-quality span strong {
+  font-size: 12px; font-weight: 600;
+}
+.seg-control-quality .seg.seg-quality span em {
+  font-size: 10px; font-style: normal;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.seg-control-quality .seg.seg-quality input:checked + span em {
+  color: var(--bg);
+  opacity: 0.8;
+}
+.seg-empty {
+  padding: 8px 12px;
+  font-size: 11px; color: var(--muted);
+  font-style: italic;
+}
+
 .field-label {
   display: block;
   font-size: 11px; color: var(--muted);
@@ -951,6 +980,133 @@ pre {
 
 /* Log card with collapsible disclosure */
 .log-pane-card pre { margin-top: 4px; }
+
+/* ============= USER GUIDE (Phase 8b) ===================== */
+.user-guide {
+  max-width: 1080px;
+  margin: 32px auto 16px;
+  padding: 24px 28px;
+  background: var(--panel, #161821);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 12px;
+}
+.user-guide-title {
+  margin: 0 0 18px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text, #e6e6ea);
+  letter-spacing: 0.02em;
+}
+.guide-flow {
+  margin: 0 0 24px;
+  padding: 12px 8px;
+  background: var(--bg, #0e0f12);
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+}
+.guide-flow svg {
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+}
+.guide-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+@media (max-width: 720px) {
+  .guide-grid { grid-template-columns: 1fr; }
+}
+.guide-card {
+  background: var(--panel-2, #1d2030);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+.guide-card h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #e6e6ea);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.guide-facts {
+  margin: 0; padding-left: 18px;
+  color: var(--muted, #9aa1ad);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.guide-facts strong { color: var(--text, #e6e6ea); font-weight: 600; }
+.guide-facts code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.guide-facts li.warn { color: #ffb6a6; margin-top: 6px; }
+.faq-item {
+  border-top: 1px solid var(--line, #2a2d36);
+  padding: 8px 0;
+}
+.faq-item:first-of-type { border-top: 0; padding-top: 4px; }
+.faq-item summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text, #e6e6ea);
+  font-weight: 500;
+  padding: 4px 0;
+  list-style: none;
+  position: relative;
+  padding-left: 16px;
+}
+.faq-item summary::-webkit-details-marker { display: none; }
+.faq-item summary::before {
+  content: "▸";
+  position: absolute; left: 0; top: 4px;
+  color: var(--muted, #9aa1ad);
+  font-size: 10px;
+  transition: transform 0.15s;
+}
+.faq-item[open] summary::before { transform: rotate(90deg); }
+.faq-item p {
+  margin: 4px 0 8px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted, #9aa1ad);
+}
+.faq-item code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line, #2a2d36);
+}
+.guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--panel-2, #1d2030);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 7px;
+  color: var(--text, #e6e6ea);
+  font-size: 12px;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.guide-link:hover {
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
+  border-color: var(--accent, #5a8aff);
+}
+.guide-link span { font-size: 13px; }
 
 /* ============= FOOTER ==================================== */
 .footer {

@@ -112,6 +112,7 @@ const els = {
   // videoCodec used to be a <select id="video-codec"> in the old Encoder
   // card. The wizard replaced it with the codecSegs segmented control.
   quality:    $('#quality'),
+  qualitySeg: $('#quality-seg'),
   label:      $('#label'),
 
   // Overlay
@@ -828,6 +829,7 @@ function render(snap) {
   setOptions(els.videoMode, snap.available_video_modes, snap.video_mode);
   if (els.formatDecoded) els.formatDecoded.textContent = decodeVideoMode(snap.video_mode);
   setOptions(els.quality, snap.available_quality_levels || [], snap.quality_level);
+  renderQualitySegmented(snap);
   if (document.activeElement !== els.pipePath) els.pipePath.value = snap.pipe_path || '';
   els.pipeOnly.forEach((e) => (e.hidden = snap.source_id !== 'pipe'));
 
@@ -989,6 +991,44 @@ function setSegmentedValue(inputs, value) {
 function getSegmentedValue(inputs) {
   for (const r of inputs) if (r.checked) return r.value;
   return null;
+}
+
+// Phase 8b: render the Quality segmented control from snap.quality_options.
+// Each option's label includes the projected Mbps at the current video_mode
+// (the backend computes per-mode bitrates so the labels update when the
+// user changes Format). Falls back to no-op when no XML is loaded.
+function renderQualitySegmented(snap) {
+  if (!els.qualitySeg) return;
+  const opts = snap.quality_options || [];
+  const current = snap.quality_level || '';
+  if (opts.length === 0) {
+    els.qualitySeg.innerHTML = '<span class="seg-empty">no quality options (load a service XML first)</span>';
+    return;
+  }
+  const html = opts.map((o) => {
+    const mbps = (o.bitrate / 1_000_000).toFixed(1).replace(/\.0$/, '');
+    const checked = o.name === current ? ' checked' : '';
+    const short = qualityShortName(o.name);
+    return `<label class="seg seg-quality">
+      <input type="radio" name="dest-quality" value="${escapeHtml(o.name)}"${checked} />
+      <span><strong>${escapeHtml(short)}</strong><em>${mbps} Mbps</em></span>
+    </label>`;
+  }).join('');
+  els.qualitySeg.innerHTML = html;
+  // (Re)bind listeners — innerHTML wipes them.
+  els.qualitySeg.querySelectorAll('input[name="dest-quality"]').forEach((r) => {
+    r.addEventListener('change', () => {
+      if (r.checked) applySettings({ quality_level: r.value });
+    });
+  });
+}
+
+// "Streaming High" -> "High" for the segmented-control label.
+function qualityShortName(name) {
+  if (/high/i.test(name))   return 'High';
+  if (/medium/i.test(name)) return 'Medium';
+  if (/low/i.test(name))    return 'Low';
+  return name;
 }
 
 // Parse what the user typed in the Address field.

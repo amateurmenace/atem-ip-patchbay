@@ -391,6 +391,30 @@ impl EncoderState {
             .unwrap_or_default();
         let available_services: Vec<String> = inner.services.keys().cloned().collect();
 
+        // Phase 8b: bitrate per quality level at the current video_mode.
+        // Lets the UI's promoted quality chooser show "High - 6 Mbps"
+        // labels and update them when the user changes the format.
+        let (_, height, fps) = video_dimensions(&inner.video_mode);
+        let res = if height == 1080 { "1080p" } else { "720p" };
+        let quality_options: Vec<QualityOption> = svc
+            .map(|s| {
+                s.profiles
+                    .iter()
+                    .map(|p| {
+                        let bitrate = p
+                            .find_config(res, fps)
+                            .map(|c| c.bitrate)
+                            .or_else(|| p.configs.iter().max_by_key(|c| c.bitrate).map(|c| c.bitrate))
+                            .unwrap_or(0);
+                        QualityOption {
+                            name: p.name.clone(),
+                            bitrate,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let active_config = resolve_active_config(&inner).map(|cfg| ActiveConfig {
             resolution: cfg.resolution.clone(),
             fps: cfg.fps,
@@ -410,6 +434,7 @@ impl EncoderState {
             source_id: inner.source_id.clone(),
             available_video_modes: AVAILABLE_VIDEO_MODES.iter().map(|s| s.to_string()).collect(),
             available_quality_levels,
+            quality_options,
             available_services,
             available_servers,
             current_service_name: inner.current_service_name.clone(),
@@ -591,6 +616,7 @@ pub struct Snapshot {
     pub source_id: String,
     pub available_video_modes: Vec<String>,
     pub available_quality_levels: Vec<String>,
+    pub quality_options: Vec<QualityOption>,
     pub available_services: Vec<String>,
     pub available_servers: Vec<ServerSnapshot>,
     pub current_service_name: String,
@@ -616,6 +642,12 @@ pub struct Snapshot {
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,
     pub stats: StatsSnapshot,
+}
+
+#[derive(Serialize, Debug)]
+pub struct QualityOption {
+    pub name: String,
+    pub bitrate: u64,
 }
 
 #[derive(Serialize, Debug)]

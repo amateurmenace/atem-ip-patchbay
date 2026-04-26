@@ -218,6 +218,14 @@
                 <label class="seg"><input type="radio" name="dest-codec" value="h264" /><span>H.264</span></label>
               </div>
             </div>
+            <div class="toggle-group">
+              <span class="toggle-label">Quality</span>
+              <div class="seg-control seg-control-quality" id="quality-seg" role="radiogroup" aria-label="Quality">
+                <!-- Filled by app.js from snap.quality_options. Each
+                     option's label includes the projected bitrate at
+                     the current video_mode. -->
+              </div>
+            </div>
           </div>
 
           <label class="srt-only">
@@ -323,9 +331,11 @@
                   <select id="server"></select>
                 </label>
               </div>
-              <label>Quality preset
-                <select id="quality"></select>
-              </label>
+              <!-- Quality preset is now a top-level segmented control
+                   above (Phase 8b). The hidden <select> stays so any
+                   legacy JS that reads/writes #quality keeps working
+                   (it mirrors the segmented control). -->
+              <select id="quality" hidden></select>
               <label>Device label <span class="hint">(IDENTITY · sent as <code>bmd_name</code> in streamid)</span>
                 <input id="label" type="text" />
               </label>
@@ -523,6 +533,127 @@
 
     </div><!-- /.config-stack (right) -->
   </main>
+
+  <!-- ========================================================== -->
+  <!-- BOTTOM USER GUIDE (Phase 8b)                                -->
+  <!-- ========================================================== -->
+  <section class="user-guide">
+    <h2 class="user-guide-title">How it works</h2>
+
+    <div class="guide-flow" aria-label="Data flow diagram">
+      <svg viewBox="0 0 760 140" xmlns="http://www.w3.org/2000/svg" role="img"
+           aria-label="Source flows into this app, which re-encodes to BMD-flavored SRT and forwards over the network to your ATEM switcher or Blackmagic Streaming Decoder/Bridge.">
+        <!-- Source box -->
+        <rect x="10" y="40" width="160" height="60" rx="8"
+              fill="#161821" stroke="#3a3f50" stroke-width="1.5" />
+        <text x="90" y="65" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Source</text>
+        <text x="90" y="84" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">camera · NDI · drone · OBS</text>
+        <!-- Arrow 1 -->
+        <line x1="170" y1="70" x2="220" y2="70" stroke="#9aa1ad" stroke-width="1.5"
+              marker-end="url(#arrow)" />
+        <text x="195" y="60" fill="#9aa1ad" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">~50 ms</text>
+        <!-- App box -->
+        <rect x="225" y="30" width="200" height="80" rx="8"
+              fill="#1d2030" stroke="#5a8aff" stroke-width="1.5" />
+        <text x="325" y="58" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">ATEM IP Patchbay</text>
+        <text x="325" y="76" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">re-encode H.264/265</text>
+        <text x="325" y="92" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">BMD-flavored SRT</text>
+        <!-- Arrow 2 -->
+        <line x1="425" y1="70" x2="490" y2="70" stroke="#9aa1ad" stroke-width="1.5"
+              marker-end="url(#arrow)" />
+        <text x="457" y="60" fill="#9aa1ad" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">200–500 ms</text>
+        <text x="457" y="86" fill="#6b7280" font-size="9"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Internet · LAN</text>
+        <!-- Destination box -->
+        <rect x="495" y="30" width="255" height="80" rx="8"
+              fill="#161821" stroke="#3a3f50" stroke-width="1.5" />
+        <text x="622" y="58" fill="#e6e6ea" font-size="13" font-weight="600"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">ATEM</text>
+        <text x="622" y="76" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Switcher · Streaming Bridge</text>
+        <text x="622" y="92" fill="#9aa1ad" font-size="10"
+              text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,system-ui,sans-serif">Streaming Decoder</text>
+        <!-- Arrowhead def -->
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa1ad" />
+          </marker>
+        </defs>
+      </svg>
+    </div>
+
+    <div class="guide-grid">
+      <div class="guide-card">
+        <h3>Latency budget</h3>
+        <ul class="guide-facts">
+          <li><strong>SRT push</strong> — 200–500 ms typical (we set <code>latency=500000 µs</code> by default)</li>
+          <li><strong>Encoder</strong> — 50–100 ms (libx265/x264, <code>preset veryfast tune zerolatency</code>)</li>
+          <li><strong>Total end-to-end</strong> — 250–600 ms typical</li>
+          <li><strong>Bandwidth</strong> — 2.5 Mbps (Low) · 4.5 Mbps (Medium) · 6 Mbps (High); 1080p60 needs ~1.5× more</li>
+          <li class="warn">Avoid: 5+ second buffering when SRT latency is set too high</li>
+        </ul>
+      </div>
+
+      <div class="guide-card">
+        <h3>FAQ</h3>
+        <details class="faq-item">
+          <summary>Stream connects but ATEM input shows black</summary>
+          <p>Format mismatch. The switcher's video standard (1080p30, 1080p59.94, etc.) must match
+          what we're sending exactly. Pick the right value in the <em>Switcher video format</em>
+          dropdown above the Address field.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the minimum upload bandwidth I need?</summary>
+          <p>2.5 Mbps for the Low quality preset, 4.5 for Medium, 6 for High. 1080p60 needs roughly
+          1.5× those numbers. Don't push more than ~70% of your measured upload speed — the rest
+          covers protocol overhead and bursty I-frames.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I use this with a non-ATEM Blackmagic device?</summary>
+          <p>Yes. Web Presenter HD/4K, Streaming Bridge, and Streaming Decoder all accept the same
+          BMD-flavored SRT handshake. Web Presenters consume RTMP too, which is in the Protocol
+          chooser above.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is this Blackmagic-approved?</summary>
+          <p>No. This is community work. The protocol and XML formats are publicly documented but
+          BMD doesn't endorse third-party encoders. Use in real productions at your own risk.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Why does my source appear delayed by ~500 ms on the ATEM?</summary>
+          <p>That's SRT's latency budget — the receiver buffers half a second so packet retransmits
+          have time to land. Reduce <code>SRT latency</code> in the Advanced section if your network
+          is fast and stable; raise it on flaky connections.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What's the difference between NDI direct and the bridge workflow?</summary>
+          <p>Direct NDI (v0.2.0) bypasses NDI Virtual Camera entirely — frames stream from the NDI
+          sender straight into our encoder via the NewTek SDK. No menu-bar setup. The old bridge
+          workflow (NDI Virtual Camera + AVF) had a known frame=0 hang with FFmpeg.</p>
+        </details>
+      </div>
+    </div>
+
+    <div class="guide-links">
+      <a class="guide-link" href="mailto:stephen@weirdmachine.org?subject=ATEM%20IP%20Patchbay">
+        <span aria-hidden="true">✉</span> Email Stephen
+      </a>
+      <a class="guide-link" href="https://weirdmachine.org" target="_blank" rel="noopener">
+        <span aria-hidden="true">↗</span> weirdmachine.org
+      </a>
+      <a class="guide-link" href="https://github.com/amateurmenace/atem-ip-patchbay" target="_blank" rel="noopener">
+        <span aria-hidden="true">↗</span> GitHub repo
+      </a>
+    </div>
+  </section>
 
   <footer class="footer">
     <div>BMD control protocol on TCP <strong>9977</strong> · UI on TCP <strong>8090</strong></div>
