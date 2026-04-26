@@ -1497,3 +1497,15 @@ poll();
 setInterval(poll, 1000);
 // Refresh NDI senders every 30s — they come and go.
 setInterval(() => ensureNdiLoaded(true), 30000);
+
+// Tauri's WebView ships with no menu bar and no built-in reload
+// shortcut, which is friction during dev iteration. Bind the same
+// keys a normal browser would: Cmd/Ctrl-R, Cmd-Shift-R (force),
+// and F5. No-op in real browsers (they handle it themselves first).
+document.addEventListener('keydown', (e) => {
+  const isReload = (e.metaKey || e.ctrlKey) && (e.key === 'r' || e.key === 'R');
+  if (isReload || e.key === 'F5') {
+    e.preventDefault();
+    location.reload();
+  }
+});
