@@ -196,18 +196,19 @@ body.is-streaming .title-block h1 {
 .hero-credit a { color: var(--accent); border-bottom: 1px dotted var(--accent); }
 .hero-credit a:hover { color: #ffa166; text-decoration: none; }
 
-/* Full-width disclaimer strip — sits right above .hero-credit and
-   spans the entire hero so it reads as a clear "fine print" beat. */
+/* Quiet "fine print" beat between the two-column intro and the
+   credit. Same horizontal bounds (max-width + auto margins) as
+   .hero-cols and .hero-credit so it reads as part of the same
+   stack rather than a colored interruption. */
 .hero-disclaimer {
-  margin: 28px 0 0;
-  padding: 16px 28px;
-  background: rgba(255, 191, 0, 0.06);
-  border-top: 1px solid rgba(255, 191, 0, 0.25);
-  border-bottom: 1px solid rgba(255, 191, 0, 0.25);
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--muted);
-  text-align: center;
+  max-width: 1080px;
+  margin: 18px auto 0;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted-2, var(--muted));
+  text-align: left;
 }
 
 /* ============= MAIN GRID ================================== */
