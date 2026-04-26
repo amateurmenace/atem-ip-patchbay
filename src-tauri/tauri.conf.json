@@ -34,6 +34,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "sidecar/*"
+    ],
     "copyright": "Copyright (C) 2026 Stephen Walter",
     "category": "Video",
     "shortDescription": "Push any video source into ATEM gear via BMD-flavored SRT",
