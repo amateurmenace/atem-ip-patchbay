@@ -314,6 +314,91 @@ def _resolve_dshow_kind(marker: str | None, section: str | None) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# AVFoundation mode probe — find what (width, height, fps) the device
+# actually supports so the source factory can pick a real mode instead
+# of asking for one the device will reject.
+# ---------------------------------------------------------------------------
+
+
+_AVF_MODE_LINE = re.compile(
+    r"(\d+)x(\d+)@\[([\d.]+)\s+([\d.]+)\]fps"
+)
+
+
+def probe_avf_modes(device_index: int) -> list[tuple[int, int, float, float]]:
+    """Return supported [(width, height, fps_min, fps_max), ...] for an
+    AVFoundation device.
+
+    Provokes FFmpeg into listing supported modes by asking for a
+    framerate the device will refuse (1 fps); FFmpeg responds by
+    enumerating the modes it would accept. Returns ``[]`` on parse
+    failure or timeout — caller should fall back to the user's
+    requested format and let FFmpeg report the error.
+
+    Locked-mode virtual cameras (NDI Virtual Camera, OBS Virtual
+    Camera in some configs) only support a single mode; without this
+    probe we'd hard-code the destination format and fail with
+    "Selected framerate is not supported by the device."
+    """
+    from .ffmpeg_path import ffmpeg_path
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-f", "avfoundation",
+             "-framerate", "1", "-i", str(device_index),
+             "-t", "0", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        log.warning("AVF mode probe failed for device %d: %s", device_index, exc)
+        return []
+
+    modes: list[tuple[int, int, float, float]] = []
+    for line in proc.stderr.splitlines():
+        m = _AVF_MODE_LINE.search(line)
+        if m:
+            modes.append((
+                int(m.group(1)), int(m.group(2)),
+                float(m.group(3)), float(m.group(4)),
+            ))
+    return modes
+
+
+def pick_best_avf_mode(
+    modes: list[tuple[int, int, float, float]],
+    want_w: int, want_h: int, want_fps: float,
+) -> tuple[int, int, float]:
+    """Pick (width, height, fps) closest to the desired output format.
+
+    Strategy:
+      1. Prefer modes matching the requested resolution exactly.
+      2. Within those, prefer modes whose fps range covers the request.
+      3. Otherwise pick the mode with the closest fps endpoint.
+      4. If we have to compromise on fps, use the mode's max fps —
+         high-rate input downsampled at the encoder is cleaner than
+         low-rate input upsampled.
+
+    Returns the user's request unmodified if ``modes`` is empty so
+    the caller falls back gracefully.
+    """
+    if not modes:
+        return (want_w, want_h, float(want_fps))
+
+    matching = [m for m in modes if m[0] == want_w and m[1] == want_h]
+    pool = matching if matching else modes
+
+    def score(m: tuple[int, int, float, float]) -> tuple[int, float]:
+        w, h, fps_lo, fps_hi = m
+        if fps_lo <= want_fps <= fps_hi:
+            return (0, 0.0)  # exact-fps fit beats everything
+        return (1, min(abs(fps_lo - want_fps), abs(fps_hi - want_fps)))
+
+    best = min(pool, key=score)
+    w, h, fps_lo, fps_hi = best
+    chosen_fps = float(want_fps) if fps_lo <= want_fps <= fps_hi else fps_hi
+    return (w, h, chosen_fps)
+
+
+# ---------------------------------------------------------------------------
 # Default-device heuristics — used at boot to pick something sensible
 # ---------------------------------------------------------------------------
 

@@ -77,9 +77,15 @@ class EncoderState:
     quality_level: str = "Streaming High"
     source_id: str = "test_pattern"
 
-    # AVFoundation device indices (for source_id="avfoundation").
+    # AVFoundation / DirectShow device selection (for source_id="avfoundation").
+    # Indices were the original way to address devices, but AVFoundation
+    # silently reshuffles them between rescans (FaceTime can be index 0
+    # on one scan and index 2 on the next). Names are stable, so we
+    # store both: name wins when set, index is the legacy fallback.
     av_video_index: int = 0
     av_audio_index: int = -1  # -1 means "auto-pick a built-in mic"
+    av_video_name: str = ""
+    av_audio_name: str = ""
 
     # Path/URL for source_id="pipe".
     pipe_path: str = ""
@@ -293,6 +299,8 @@ class EncoderState:
                 "video_codec": self.video_codec,
                 "av_video_index": self.av_video_index,
                 "av_audio_index": self.av_audio_index,
+                "av_video_name": self.av_video_name,
+                "av_audio_name": self.av_audio_name,
                 "pipe_path": self.pipe_path,
                 "relay": {
                     "bind_host": self.relay_bind_host,

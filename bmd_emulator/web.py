@@ -207,6 +207,10 @@ def make_app(state: EncoderState, streamer: Streamer):
                         state.av_audio_index = int(payload["av_audio_index"])
                     except (TypeError, ValueError):
                         pass
+                if "av_video_name" in payload:
+                    state.av_video_name = str(payload["av_video_name"] or "")
+                if "av_audio_name" in payload:
+                    state.av_audio_name = str(payload["av_audio_name"] or "")
                 if "pipe_path" in payload:
                     state.pipe_path = str(payload["pipe_path"])
                 if "relay" in payload and isinstance(payload["relay"], dict):

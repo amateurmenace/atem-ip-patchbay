@@ -73,33 +73,89 @@ def avfoundation(
     fps: int,
     video_index: int,
     audio_index: int,
+    video_name: str = "",
+    audio_name: str = "",
     label: str = "Camera",
     description: str = "",
 ) -> Source:
     """Build an AVFoundation capture source (macOS).
 
-    AVFoundation's capture engine takes a single ``-i "V:A"`` token
-    where V and A are the integer device indices. Audio and video
-    share input #0.
+    AVFoundation's ``-i`` token addresses devices either by integer
+    index (``"2:3"``) or by string name (``"NDI Virtual Camera:NDI
+    Audio"``). Names are stable across rescans; indices reshuffle
+    silently when devices come and go (FaceTime can be index 0 on
+    one scan and index 2 on the next, depending on what else is
+    plugged in). We pass names whenever they're set in state, falling
+    back to indices only for legacy callers.
 
-    NDI Virtual Camera + NDI Audio (from NDI Tools) work transparently
-    here — the OS exposes them like any other capture device.
+    Probes the device for supported (width, height, fps) modes before
+    building the command — locked-mode virtual cameras (NDI Virtual
+    Camera in particular, only outputs 1080p60) reject any framerate
+    they don't natively support. The probe lets us request a real
+    mode, then the encoder's ``-r {fps}`` plus the scale filter
+    converts to the destination format on the way out.
     """
-    size = f"{width}x{height}"
+    from .device_scanner import probe_avf_modes, pick_best_avf_mode
+
+    # Resolve to a current index for the probe (probe needs a positional
+    # index; the actual capture command can use the name).
+    probe_index = _resolve_avf_index_for_probe(video_name, video_index)
+    modes = probe_avf_modes(probe_index)
+    actual_w, actual_h, actual_fps = pick_best_avf_mode(modes, width, height, fps)
+    actual_size = f"{actual_w}x{actual_h}"
+    fps_str = f"{int(actual_fps)}" if actual_fps == int(actual_fps) else f"{actual_fps:.3f}"
+
+    note = ""
+    if modes and (actual_w, actual_h) != (width, height):
+        note = (
+            f"Capturing at {actual_size}@{fps_str}fps (device's native mode); "
+            f"encoder will scale to {width}x{height}@{fps}fps for the destination."
+        )
+    elif modes and actual_fps != fps:
+        note = (
+            f"Capturing at {fps_str}fps (device-supported); "
+            f"encoder will retime to {fps}fps for the destination."
+        )
+
+    # AVFoundation token: prefer "name:name" over "index:index".
+    if video_name:
+        token = f"{video_name}:{audio_name}" if audio_name else video_name
+    else:
+        token = f"{video_index}:{audio_index}"
+
     return Source(
         id="avfoundation",
         label=label or "AVFoundation",
-        description=description or f"AVFoundation capture {size} @ {fps}fps",
+        description=description or f"AVFoundation {actual_size}@{fps_str}fps → {width}x{height}@{fps}fps",
         ffmpeg_input_args=[
             "-f", "avfoundation",
-            "-framerate", str(fps),
-            "-video_size", size,
+            "-framerate", fps_str,
+            "-video_size", actual_size,
             "-pixel_format", "uyvy422",
             "-capture_cursor", "1",
-            "-i", f"{video_index}:{audio_index}",
+            "-i", token,
         ],
         combined_av=True,
+        notes=note,
     )
+
+
+def _resolve_avf_index_for_probe(name: str, fallback_index: int) -> int:
+    """Look up the current AVFoundation index for a device by name.
+
+    Scans the live device list (forced refresh) and returns the index
+    matching the given name. Falls back to ``fallback_index`` if the
+    name isn't found — keeps the probe working when only legacy
+    index-based state is set.
+    """
+    if not name:
+        return fallback_index
+    from .device_scanner import list_capture_devices
+    devs = list_capture_devices(force=True)
+    for d in devs.video:
+        if d.name == name:
+            return d.index
+    return fallback_index
 
 
 def dshow(
@@ -123,16 +179,18 @@ def dshow(
     mapping back to ``0:v + 1:a`` (combined_av=False). Either way the
     rest of the pipeline is unchanged.
     """
-    size = f"{width}x{height}"
+    # See the avfoundation() factory above for why we don't pin
+    # -framerate / -video_size: forcing those breaks locked-mode
+    # virtual cameras (the same NDI Virtual Camera bug exists on
+    # the dshow side). The encoder retimes/scales to the destination
+    # format on the way out.
     if audio_name:
         return Source(
             id="avfoundation",  # see module docstring — same UI ID, different backend
             label=label or "DirectShow",
-            description=description or f"DirectShow capture {size} @ {fps}fps",
+            description=description or f"DirectShow capture (native rate) → {width}x{height} @ {fps}fps",
             ffmpeg_input_args=[
                 "-f", "dshow",
-                "-framerate", str(fps),
-                "-video_size", size,
                 "-rtbufsize", "256M",
                 "-i", f'video={video_name}:audio={audio_name}',
             ],
@@ -141,11 +199,9 @@ def dshow(
     return Source(
         id="avfoundation",
         label=label or "DirectShow",
-        description=description or f"DirectShow video {size} @ {fps}fps (silent)",
+        description=description or f"DirectShow video (native rate, silent) → {width}x{height} @ {fps}fps",
         ffmpeg_input_args=[
             "-f", "dshow",
-            "-framerate", str(fps),
-            "-video_size", size,
             "-rtbufsize", "256M",
             "-i", f'video={video_name}',
             "-f", "lavfi",
@@ -383,14 +439,21 @@ def _resolve_capture_device(state, width: int, height: int, fps: int) -> Source:
     )
 
     if sys.platform == "darwin":
+        # Prefer state-stored names (stable across rescans) over indices.
+        # If state.av_video_name is set, use it; else use the name we
+        # just looked up from the cached device list.
+        v_name_final = state.av_video_name or v_name
+        a_name_final = state.av_audio_name or (a_name if state.av_audio_index >= 0 else "")
         return avfoundation(
             width=width,
             height=height,
             fps=fps,
             video_index=state.av_video_index,
             audio_index=state.av_audio_index,
-            label=v_name,
-            description=f"{v_name} + {a_name or 'no audio'} @ {width}x{height}/{fps}",
+            video_name=v_name_final if not v_name_final.startswith("video[") else "",
+            audio_name=a_name_final if not a_name_final.startswith("audio[") else "",
+            label=v_name_final,
+            description=f"{v_name_final} + {a_name_final or 'no audio'} @ {width}x{height}/{fps}",
         )
 
     if sys.platform.startswith("win"):

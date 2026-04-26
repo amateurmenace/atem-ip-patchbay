@@ -421,13 +421,20 @@ function renderNdiSourceHint(senderName) {
   if (btn) {
     btn.addEventListener('click', () => {
       const v = parseInt(btn.dataset.videoIndex, 10);
-      const patch = { source_id: 'avfoundation', av_video_index: v };
+      const patch = {
+        source_id: 'avfoundation',
+        av_video_index: v,
+        av_video_name: ndiVideo.name,  // stable name beats AVF's shuffling indices
+      };
       const a = parseInt(btn.dataset.audioIndex, 10);
-      if (!isNaN(a)) patch.av_audio_index = a;
+      if (!isNaN(a)) {
+        patch.av_audio_index = a;
+        if (ndiAudio) patch.av_audio_name = ndiAudio.name;
+      }
       applySettings(patch);
       // Clear the hint and switch the preview to the camera.
       els.sourceHint.hidden = true;
-      const tile = { sourceId: 'avfoundation', category: 'ndi', name: 'NDI Virtual Camera' };
+      const tile = { sourceId: 'avfoundation', category: 'ndi', name: ndiVideo.name };
       setPreviewFor(tile);
     });
   }
@@ -583,6 +590,11 @@ function selectSource(t) {
   const patch = { source_id: t.sourceId };
   if (t.sourceId === 'avfoundation' && t.avIndex !== null) {
     patch.av_video_index = t.avIndex;
+    // Send the device NAME alongside the index — names are stable
+    // across AVF rescans (indices reshuffle silently when devices
+    // come/go), so the source factory uses the name as the canonical
+    // identifier, falling back to index only if the name is unknown.
+    if (t.name) patch.av_video_name = t.name;
   }
   applySettings(patch);
   els.pipeOnly.forEach((e) => (e.hidden = t.sourceId !== 'pipe'));
@@ -1103,7 +1115,15 @@ function bind() {
   els.lanDiscover.addEventListener('click', runLanDiscover);
 
   // Source devices
-  els.avAudio.addEventListener('change', () => applySettings({ av_audio_index: parseInt(els.avAudio.value, 10) }));
+  els.avAudio.addEventListener('change', () => {
+    const idx = parseInt(els.avAudio.value, 10);
+    const patch = { av_audio_index: idx };
+    // Look up the audio device's name from the most-recent device list
+    // and store it alongside the index — stable across AVF rescans.
+    const dev = knownDevices.audio.find((d) => d.index === idx);
+    patch.av_audio_name = dev ? dev.name : '';
+    applySettings(patch);
+  });
   els.pipePath.addEventListener('change', () => applySettings({ pipe_path: els.pipePath.value }));
   els.rescanDevices.addEventListener('click', (e) => { e.preventDefault(); ensureDevicesLoaded(true); });
   els.ndiRescan.addEventListener('click', (e) => { e.preventDefault(); ensureNdiLoaded(true); });
