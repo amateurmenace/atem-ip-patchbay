@@ -238,9 +238,18 @@ src-tauri/                      # v0.2.0 Tauri shell — added in Phase 0 on tau
 webui/                          # frontendDist target for Tauri (Phase 0 placeholder).
   index.html                    # Phase 1 swaps this for a redirect to the Axum HTTP server.
 .github/workflows/
-  ci.yml                        # py_compile + HTTP smoke on PR / push to main (v0.1.0)
-  release.yml                   # tag-driven matrix build + GH release (v0.1.0; gets
-                                # rewritten in Phase 9 for cargo-tauri matrix)
+  ci.yml                        # PR / push: smoke-python on main (v0.1.0),
+                                # cargo check on tauri-rewrite (v0.2.0).
+                                # Branch-guarded `if`s pick the right job per ref.
+  release.yml                   # tag-driven matrix build + GH release.
+                                # Phase 9 rewrote this for cargo-tauri (Mac
+                                # arm64 + Win x64 NSIS); Mac signing via the
+                                # MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PWD /
+                                # MACOS_KEYCHAIN_PWD / MACOS_SIGN_IDENTITY
+                                # secret bundle. NDI dylib bundling is NOT in
+                                # the v0.2.0 release pipeline yet — end users
+                                # need NDI Tools installed for NDI features
+                                # (small footnote in release notes).
 ```
 
 ## Conventions

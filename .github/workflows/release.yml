@@ -1,21 +1,29 @@
-# Build Mac + Windows binaries and attach them to a GitHub Release.
-# Triggered by pushing a tag matching v* (e.g. `git tag v0.1.0-alpha.1`
-# then `git push --tags`).
+# v0.2.0 release pipeline — Tauri (Rust + JS UI).
+# Triggered by pushing a tag matching v* from tauri-rewrite (or any
+# branch with this workflow file). Builds signed Mac arm64 .dmg and
+# Windows x64 NSIS installer + portable .exe via cargo-tauri, then
+# attaches everything to a GitHub Release.
 #
-# Mac builds are arm64-only for now — adding x86_64 means a second
-# matrix entry on macos-13 plus a `lipo`-merge step. Skipping until
-# someone asks for it.
-#
-# Code-signing is *opt-in* via repository secrets:
+# Mac code-signing is opt-in via repository secrets (same pattern as
+# v0.1.0):
 #   MACOS_SIGN_IDENTITY      — full identity name
 #                              ("Developer ID Application: NAME (TEAMID)")
 #   MACOS_CERTIFICATE_P12    — base64-encoded .p12 export of the cert
 #   MACOS_CERTIFICATE_PWD    — password set when exporting the .p12
 #   MACOS_KEYCHAIN_PWD       — fresh password for the throwaway runner keychain
-# When those aren't set, the .dmg ships unsigned and end users get a
-# Gatekeeper "unidentified developer" prompt on first launch (recoverable
-# via right-click → Open). Windows always ships unsigned for now (the
-# alpha doesn't have an EV cert).
+# When those aren't set, the .dmg ships unsigned and end users get
+# Gatekeeper "unidentified developer" on first launch (recoverable
+# via right-click → Open). Windows always ships unsigned for now (no
+# EV cert).
+#
+# NDI runtime dependency: the v0.2.0 build does NOT bundle
+# libndi.dylib / Processing.NDI.Lib.x64.dll. End users need NDI
+# Tools (free download from ndi.video) installed for the NDI direct-
+# ingest feature. A future release can vendor the redistributable
+# dylib (NDI SDK License Agreement explicitly permits this with
+# attribution); the binary is large (29 MB) and adding it to the
+# repo or downloading it in CI both have tradeoffs that are easier
+# to reason about once the rest of the pipeline is settled.
 
 name: Release
 
@@ -29,7 +37,7 @@ permissions:
 jobs:
 
   # ---------------------------------------------------------------
-  # macOS arm64 — produces ATEM-IP-Patchbay-<version>-arm64.dmg
+  # macOS arm64 — produces "ATEM IP Patchbay_<version>_aarch64.dmg"
   # ---------------------------------------------------------------
   build-macos:
     name: Build macOS (arm64)
@@ -37,18 +45,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.11"
+          targets: aarch64-apple-darwin
 
-      - name: Install create-dmg
-        run: brew install create-dmg
-
-      - name: Cache FFmpeg sidecar
+      - name: Cache cargo registry + git + build artifacts
         uses: actions/cache@v4
         with:
-          path: build/.cache
-          key: ffmpeg-macos-jellyfin-v1
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-macos-arm64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
 
       - name: Import signing identity (if secrets are set)
         env:
@@ -62,7 +74,7 @@ jobs:
           fi
           # Decode the base64 cert into a temp file.
           echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
-          # Create a throwaway keychain — never touches the runner's default.
+          # Throwaway keychain — never touches the runner's default.
           security create-keychain -p "$KC_PWD" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
           security unlock-keychain -p "$KC_PWD" build.keychain
@@ -71,35 +83,36 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KC_PWD" build.keychain
           # Make our keychain the default + first in the search list so
-          # `security find-identity` picks up the imported cert.
+          # `security find-identity` and tauri-cli pick up the cert.
           security list-keychains -d user -s build.keychain login.keychain
           security default-keychain -s build.keychain
           rm /tmp/cert.p12
 
-      - name: Build .dmg
+      - name: Build .app + .dmg
         env:
-          # When MACOS_SIGN_IDENTITY is unset, build.py auto-detects;
-          # if the keychain has nothing, signing is skipped automatically.
-          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-        run: python3 build/build.py
+          # tauri.conf.json's bundle.macOS.signingIdentity is the
+          # default "Developer ID Application: Stephen Walter (6M536MV7GT)";
+          # MACOS_SIGN_IDENTITY override-on-secret is supported via
+          # the APPLE_SIGNING_IDENTITY env var that tauri-cli reads.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        working-directory: src-tauri
+        run: cargo tauri build
 
-      - name: Sanity-check the .dmg
+      - name: Sanity-check the bundle
         run: |
-          ls -lh build/dist/
-          # The bundled FFmpeg must report libsrt — without it the
-          # produced .dmg can't push to ATEM. Catch a broken upstream
-          # download here instead of at first user-launch.
-          file "build/dist/ATEM IP Patchbay.app/Contents/Frameworks/ffmpeg"
+          ls -lh "src-tauri/target/release/bundle/dmg/"
+          ls -lh "src-tauri/target/release/bundle/macos/"
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: build/dist/*.dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   # ---------------------------------------------------------------
-  # Windows x64 — produces ATEM-IP-Patchbay-Setup-<version>-x64.exe
-  # plus the bare ATEM IP Patchbay.exe for users who prefer no installer
+  # Windows x64 — produces "ATEM IP Patchbay_<version>_x64-setup.exe"
+  # via the NSIS bundle target. Unsigned for now.
   # ---------------------------------------------------------------
   build-windows:
     name: Build Windows (x64)
@@ -107,33 +120,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.11"
+          targets: x86_64-pc-windows-msvc
 
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-
-      - name: Cache FFmpeg sidecar
+      - name: Cache cargo registry + git + build artifacts
         uses: actions/cache@v4
         with:
-          path: build/.cache
-          key: ffmpeg-windows-btbn-n8.1-v1
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-windows-x64-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Build .exe + installer
-        run: python build\build.py
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Build .exe + NSIS installer
+        working-directory: src-tauri
+        run: cargo tauri build
 
       - name: Sanity-check the artifacts
         shell: pwsh
         run: |
-          Get-ChildItem build\dist | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+          Get-ChildItem src-tauri\target\release\bundle\nsis | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
           path: |
-            build/dist/ATEM-IP-Patchbay-Setup-*.exe
-            build/dist/ATEM IP Patchbay.exe
+            src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------
@@ -145,10 +162,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        # Need history for --generate-notes to compare against the
-        # previous tag.
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # need history for --generate-notes
 
       - uses: actions/download-artifact@v4
         with:
@@ -161,11 +176,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Quote the .exe with a space carefully. gh release create
-          # accepts multiple file args; each one becomes a release asset.
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
             artifacts/macos-arm64/*.dmg \
-            "artifacts/windows-x64/ATEM-IP-Patchbay-Setup-"*.exe \
-            "artifacts/windows-x64/ATEM IP Patchbay.exe"
+            artifacts/windows-x64/*.exe
