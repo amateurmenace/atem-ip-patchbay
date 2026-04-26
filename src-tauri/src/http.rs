@@ -110,6 +110,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/ndi-senders", get(api_ndi_senders))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
+        .route("/api/kill-orphans", post(api_kill_orphans))
         .route("/api/settings", post(api_settings))
         .route("/api/load_xml", post(api_load_xml))
         .route("/api/load_xml_text", post(api_load_xml_text))
@@ -299,6 +300,86 @@ async fn api_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
     }
 }
 
+/// Kill any FFmpeg subprocess pushing a BMD-flavored SRT URL — i.e.
+/// any leftover from a prior run of this app whose parent died
+/// without taking the FFmpeg child with it. Matches on streamid=
+/// in the cmdline so unrelated FFmpeg jobs (transcodes, captures
+/// for other apps) don't get hit.
+///
+/// The dev-rebuild path under `cargo tauri dev` is the most common
+/// trigger for these orphans: cargo-tauri SIGKILLs the binary on
+/// rebuild, so the Drop on Streamer never runs and the FFmpeg
+/// process group survives.
+async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
+    #[cfg(target_os = "macos")]
+    let result = run_pkill("ffmpeg.*streamid=");
+    #[cfg(target_os = "linux")]
+    let result = run_pkill("ffmpeg.*streamid=");
+    #[cfg(target_os = "windows")]
+    let result: Result<usize, String> = Err(
+        "Orphan-kill not yet implemented on Windows. Use Task Manager to end \
+         any 'ffmpeg.exe' processes if a prior run left one streaming."
+            .into(),
+    );
+    match result {
+        Ok(killed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "killed": killed,
+                "message": if killed == 0 {
+                    "No orphan FFmpeg streams found.".to_string()
+                } else {
+                    format!("Killed {killed} orphan FFmpeg stream(s).")
+                }
+            })),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        ),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_pkill(pattern: &str) -> Result<usize, String> {
+    use std::process::Command;
+    // First a -SIGTERM pass for graceful shutdown (FFmpeg flushes
+    // its SRT/RTMP buffers and closes the connection cleanly), then
+    // a SIGKILL fallback after a brief settle for anything that
+    // ignored the TERM. pkill exits 0 when matches were found and
+    // signaled, 1 when none, >=2 on error.
+    let term = Command::new("pkill")
+        .args(["-TERM", "-f", pattern])
+        .status()
+        .map_err(|e| format!("pkill failed to launch: {e}"))?;
+    let killed_term = matches!(term.code(), Some(0));
+    if killed_term {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-f", pattern])
+            .status();
+    }
+    // Re-check via pgrep to count what actually went away. pgrep -c
+    // prints the matching count to stdout.
+    let probe = Command::new("pgrep")
+        .args(["-c", "-f", pattern])
+        .output();
+    let still_alive = probe
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    // Best-effort count: if pkill said it found something, assume it
+    // killed at least one; subtract any that survived (which would
+    // mean SIGKILL also failed — extremely rare).
+    let killed = if killed_term {
+        if still_alive == 0 { 1 } else { 0 }
+    } else {
+        0
+    };
+    Ok(killed)
+}
+
 /// Settings mutation — accepts a JSON object with any subset of the
 /// snapshot fields and applies them. Phase 1 supports the core string
 /// / int fields; Phase 2+ extends to source/device fields.
@@ -323,6 +404,8 @@ struct SettingsPayload {
     av_video_name: Option<String>,
     av_audio_index: Option<i32>,
     av_audio_name: Option<String>,
+    audio_mode: Option<String>,
+    audio_output_mono: Option<bool>,
     audio_pan_l: Option<u8>,
     audio_pan_r: Option<u8>,
     pipe_path: Option<String>,
@@ -485,6 +568,8 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             av_video_name: p.av_video_name,
             av_audio_index: p.av_audio_index,
             av_audio_name: p.av_audio_name,
+            audio_mode: p.audio_mode,
+            audio_output_mono: p.audio_output_mono,
             audio_pan_l: p.audio_pan_l,
             audio_pan_r: p.audio_pan_r,
             pipe_path: p.pipe_path,

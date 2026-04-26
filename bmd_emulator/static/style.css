@@ -820,13 +820,17 @@ button.big { padding: 14px 18px; font-size: 14px; }
   vertical-align: 1px;
 }
 
-/* Footer brand — Weird Machine logo, links to weirdmachine.org. */
+/* Footer brand — Weird Machine wordmark, links to weirdmachine.org.
+   Falls back to a styled text wordmark when no logo PNG is dropped
+   at /static/weirdmachine-logo.png so end users never see a broken
+   image icon. */
 .footer-brand {
   display: inline-flex;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   opacity: 0.78;
   transition: opacity 0.15s ease;
+  text-decoration: none;
 }
 .footer-brand:hover { opacity: 1; }
 .footer-logo {
@@ -835,6 +839,142 @@ button.big { padding: 14px 18px; font-size: 14px; }
   display: block;
   /* Logo is a black-on-white drawing; invert for the dark UI. */
   filter: invert(0.92);
+}
+.footer-logo-text {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.32em;
+  color: var(--text);
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border: 2px solid var(--text);
+  border-radius: 3px;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+.footer-credit {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 720px;
+  margin: 4px 0 8px;
+}
+.footer-credit a {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--muted);
+  text-underline-offset: 2px;
+}
+.footer-credit a:hover { text-decoration-color: var(--accent); }
+
+/* Audio Mixer card — split out from the old combined Source card
+   so the audio routing decisions read as a peer of Video Source
+   rather than as an afterthought tacked onto it. */
+.audio-mixer-card {
+  /* Inherits .card base; just need a bit of internal rhythm. */
+}
+.audio-mixer-disclaimer {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: rgba(78, 167, 255, 0.08);
+  border-left: 3px solid var(--signal);
+  border-radius: 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.audio-mode-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.audio-mode-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.audio-mode-opt:hover { border-color: var(--accent); }
+.audio-mode-opt input[type="radio"] {
+  margin: 3px 0 0; flex: 0 0 auto; width: auto;
+}
+.audio-mode-opt:has(input:checked) {
+  border-color: var(--signal);
+  background: rgba(78, 167, 255, 0.10);
+}
+.audio-mode-label {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 13px;
+}
+.audio-mode-label strong { color: var(--text); font-weight: 700; }
+.audio-mode-sub {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.audio-custom {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.audio-mix-future {
+  margin: 14px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.audio-mix-future strong { color: var(--accent); }
+
+.audio-output-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.audio-output-row .lbl {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+  margin-right: 4px;
+}
+.audio-output-row .seg {
+  /* Reuse the destination card's seg-control look for visual
+     consistency, but as standalone labels (no parent .seg-control
+     wrapper since this is a flat 2-option choice). */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: border-color 0.15s ease;
+}
+.audio-output-row .seg:has(input:checked) {
+  border-color: var(--signal);
+  background: rgba(78, 167, 255, 0.10);
+  color: var(--text);
+}
+.audio-output-row .seg input[type="radio"] {
+  margin: 0; width: auto;
+}
+.hint-inline {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
 }
 
 .pipe-only { margin-top: 12px; padding: 12px; border-top: 1px dashed var(--line); }
