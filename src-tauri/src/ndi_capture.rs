@@ -39,6 +39,15 @@ use tokio::sync::mpsc;
 /// occasional encoder spike.
 const FRAME_CHANNEL_CAPACITY: usize = 64;
 
+/// One JPEG preview snapshot per N captured frames. At 30 FPS source
+/// rate a stride of 15 -> ~2 FPS preview, which is plenty for the
+/// UI's "what's the camera seeing" thumbnail and keeps the encode
+/// cost negligible (BGRA -> JPEG ~3-5ms per frame on M-series).
+const PREVIEW_FRAME_STRIDE: u64 = 15;
+/// JPEG quality (0-100). 60 looks fine at the small preview size and
+/// keeps payload around 50-150 KB per frame at 1080p.
+const PREVIEW_JPEG_QUALITY: u8 = 60;
+
 /// What the streamer needs to build a matching FFmpeg input args.
 #[derive(Debug, Clone, Copy)]
 pub struct NdiVideoFormat {
@@ -64,6 +73,19 @@ impl NdiVideoFormat {
 pub struct NdiCapture {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// Latest JPEG snapshot, refreshed by the capture thread once
+    /// every PREVIEW_FRAME_STRIDE captured frames. Read by the
+    /// /api/preview HTTP handler. None until the first preview frame
+    /// has been encoded.
+    preview: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl NdiCapture {
+    /// Latest JPEG-encoded preview frame, if one has been captured
+    /// yet. Cheap clone (bytes are Arc'd internally for the read).
+    pub fn latest_preview(&self) -> Option<Vec<u8>> {
+        self.preview.lock().unwrap().clone()
+    }
 }
 
 impl NdiCapture {
@@ -130,12 +152,14 @@ impl NdiCapture {
         let _ = tx.try_send(frame.data.clone());
 
         let stop = Arc::new(AtomicBool::new(false));
+        let preview = Arc::new(std::sync::Mutex::new(None));
         let stop_w = stop.clone();
+        let preview_w = preview.clone();
         let handle = thread::Builder::new()
             .name("ndi-capture".into())
             .spawn(move || {
                 let _ndi = ndi; // keep handle alive for the receiver's lifetime
-                run_capture_loop(receiver, stop_w, tx);
+                run_capture_loop(receiver, stop_w, tx, preview_w);
             })?;
 
         Ok((
@@ -143,6 +167,7 @@ impl NdiCapture {
             NdiCapture {
                 stop,
                 handle: Some(handle),
+                preview,
             },
             rx,
         ))
@@ -165,10 +190,30 @@ impl Drop for NdiCapture {
     }
 }
 
-fn run_capture_loop(receiver: Receiver, stop: Arc<AtomicBool>, tx: mpsc::Sender<Vec<u8>>) {
+fn run_capture_loop(
+    receiver: Receiver,
+    stop: Arc<AtomicBool>,
+    tx: mpsc::Sender<Vec<u8>>,
+    preview: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+) {
+    let mut frame_counter: u64 = 0;
     while !stop.load(Ordering::Acquire) {
         match receiver.capture_video(Duration::from_millis(500)) {
             Ok(frame) if !frame.data.is_empty() => {
+                // Sample one preview JPEG every PREVIEW_FRAME_STRIDE
+                // frames. encode_jpeg is in the grafton-ndi crate and
+                // uses the underlying NDI buffer in place — no second
+                // copy. Failures get logged and skipped; the live
+                // pipeline still gets the raw bytes via the channel.
+                if frame_counter % PREVIEW_FRAME_STRIDE == 0 {
+                    match frame.encode_jpeg(PREVIEW_JPEG_QUALITY) {
+                        Ok(jpeg) => {
+                            *preview.lock().unwrap() = Some(jpeg);
+                        }
+                        Err(err) => log::debug!("preview JPEG encode failed: {err}"),
+                    }
+                }
+                frame_counter = frame_counter.wrapping_add(1);
                 // VideoFrame implements Drop (releases the NDI buffer)
                 // so we clone the bytes out before sending.
                 if tx.blocking_send(frame.data.clone()).is_err() {

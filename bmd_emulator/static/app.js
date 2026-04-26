@@ -284,6 +284,18 @@ function stopPreview() {
     activeStream.getTracks().forEach((t) => t.stop());
     activeStream = null;
   }
+  if (ndiPreviewTimer) {
+    clearInterval(ndiPreviewTimer);
+    ndiPreviewTimer = null;
+  }
+  if (ndiPreviewImg) {
+    if (ndiPreviewImg.dataset.objectUrl) {
+      URL.revokeObjectURL(ndiPreviewImg.dataset.objectUrl);
+      delete ndiPreviewImg.dataset.objectUrl;
+    }
+    ndiPreviewImg.src = '';
+    ndiPreviewImg.hidden = true;
+  }
   els.previewVideo.srcObject = null;
   els.previewVideo.hidden = true;
   els.previewBars.hidden = false;
@@ -451,7 +463,8 @@ function renderNdiSourceHint(senderName) {
 async function setPreviewFor(tile) {
   if (tile.sourceId === 'test_pattern') return showTestPatternPreview();
   if (tile.sourceId === 'pipe')         return showPipePreview(tile.name);
-  if (tile.sourceId === 'ndi-sender')   return showNdiHint(tile.name);
+  if (tile.sourceId === 'ndi-sender')   return startNdiPreview(tile.name);
+  if (tile.sourceId === 'ndi')          return startNdiPreview(tile.name);
   if (tile.sourceId === 'srt_listen' || tile.sourceId === 'rtmp_listen') {
     return showRelayWaiting(tile.sourceId);
   }
@@ -459,6 +472,79 @@ async function setPreviewFor(tile) {
     if (tile.category === 'screen') return startScreenPreview();
     return startCameraPreview(tile.name);
   }
+}
+
+// -----------------------------------------------------------------
+// NDI native preview — polls /api/preview at ~2 Hz once an NDI
+// source is active. The Rust NDI capture thread (Phase 7) samples
+// every 15th frame, encodes JPEG via grafton-ndi, and stashes it;
+// /api/preview returns the latest. Until streaming starts the
+// endpoint returns 204 — we display the bridge-style waiting hint
+// in that case.
+// -----------------------------------------------------------------
+let ndiPreviewTimer = null;
+let ndiPreviewImg = null;
+
+function startNdiPreview(senderName) {
+  const key = `ndi:${senderName}`;
+  if (previewKey === key) return;
+  stopPreview();
+  previewKey = key;
+
+  if (!ndiPreviewImg) {
+    ndiPreviewImg = document.createElement('img');
+    ndiPreviewImg.id = 'preview-ndi';
+    ndiPreviewImg.alt = 'NDI preview';
+    ndiPreviewImg.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+    els.previewFrame.appendChild(ndiPreviewImg);
+  }
+  ndiPreviewImg.hidden = false;
+  els.previewBars.hidden = true;
+  els.previewVideo.hidden = true;
+  els.previewMessage.hidden = true;
+
+  if (ndiPreviewTimer) clearInterval(ndiPreviewTimer);
+  let nullStreak = 0;
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/preview?ts=${Date.now()}`);
+      if (r.status === 204 || !r.ok) {
+        nullStreak += 1;
+        // After ~6s without frames, fall back to the waiting message
+        // so the user knows the stream isn't running yet.
+        if (nullStreak === 12 && ndiPreviewImg.hidden === false) {
+          showPreviewMessage(`
+            <div>
+              <strong>NDI sender: ${escapeHtml(senderName)}</strong>
+              Direct NDI ingest is selected — press <strong>Start Stream</strong>
+              below to begin receiving. The first preview frame will appear
+              here once the receiver connects.
+            </div>`);
+        }
+        return;
+      }
+      nullStreak = 0;
+      // Show the image again if the waiting-message fallback was rendered.
+      if (ndiPreviewImg.hidden) {
+        els.previewMessage.hidden = true;
+        els.previewBars.hidden = true;
+        ndiPreviewImg.hidden = false;
+      }
+      const blob = await r.blob();
+      // Object URL avoids re-encoding the JPEG bytes through base64.
+      const next = URL.createObjectURL(blob);
+      const prev = ndiPreviewImg.dataset.objectUrl;
+      ndiPreviewImg.src = next;
+      if (prev) URL.revokeObjectURL(prev);
+      ndiPreviewImg.dataset.objectUrl = next;
+    } catch (_e) {
+      // Network blip — try again on the next tick.
+    }
+  };
+  // Kick off immediately + then every 500ms (~2 Hz). The Rust
+  // sampler also does ~2 Hz, so the round-trip stays smooth.
+  tick();
+  ndiPreviewTimer = setInterval(tick, 500);
 }
 
 function showRelayWaiting(sid) {
@@ -576,10 +662,12 @@ function buildSourceTiles(snap) {
 
 function selectSource(t) {
   if (t.sourceId === 'ndi-sender') {
-    // Informational only — show hint inline + in preview, don't change
-    // FFmpeg state. The hint includes a one-click bridge to NDI Virtual
-    // Camera when that AVF device exists.
-    setPreviewFor(t);
+    // Phase 4+: discovered NDI senders are now first-class direct-
+    // ingest sources. Switch FFmpeg to source_id="ndi" with the
+    // sender name; the preview poller will pick up frames from
+    // /api/preview once Start Stream starts the receiver.
+    applySettings({ source_id: 'ndi', ndi_source_name: t.name });
+    setPreviewFor({ ...t, sourceId: 'ndi' });
     return;
   }
   // Hide the NDI inline hint when the user picks a real source.

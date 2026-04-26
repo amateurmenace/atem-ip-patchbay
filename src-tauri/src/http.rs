@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
 use axum::{
+    body::Body,
     extract::{Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
+    http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -70,6 +71,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         }))
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
+        .route("/api/preview", get(api_preview))
         .route("/api/log", get(api_log))
         .route("/api/devices", get(api_devices))
         .route("/api/discover", get(api_discover))
@@ -110,6 +112,29 @@ fn guess_loopback() -> String {
 struct LogResponse {
     command: String,
     lines: Vec<String>,
+}
+
+/// Latest preview JPEG from the active source. Phase 7 only sources
+/// preview frames from NDI captures (the receive thread samples one
+/// per ~15 frames and stashes a JPEG via grafton-ndi's encode_jpeg).
+/// Other source types (test pattern, AVF, screen capture) still rely
+/// on the JS UI's getUserMedia path. Returns 204 when no preview is
+/// available (no active NDI capture, or first frame not yet seen).
+async fn api_preview(State(state): State<HttpAppState>) -> Response {
+    match state.streamer.current_ndi_preview().await {
+        Some(jpeg) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+            .header(header::PRAGMA, "no-cache")
+            .header(header::EXPIRES, "0")
+            .body(Body::from(jpeg))
+            .unwrap(),
+        None => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .unwrap(),
+    }
 }
 
 async fn api_log(State(state): State<HttpAppState>) -> impl IntoResponse {

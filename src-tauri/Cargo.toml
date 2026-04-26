@@ -44,7 +44,7 @@ which = "6"
 # Contents/Frameworks/ via bundle.macOS.frameworks (added in Phase 9
 # for CI; manual copy works for now on this Mac since the dylib is
 # already at /usr/local/lib).
-grafton-ndi = "0.11"
+grafton-ndi = { version = "0.11", features = ["image-encoding"] }
 
 # v0.2.0 Phase 6 — multi-instance launcher
 clap = { version = "4", features = ["derive"] }

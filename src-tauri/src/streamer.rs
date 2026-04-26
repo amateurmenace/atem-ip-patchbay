@@ -97,6 +97,15 @@ impl Streamer {
         }
     }
 
+    /// Latest JPEG preview frame from the active NDI capture, if
+    /// any. Returns None when no NDI source is active or when no
+    /// frame has been captured yet. Caller should re-poll at ~2 Hz
+    /// to drive the preview <img> tag.
+    pub async fn current_ndi_preview(&self) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().await;
+        inner.ndi_capture.as_ref().and_then(|c| c.latest_preview())
+    }
+
     pub async fn last_log_tail(&self, lines: usize) -> Vec<String> {
         let inner = self.inner.lock().await;
         let n = inner.last_log_lines.len().min(lines);
