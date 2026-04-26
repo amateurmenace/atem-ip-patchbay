@@ -320,6 +320,28 @@ pub fn srt_listen(
     }
 }
 
+/// NDI direct ingest. The Streamer special-cases this id: spawn an
+/// NDI receiver thread, probe the source's actual format, then
+/// build the FFmpeg command with a matching rawvideo input on
+/// `pipe:0`. The args returned here are placeholders so resolve_source
+/// signals "this is an NDI source"; the real args come from
+/// [`crate::streamer::build_ffmpeg_cmd_for_ndi`] after probe.
+pub fn ndi(source_name: &str) -> Source {
+    Source {
+        id: "ndi".into(),
+        label: source_name.to_string(),
+        description: format!("NDI direct: {source_name}"),
+        ffmpeg_input_args: Vec::new(), // filled in post-probe by streamer
+        available: !source_name.is_empty(),
+        notes: if source_name.is_empty() {
+            "Pick an NDI sender from the discovery list.".into()
+        } else {
+            String::new()
+        },
+        combined_av: false, // NDI video pipes to stdin, audio is silent (Phase 4)
+    }
+}
+
 pub fn rtmp_listen(
     bind_host: &str,
     bind_port: u16,
@@ -360,6 +382,7 @@ pub fn resolve_source(state: &EncoderState) -> Result<Source, String> {
         "test_pattern" => Ok(test_pattern(width, height, fps)),
         "pipe" => Ok(pipe(&snap.pipe_path)),
         "avfoundation" => Ok(resolve_capture_device(&snap, width, height, fps)),
+        "ndi" => Ok(ndi(&snap.ndi_source_name)),
         "srt_listen" => Ok(srt_listen(
             &snap.relay_bind_host,
             snap.relay_srt_port,

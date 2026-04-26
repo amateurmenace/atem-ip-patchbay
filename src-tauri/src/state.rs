@@ -90,6 +90,10 @@ struct Inner {
 
     pipe_path: String,
 
+    /// Name of the selected NDI sender (for source_id="ndi"). Phase 4.
+    /// Populated by the UI after the user picks one from /api/ndi-senders.
+    ndi_source_name: String,
+
     relay_bind_host: String,
     relay_srt_port: u16,
     relay_srt_latency_us: u32,
@@ -140,6 +144,7 @@ impl EncoderState {
                 av_video_name: String::new(),
                 av_audio_name: String::new(),
                 pipe_path: String::new(),
+                ndi_source_name: String::new(),
                 relay_bind_host: "0.0.0.0".into(),
                 relay_srt_port: 9710,
                 relay_srt_latency_us: 200_000,
@@ -227,6 +232,7 @@ impl EncoderState {
             av_video_name: inner.av_video_name.clone(),
             av_audio_name: inner.av_audio_name.clone(),
             pipe_path: inner.pipe_path.clone(),
+            ndi_source_name: inner.ndi_source_name.clone(),
             relay_bind_host: inner.relay_bind_host.clone(),
             relay_srt_port: inner.relay_srt_port,
             relay_srt_latency_us: inner.relay_srt_latency_us,
@@ -316,6 +322,9 @@ impl EncoderState {
         if let Some(v) = &update.current_server_name {
             inner.current_server_name = v.clone();
         }
+        if let Some(v) = &update.ndi_source_name {
+            inner.ndi_source_name = v.clone();
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -379,6 +388,7 @@ impl EncoderState {
             av_video_name: inner.av_video_name.clone(),
             av_audio_name: inner.av_audio_name.clone(),
             pipe_path: inner.pipe_path.clone(),
+            ndi_source_name: inner.ndi_source_name.clone(),
             relay: RelaySnapshot {
                 bind_host: inner.relay_bind_host.clone(),
                 srt_port: inner.relay_srt_port,
@@ -487,6 +497,7 @@ pub struct SourceSelection {
     pub av_video_name: String,
     pub av_audio_name: String,
     pub pipe_path: String,
+    pub ndi_source_name: String,
     pub relay_bind_host: String,
     pub relay_srt_port: u16,
     pub relay_srt_latency_us: u32,
@@ -518,6 +529,7 @@ pub struct SettingsUpdate {
     pub video_codec: Option<String>,
     pub current_service_name: Option<String>,
     pub current_server_name: Option<String>,
+    pub ndi_source_name: Option<String>,
 }
 
 // ---- Snapshot DTO ----------------------------------------------------------
@@ -557,6 +569,7 @@ pub struct Snapshot {
     pub av_video_name: String,
     pub av_audio_name: String,
     pub pipe_path: String,
+    pub ndi_source_name: String,
     pub relay: RelaySnapshot,
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,

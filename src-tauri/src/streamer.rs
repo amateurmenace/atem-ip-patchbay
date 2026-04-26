@@ -12,6 +12,8 @@
 //! (Phase 8) when overlay UI gets reworked anyway.
 
 use crate::ffmpeg_path::ffmpeg_path;
+use crate::ndi_capture::{NdiCapture, NdiVideoFormat};
+use crate::ndi_runtime;
 use crate::sources::Source;
 use crate::state::{EncoderState, Snapshot};
 use crate::streamid::{build_srt_url, parse_srt_host_port, SrtUrlParams};
@@ -22,9 +24,10 @@ use regex::Regex;
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 const LOG_TAIL_CAPACITY: usize = 500;
 
@@ -58,6 +61,9 @@ struct Inner {
     last_command: Vec<String>,
     last_log_lines: VecDeque<String>,
     stop_requested: bool,
+    /// Held when source_id == "ndi"; dropped on stop() so the
+    /// receiver thread exits and FFmpeg's stdin pipe closes cleanly.
+    ndi_capture: Option<NdiCapture>,
 }
 
 impl Streamer {
@@ -69,6 +75,7 @@ impl Streamer {
                 last_command: Vec::new(),
                 last_log_lines: VecDeque::with_capacity(LOG_TAIL_CAPACITY),
                 stop_requested: false,
+                ndi_capture: None,
             }),
         })
     }
@@ -118,13 +125,33 @@ impl Streamer {
             ));
         }
 
-        let cmd = self.build_ffmpeg_cmd(&plan);
+        // NDI sources need a probe + receiver-thread spin-up before we
+        // know the FFmpeg input args. Other source types build the
+        // command directly from EncoderState.
+        let (cmd, ndi_capture, ndi_frame_rx) = if plan.source.id == "ndi" {
+            let source_name = plan.source.label.clone();
+            let ndi_source = ndi_runtime::find_source_by_name(&source_name)
+                .ok_or_else(|| anyhow!("NDI source not found: {source_name:?}. Refresh the discovery list."))?;
+            let (format, capture, rx) = NdiCapture::start_and_probe_format(
+                ndi_source,
+                Duration::from_secs(5),
+            )?;
+            let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
+            (cmd, Some(capture), Some(rx))
+        } else {
+            (self.build_ffmpeg_cmd(&plan), None, None)
+        };
+
         log::info!("Launching FFmpeg: {}", shlex_join(&cmd));
 
         let mut command = Command::new(&cmd[0]);
         command
             .args(&cmd[1..])
-            .stdin(Stdio::null())
+            .stdin(if ndi_capture.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -136,6 +163,15 @@ impl Streamer {
             .stderr
             .take()
             .ok_or_else(|| anyhow!("ffmpeg stderr was not piped"))?;
+
+        // Wire the NDI -> FFmpeg stdin pipe via a small drainer task.
+        if let (Some(_), Some(rx)) = (ndi_capture.as_ref(), ndi_frame_rx) {
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("ffmpeg stdin was not piped (NDI source)"))?;
+            tokio::spawn(ndi_writer_task(stdin, rx));
+        }
 
         // Reset stats for the new session.
         self.state.stats_in_place(|s| {
@@ -156,6 +192,7 @@ impl Streamer {
             inner.last_log_lines.clear();
             inner.stop_requested = false;
             inner.child = Some(child);
+            inner.ndi_capture = ndi_capture;
         }
 
         // Spawn the monitor task. It owns the stderr handle, parses
@@ -172,6 +209,12 @@ impl Streamer {
     pub async fn stop(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.stop_requested = true;
+        if let Some(mut capture) = inner.ndi_capture.take() {
+            // Drop blocks while the receiver thread joins; do it
+            // before killing FFmpeg so the rawvideo input gets a
+            // clean EOF.
+            capture.stop();
+        }
         if let Some(child) = inner.child.as_mut() {
             // tokio's Child::kill sends SIGKILL on Unix; FFmpeg will
             // tear down quickly and the SRT receiver detects the drop.
@@ -242,6 +285,30 @@ impl Streamer {
             source,
             video_codec: snap.video_codec.to_lowercase(),
         })
+    }
+
+    /// Variant of build_ffmpeg_cmd for NDI sources — input is rawvideo
+    /// on pipe:0 (frame format determined by the upstream probe), with
+    /// silent audio from lavfi.
+    fn build_ffmpeg_cmd_for_ndi(&self, plan: &StreamPlan, fmt: &NdiVideoFormat) -> Vec<String> {
+        let size = format!("{}x{}", fmt.width, fmt.height);
+        let fps = fmt.fps().to_string();
+        let mut input_args: Vec<String> = vec![
+            "-f".into(), "rawvideo".into(),
+            "-pix_fmt".into(), fmt.ffmpeg_pix_fmt.into(),
+            "-s".into(), size,
+            "-r".into(), fps,
+            "-i".into(), "pipe:0".into(),
+            "-f".into(), "lavfi".into(),
+            "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+        ];
+
+        // Build a temp Source so the existing build_ffmpeg_cmd
+        // pathway works — overwrite the input args with the NDI ones.
+        let mut adjusted = plan.clone();
+        adjusted.source.ffmpeg_input_args = input_args.split_off(0);
+        adjusted.source.combined_av = false; // separate inputs (pipe + lavfi)
+        self.build_ffmpeg_cmd(&adjusted)
     }
 
     fn build_ffmpeg_cmd(&self, plan: &StreamPlan) -> Vec<String> {
@@ -601,6 +668,20 @@ fn needs_quoting(c: char) -> bool {
         c,
         ' ' | '\t' | '\n' | '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '"' | '\'' | '\\' | '*' | '?' | '#' | '~' | '!' | '['
     )
+}
+
+/// Drains NDI frames from the mpsc channel into FFmpeg's stdin. Exits
+/// when the channel closes (NDI capture stopped) or stdin write fails
+/// (FFmpeg exited).
+async fn ndi_writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<Vec<u8>>) {
+    while let Some(buf) = rx.recv().await {
+        if let Err(err) = stdin.write_all(&buf).await {
+            log::warn!("NDI->ffmpeg stdin write failed: {err}");
+            break;
+        }
+    }
+    let _ = stdin.shutdown().await;
+    log::info!("NDI->ffmpeg writer task exiting");
 }
 
 #[allow(dead_code)]

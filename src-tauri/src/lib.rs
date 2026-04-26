@@ -1,6 +1,8 @@
 mod device_scanner;
 mod ffmpeg_path;
 mod http;
+mod ndi_capture;
+mod ndi_runtime;
 mod sources;
 mod state;
 mod streamer;
@@ -41,6 +43,14 @@ pub fn run() {
 
             load_default_xml_files(app.handle(), &encoder);
             apply_default_devices_at_boot(&encoder);
+
+            // Initialize the NDI runtime (loads libndi.dylib via
+            // dlopen). If NDI Tools isn't installed this fails with
+            // a clear runtime error and the rest of the app still
+            // works — discovery just stays empty.
+            if let Err(err) = ndi_runtime::init() {
+                log::warn!("NDI runtime init failed (NDI features disabled): {err}");
+            }
 
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());

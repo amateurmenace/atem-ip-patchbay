@@ -72,8 +72,8 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/lan-ip", get(api_lan_ip))
         .route("/api/log", get(api_log))
         .route("/api/devices", get(api_devices))
-        .route("/api/discover", get(api_discover_stub))
-        .route("/api/ndi-senders", get(api_ndi_senders_stub))
+        .route("/api/discover", get(api_discover))
+        .route("/api/ndi-senders", get(api_ndi_senders))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
         .route("/api/settings", post(api_settings))
@@ -127,22 +127,37 @@ async fn api_devices(Query(q): Query<HashMap<String, String>>) -> impl IntoRespo
     Json(devs)
 }
 
-/// Phase 4 will replace these with real NDI discovery via the
-/// `grafton-ndi` crate. Returning empty lists keeps the JS UI happy.
+/// NDI source list, fed by the grafton-ndi Finder. /api/discover and
+/// /api/ndi-senders return the same payload shape — the v0.1.0 UI
+/// hits both endpoints from different code paths.
 #[derive(Serialize)]
-struct DiscoverStub {
-    devices: Vec<String>,
-}
-async fn api_discover_stub(Query(_q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    Json(DiscoverStub { devices: vec![] })
+struct NdiSendersResponse {
+    senders: Vec<crate::ndi_runtime::NdiSource>,
 }
 
 #[derive(Serialize)]
-struct NdiSendersStub {
-    senders: Vec<String>,
+struct DiscoverResponse {
+    devices: Vec<crate::ndi_runtime::NdiSource>,
 }
-async fn api_ndi_senders_stub(Query(_q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    Json(NdiSendersStub { senders: vec![] })
+
+async fn api_discover(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let devices = crate::ndi_runtime::discover(wait);
+    Json(DiscoverResponse { devices })
+}
+
+async fn api_ndi_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let senders = crate::ndi_runtime::discover(wait);
+    Json(NdiSendersResponse { senders })
 }
 
 async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {
@@ -184,6 +199,7 @@ struct SettingsPayload {
     video_codec: Option<String>,
     current_service_name: Option<String>,
     current_server_name: Option<String>,
+    ndi_source_name: Option<String>,
 }
 
 async fn api_settings(
@@ -266,6 +282,7 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             video_codec: p.video_codec,
             current_service_name: p.current_service_name,
             current_server_name: p.current_server_name,
+            ndi_source_name: p.ndi_source_name,
         }
     }
 }
