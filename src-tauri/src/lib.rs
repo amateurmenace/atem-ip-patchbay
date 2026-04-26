@@ -4,6 +4,7 @@ mod http;
 mod instance;
 mod ndi_capture;
 mod ndi_runtime;
+mod preview;
 mod protocol;
 mod sources;
 mod state;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use tauri::{Manager, RunEvent};
 
 use crate::http::HttpAppState;
+use crate::preview::Preview;
 use crate::protocol::ProtocolServer;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
@@ -82,10 +84,12 @@ pub fn run() {
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
 
-            let streamer = Streamer::new(encoder.clone());
+            let preview = Preview::new();
+            let streamer = Streamer::new(encoder.clone(), preview.clone());
             let http_state = HttpAppState {
                 encoder: encoder.clone(),
                 streamer: streamer.clone(),
+                preview: preview.clone(),
             };
 
             // Bind synchronously so we know the port before creating
@@ -122,6 +126,7 @@ pub fn run() {
             // app.state().
             app.manage(encoder);
             app.manage(streamer);
+            app.manage(preview);
             app.manage(proto);
             app.manage(http_state_marker(port));
             app.manage(BmdPort(bmd_port));

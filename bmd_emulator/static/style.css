@@ -374,9 +374,24 @@ body.is-streaming .preview-frame {
 
 .controls-row {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  /* Start (primary CTA) | Preview | Stop. Start gets the most width
+     so it stays visually dominant; Preview is secondary; Stop is the
+     narrowest since it's typically a single click after streaming
+     has been verified. */
+  grid-template-columns: 2fr 1.4fr 1fr;
   gap: 10px;
 }
+
+/* Preview button when the backend reports preview.active=true.
+   Yellow to read as "running but not committed" — distinct from the
+   blue primary Start CTA and the neutral Stop. */
+button.preview-active {
+  background: linear-gradient(180deg, #f3c44b 0%, #c08e1a 100%);
+  border-color: #c08e1a;
+  color: #1a1408;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.18);
+}
+button.preview-active:hover { filter: brightness(1.06); }
 
 /* ============= TELEMETRY ================================= */
 .telemetry-grid {

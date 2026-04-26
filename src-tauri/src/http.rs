@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::preview::Preview;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
 
@@ -23,6 +24,7 @@ use crate::streamer::Streamer;
 pub struct HttpAppState {
     pub encoder: Arc<EncoderState>,
     pub streamer: Arc<Streamer>,
+    pub preview: Arc<Preview>,
 }
 
 /// Bind a TCP listener on the requested port, walking forward up to nine
@@ -100,6 +102,8 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
         .route("/api/preview", get(api_preview))
+        .route("/api/preview/start", post(api_preview_start))
+        .route("/api/preview/stop", post(api_preview_stop))
         .route("/api/log", get(api_log))
         .route("/api/devices", get(api_devices))
         .route("/api/discover", get(api_discover))
@@ -118,7 +122,19 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
 // ---- handlers --------------------------------------------------------------
 
 async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
-    Json(state.encoder.snapshot())
+    // Flatten the encoder snapshot with the current preview status so
+    // the JS poll loop sees both in one request — keeps the Preview
+    // button label in sync with backend state without a second poll.
+    #[derive(Serialize)]
+    struct StateResponse {
+        #[serde(flatten)]
+        snapshot: crate::state::Snapshot,
+        preview: crate::preview::PreviewStatus,
+    }
+    Json(StateResponse {
+        snapshot: state.encoder.snapshot(),
+        preview: state.preview.status().await,
+    })
 }
 
 #[derive(Serialize)]
@@ -143,14 +159,17 @@ struct LogResponse {
     lines: Vec<String>,
 }
 
-/// Latest preview JPEG from the active source. Phase 7 only sources
-/// preview frames from NDI captures (the receive thread samples one
-/// per ~15 frames and stashes a JPEG via grafton-ndi's encode_jpeg).
-/// Other source types (test pattern, AVF, screen capture) still rely
-/// on the JS UI's getUserMedia path. Returns 204 when no preview is
-/// available (no active NDI capture, or first frame not yet seen).
+/// Latest preview JPEG. Reads from the streamer first (full-bandwidth
+/// receiver, more recent frames), falls back to the pre-stream
+/// preview backend's last JPEG. Returns 204 when neither has a frame
+/// available — the JS poll loop interprets that as "waiting" and
+/// shows the SMPTE bars / waiting hint.
 async fn api_preview(State(state): State<HttpAppState>) -> Response {
-    match state.streamer.current_ndi_preview().await {
+    let jpeg = match state.streamer.current_ndi_preview().await {
+        Some(j) => Some(j),
+        None => state.preview.latest_jpeg(),
+    };
+    match jpeg {
         Some(jpeg) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/jpeg")
@@ -164,6 +183,52 @@ async fn api_preview(State(state): State<HttpAppState>) -> Response {
             .body(Body::empty())
             .unwrap(),
     }
+}
+
+/// Start a pre-stream preview for the source currently configured in
+/// EncoderState. NDI sources spin up a low-bandwidth Receiver; other
+/// source kinds return 400 until the FFmpeg snapshot backend lands.
+/// Idempotent — calling while a preview is already running stops the
+/// prior one and starts the new one (so a source-change + Preview
+/// click sequence works without an explicit Stop Preview).
+async fn api_preview_start(State(state): State<HttpAppState>) -> impl IntoResponse {
+    let snap = state.encoder.snapshot();
+    let result = match snap.source_id.as_str() {
+        "ndi" => {
+            if snap.ndi_source_name.is_empty() {
+                Err("No NDI sender selected. Pick one from the source gallery first.".to_string())
+            } else {
+                state
+                    .preview
+                    .start_ndi(&snap.ndi_source_name)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
+        other => Err(format!(
+            "Pre-stream preview is only implemented for NDI sources today. \
+             Selected source: {other:?}. (FFmpeg-snapshot backend for \
+             AVFoundation / pipe / test_pattern lands in a follow-up.)"
+        )),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!(state.preview.status().await)),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        ),
+    }
+}
+
+async fn api_preview_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
+    state.preview.stop().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(state.preview.status().await)),
+    )
 }
 
 async fn api_log(State(state): State<HttpAppState>) -> impl IntoResponse {
