@@ -644,19 +644,10 @@ function buildSourceTiles(snap) {
     category: 'pipe', section: 'URL / Pipe',
   });
 
-  // Relay listeners — turn this app into a server that an external
-  // encoder publishes into.
-  const r = snap.relay || {};
-  tiles.push({
-    sourceId: 'srt_listen', avIndex: null,
-    name: `SRT in :${r.srt_port || 9710}`,
-    category: 'relay', section: 'Receive a stream',
-  });
-  tiles.push({
-    sourceId: 'rtmp_listen', avIndex: null,
-    name: `RTMP in :${r.rtmp_port || 1935}`,
-    category: 'relay', section: 'Receive a stream',
-  });
+  // Relay-listener tiles (srt_listen / rtmp_listen) were folded into
+  // the Receive-a-Stream wizard below — single colored CTA expands
+  // the protocol picker / publish URL / app instructions instead of
+  // duplicating it as gallery tiles.
 
   // Render with section headers.
   els.sourceTiles.innerHTML = '';

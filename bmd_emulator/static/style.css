@@ -1061,34 +1061,58 @@ pre {
 /* Log card with collapsible disclosure */
 .log-pane-card pre { margin-top: 4px; }
 
-/* ============= RECEIVE-STREAM MINI-WIZARD (Phase 8b) ===== */
+/* ============= RECEIVE-STREAM MINI-WIZARD (Phase 8b) =====
+   Closed state: high-contrast green CTA button — "you can do
+   the OPPOSITE of pushing here" needs to read as a peer of the
+   primary Start Stream button, not a quiet text link. Open state:
+   sheds the bright background and behaves like a config panel. */
 .receive-wizard {
   margin: 14px 0 0;
   background: var(--panel-2, #1d2030);
   border: 1px solid var(--line, #2a2d36);
   border-radius: 9px;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.receive-wizard:not([open]) {
+  background: linear-gradient(135deg, #1f8a3f 0%, #2ecc71 100%);
+  border-color: #2ecc71;
+  box-shadow: 0 4px 14px rgba(46, 204, 113, 0.25);
+}
+.receive-wizard:not([open]):hover {
+  box-shadow: 0 6px 18px rgba(46, 204, 113, 0.35);
+  filter: brightness(1.05);
 }
 .receive-wizard summary {
   cursor: pointer;
-  padding: 12px 16px;
-  display: flex; align-items: center; gap: 10px;
-  font-size: 13px;
+  padding: 14px 18px;
+  display: flex; align-items: center; gap: 12px;
+  font-size: 14px;
   color: var(--text, #e6e6ea);
   list-style: none;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.receive-wizard:not([open]) summary {
+  color: #fff;
+  font-size: 15px;
 }
 .receive-wizard summary::-webkit-details-marker { display: none; }
 .rw-icon {
   display: inline-block;
-  width: 20px; height: 20px;
+  width: 24px; height: 24px;
   border-radius: 50%;
   background: var(--accent, #5a8aff);
   color: var(--bg, #0e0f12);
-  text-align: center; line-height: 20px;
-  font-size: 11px; font-weight: 700;
+  text-align: center; line-height: 24px;
+  font-size: 13px; font-weight: 700;
   transition: transform 0.2s;
 }
+.receive-wizard:not([open]) .rw-icon {
+  background: rgba(255, 255, 255, 0.95);
+  color: #1f8a3f;
+}
 .receive-wizard[open] .rw-icon { transform: rotate(180deg); }
-.rw-title { font-weight: 500; }
+.rw-title { font-weight: inherit; }
 .rw-body {
   padding: 4px 16px 16px;
   display: flex; flex-direction: column; gap: 16px;
