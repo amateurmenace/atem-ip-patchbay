@@ -3,6 +3,7 @@ mod ffmpeg_path;
 mod http;
 mod ndi_capture;
 mod ndi_runtime;
+mod protocol;
 mod sources;
 mod state;
 mod streamer;
@@ -15,10 +16,12 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use crate::http::HttpAppState;
+use crate::protocol::ProtocolServer;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
 
 const HTTP_START_PORT: u16 = 8090;
+const BMD_START_PORT: u16 = 9977;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,11 +79,26 @@ pub fn run() {
                 }
             });
 
-            // Manage encoder + streamer so future Tauri commands /
-            // event handlers can grab them via app.state().
+            // Start the BMD control protocol server (TCP 9977 with
+            // port-walk fallback). Same async runtime as Axum + the
+            // streamer monitor task.
+            let proto = ProtocolServer::new(encoder.clone(), streamer.clone());
+            let proto_for_spawn = proto.clone();
+            let bmd_port = runtime
+                .block_on(async move { proto_for_spawn.start(BMD_START_PORT).await })
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                })?;
+            log::info!("BMD control protocol bound on TCP {bmd_port}");
+
+            // Manage encoder + streamer + protocol server so future
+            // Tauri commands / event handlers can grab them via
+            // app.state().
             app.manage(encoder);
             app.manage(streamer);
+            app.manage(proto);
             app.manage(http_state_marker(port));
+            app.manage(BmdPort(bmd_port));
 
             // The window is declared in tauri.conf.json (visible: false
             // initially so the placeholder webui/index.html doesn't
@@ -207,6 +225,9 @@ fn resolve_static_dir(app_handle: &tauri::AppHandle) -> PathBuf {
 /// LAN address that the relay listener publishes, etc.).
 #[derive(Clone, Copy)]
 pub struct HttpPort(pub u16);
+
+#[derive(Clone, Copy)]
+pub struct BmdPort(pub u16);
 
 fn http_state_marker(port: u16) -> HttpPort {
     HttpPort(port)

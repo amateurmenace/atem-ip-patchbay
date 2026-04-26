@@ -243,6 +243,15 @@ impl EncoderState {
         }
     }
 
+    /// Update the human-friendly device label (the bmd_name in SRT
+    /// streamids and the IDENTITY block's Label field). The BMD
+    /// control protocol's IDENTITY handler calls this when a control
+    /// client sends `Label: ...`.
+    pub fn set_label(&self, label: &str) {
+        let mut inner = self.inner.write().unwrap();
+        inner.label = label.to_string();
+    }
+
     /// Mutate the StreamStats in place under the write lock. Used by
     /// the Phase 3 streamer's monitor task to push telemetry updates
     /// (bitrate, fps, frames_sent, etc.) atomically and cheaply
