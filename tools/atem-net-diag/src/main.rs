@@ -30,7 +30,7 @@
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if let Some(iface) = cli.monitor_iface.as_deref() {
+        run_monitor(&cli, iface);
+        return;
+    }
 
     if !ffmpeg_available() {
         eprintln!(
@@ -290,6 +295,338 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
+// ---- Monitor mode (tshark wrapper) ------------------------------------------
+
+const TSHARK_PATHS: &[&str] = &[
+    "/Applications/Wireshark.app/Contents/MacOS/tshark",
+    "/usr/local/bin/tshark",
+    "/opt/homebrew/bin/tshark",
+    "/usr/bin/tshark",
+];
+
+const DEFAULT_MONITOR_PORTS: &[u16] = &[1935, 9710, 9977, 1936];
+const MONITOR_PRINT_EVERY: Duration = Duration::from_secs(5);
+/// Hide flows we haven't seen a packet for in this long. Stale rows
+/// pile up over a long-running session otherwise.
+const FLOW_STALE_THRESHOLD: Duration = Duration::from_secs(60);
+
+fn find_tshark() -> Option<&'static str> {
+    for p in TSHARK_PATHS {
+        if std::path::Path::new(p).is_file() {
+            return Some(*p);
+        }
+    }
+    None
+}
+
+fn run_monitor(cli: &Cli, iface: &str) {
+    let tshark = match find_tshark() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "tshark not found. Install Wireshark to monitor network traffic:\n  \
+                 macOS:  brew install --cask wireshark\n  \
+                 Linux:  sudo apt install tshark   (or your distro's equivalent)\n\
+                 \n\
+                 The monitor mode runs tshark with a port-1935+9710 capture filter,\n\
+                 parses the packet stream, and shows a live flow table.\n\
+                 \n\
+                 On macOS, capture permissions need to be set up once via the\n\
+                 \"Install ChmodBPF\" item in Wireshark's installer (or via sudo)."
+            );
+            std::process::exit(3);
+        }
+    };
+
+    let ports: &[u16] = if cli.monitor_ports.is_empty() {
+        DEFAULT_MONITOR_PORTS
+    } else {
+        &cli.monitor_ports
+    };
+    let filter = ports
+        .iter()
+        .map(|p| format!("port {p}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    println!(
+        "[{}] tshark monitor on iface {iface:?}, filter: {filter:?}",
+        clock_now()
+    );
+    println!(
+        "[{}] flow table refresh every {}s; flows idle for >{}s hidden",
+        clock_now(),
+        MONITOR_PRINT_EVERY.as_secs(),
+        FLOW_STALE_THRESHOLD.as_secs(),
+    );
+    println!("[{}] (Ctrl-C to stop)", clock_now());
+
+    let mut child = match Command::new(tshark)
+        .args([
+            "-i",
+            iface,
+            "-l", // line-buffered output so we see packets in real time
+            "-f",
+            &filter,
+            "-T",
+            "fields",
+            "-E",
+            "separator=,",
+            "-e",
+            "frame.time_relative",
+            "-e",
+            "ip.src",
+            "-e",
+            "tcp.srcport",
+            "-e",
+            "udp.srcport",
+            "-e",
+            "ip.dst",
+            "-e",
+            "tcp.dstport",
+            "-e",
+            "udp.dstport",
+            "-e",
+            "_ws.col.Protocol",
+            "-e",
+            "frame.len",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[{}] failed to spawn tshark: {e}", clock_now());
+            std::process::exit(3);
+        }
+    };
+
+    // Pipe stderr to stdout so permission errors etc. surface.
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if let Ok(l) = line {
+                    if !l.is_empty() {
+                        eprintln!("[tshark err] {l}");
+                    }
+                }
+            }
+        });
+    }
+
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            eprintln!("[{}] tshark stdout was not piped", clock_now());
+            std::process::exit(3);
+        }
+    };
+
+    // Reader thread → channel → main loop. Lets us print periodic
+    // updates even when tshark is silent (no packets matching).
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if let Ok(l) = line {
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut flows: HashMap<FlowKey, FlowStats> = HashMap::new();
+    let mut last_print = Instant::now();
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(line) => {
+                if let Some(packet) = parse_tshark_line(&line) {
+                    let key = packet.flow_key();
+                    let stats = flows.entry(key).or_default();
+                    stats.record(packet.bytes);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No packet — fine, just check if it's print time.
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[{}] tshark exited", clock_now());
+                break;
+            }
+        }
+        if last_print.elapsed() >= MONITOR_PRINT_EVERY {
+            print_flow_table(&flows, MONITOR_PRINT_EVERY);
+            for (_, stats) in flows.iter_mut() {
+                stats.window_bytes = 0;
+                stats.window_packets = 0;
+            }
+            last_print = Instant::now();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PacketInfo {
+    src_ip: String,
+    src_port: u16,
+    dst_ip: String,
+    dst_port: u16,
+    is_udp: bool,
+    protocol: String,
+    bytes: u64,
+}
+
+impl PacketInfo {
+    fn flow_key(&self) -> FlowKey {
+        FlowKey {
+            src_ip: self.src_ip.clone(),
+            src_port: self.src_port,
+            dst_ip: self.dst_ip.clone(),
+            dst_port: self.dst_port,
+            is_udp: self.is_udp,
+            protocol: self.protocol.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct FlowKey {
+    src_ip: String,
+    src_port: u16,
+    dst_ip: String,
+    dst_port: u16,
+    is_udp: bool,
+    protocol: String,
+}
+
+#[derive(Default)]
+struct FlowStats {
+    total_bytes: u64,
+    total_packets: u64,
+    window_bytes: u64,
+    window_packets: u64,
+    last_seen: Option<Instant>,
+}
+
+impl FlowStats {
+    fn record(&mut self, bytes: u64) {
+        self.total_bytes += bytes;
+        self.total_packets += 1;
+        self.window_bytes += bytes;
+        self.window_packets += 1;
+        self.last_seen = Some(Instant::now());
+    }
+}
+
+fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
+    // 9 fields separated by commas:
+    // time, ip.src, tcp.srcport, udp.srcport, ip.dst, tcp.dstport, udp.dstport, proto, frame.len
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.len() < 9 {
+        return None;
+    }
+    let src_ip = fields[1].trim().to_string();
+    let dst_ip = fields[4].trim().to_string();
+    if src_ip.is_empty() || dst_ip.is_empty() {
+        return None; // ARP / non-IP, skip
+    }
+    let tcp_src = fields[2].trim().parse::<u16>().ok();
+    let udp_src = fields[3].trim().parse::<u16>().ok();
+    let tcp_dst = fields[5].trim().parse::<u16>().ok();
+    let udp_dst = fields[6].trim().parse::<u16>().ok();
+    let (src_port, dst_port, is_udp) = if let (Some(s), Some(d)) = (udp_src, udp_dst) {
+        (s, d, true)
+    } else if let (Some(s), Some(d)) = (tcp_src, tcp_dst) {
+        (s, d, false)
+    } else {
+        return None;
+    };
+    let protocol = fields[7].trim().to_string();
+    let bytes: u64 = fields[8].trim().parse().unwrap_or(0);
+    Some(PacketInfo {
+        src_ip,
+        src_port,
+        dst_ip,
+        dst_port,
+        is_udp,
+        protocol,
+        bytes,
+    })
+}
+
+fn print_flow_table(flows: &HashMap<FlowKey, FlowStats>, window: Duration) {
+    let now = Instant::now();
+    let mut rows: Vec<(&FlowKey, &FlowStats)> = flows
+        .iter()
+        .filter(|(_, s)| {
+            s.last_seen
+                .map(|t| now.duration_since(t) < FLOW_STALE_THRESHOLD)
+                .unwrap_or(false)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.window_bytes.cmp(&a.1.window_bytes));
+    println!("[{}] flows ({} active):", clock_now(), rows.len());
+    if rows.is_empty() {
+        println!("    (no traffic on monitored ports in the last {}s)", FLOW_STALE_THRESHOLD.as_secs());
+        return;
+    }
+    println!(
+        "    {:<22} {:1} {:<22} {:6} {:>11} {:>10} {:>5}",
+        "source", "", "destination", "proto", "total", "rate/s", "idle"
+    );
+    for (key, stats) in rows.iter().take(20) {
+        let src = format!("{}:{}", key.src_ip, key.src_port);
+        let dst = format!("{}:{}", key.dst_ip, key.dst_port);
+        let proto_label = if !key.protocol.is_empty() {
+            key.protocol.clone()
+        } else if key.is_udp {
+            "UDP".into()
+        } else {
+            "TCP".into()
+        };
+        let total_str = format_bytes(stats.total_bytes);
+        let rate_str = if window.as_secs() > 0 {
+            format_bytes(stats.window_bytes / window.as_secs())
+        } else {
+            "0 B".into()
+        };
+        let idle_str = match stats.last_seen {
+            Some(t) => {
+                let s = now.duration_since(t).as_secs_f32();
+                if s < 1.0 {
+                    "<1s".to_string()
+                } else {
+                    format!("{:.0}s", s)
+                }
+            }
+            None => "?".into(),
+        };
+        println!(
+            "    {:<22} {:<1} {:<22} {:<6} {:>11} {:>9}/s {:>5}",
+            src,
+            if stats.window_packets > 0 { "→" } else { " " },
+            dst,
+            proto_label,
+            total_str,
+            rate_str,
+            idle_str,
+        );
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    } else {
+        format!("{:.2} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+    }
+}
+
 fn csv_write_header(path: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)
@@ -358,6 +695,11 @@ struct Cli {
     interval: Duration,
     summary_every: u32,
     csv_path: Option<String>,
+    /// Some(iface) when --monitor is set; runs the tshark wrapper
+    /// instead of the probe loop. URL/keys still required by parser
+    /// but ignored in monitor mode.
+    monitor_iface: Option<String>,
+    monitor_ports: Vec<u16>,
 }
 
 impl Cli {
@@ -374,9 +716,25 @@ impl Cli {
         let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
         let mut summary_every = DEFAULT_SUMMARY_EVERY;
         let mut csv_path: Option<String> = None;
+        let mut monitor_iface: Option<String> = None;
+        let mut monitor_ports: Vec<u16> = Vec::new();
         let mut iter = args.into_iter();
         while let Some(a) = iter.next() {
-            if a == "--interval" {
+            if a == "--monitor" {
+                monitor_iface = Some(iter.next().unwrap_or_else(|| {
+                    if cfg!(target_os = "macos") {
+                        "en0".into()
+                    } else {
+                        "any".into()
+                    }
+                }));
+            } else if a == "--port" {
+                let v = iter.next().ok_or("--port needs a value")?;
+                let p: u16 = v
+                    .parse()
+                    .map_err(|_| format!("--port value not 1..65535: {v}"))?;
+                monitor_ports.push(p);
+            } else if a == "--interval" {
                 let v = iter.next().ok_or("--interval needs a value (seconds)")?;
                 let secs: u64 = v
                     .parse()
@@ -405,6 +763,20 @@ impl Cli {
                 return Err(format!("unknown argument: {a}"));
             }
         }
+        // Monitor mode short-circuits the URL requirement — tshark
+        // captures from the network interface, not from a remote URL.
+        // Use a sentinel URL so the rest of the struct types match.
+        if monitor_iface.is_some() {
+            return Ok(Self {
+                url: url.unwrap_or_else(|| "monitor://".into()),
+                keys,
+                interval,
+                summary_every,
+                csv_path,
+                monitor_iface,
+                monitor_ports,
+            });
+        }
         let url = url.ok_or_else(usage)?;
         if !(url.starts_with("srt://") || url.starts_with("rtmp://") || url.starts_with("rtmps://"))
         {
@@ -430,6 +802,8 @@ impl Cli {
             interval,
             summary_every,
             csv_path,
+            monitor_iface,
+            monitor_ports,
         })
     }
 }
@@ -457,6 +831,19 @@ flags:
                          apart 'this key is locked' (only one rejects) vs
                          'destination is locked' (all reject) vs 'destination
                          is unreachable' (all timeout).
+    --monitor [IFACE]    Switch to passive-capture mode: spawn tshark on
+                         IFACE (default en0 on macOS), watch the configured
+                         ports, and print a live flow table every 5s
+                         showing source IP:port, destination IP:port, total
+                         bytes per flow, and current bandwidth. Requires
+                         tshark in PATH and capture permissions (on macOS:
+                         the Wireshark installer's ChmodBPF helper, or run
+                         this tool with sudo).
+    --port P             Add a port to the monitor capture filter. Default
+                         monitored ports: 1935 (RTMP/SRT), 9710 (SRT
+                         listener), 9977 (BMD ctrl), 1936. Repeat to add
+                         multiple. Without --monitor, this flag has no
+                         effect.
     -h, --help           Show this help
 
 what to look for:
