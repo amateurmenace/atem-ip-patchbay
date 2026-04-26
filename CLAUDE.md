@@ -4,6 +4,106 @@
 > continue the build. The README is the user-facing version; this file
 > is the working state — what's broken, what's been tried, what's next.
 
+## v0.2.0 direction (current focus)
+
+The v0.1.0 alpha shipped on Mac arm64 + Windows x64 with one major
+known limitation: **NDI Virtual Camera streaming via FFmpeg AVF
+doesn't work** (extensively diagnosed; see "Currently-open issues
+#1"). v0.2.0 reframes the project around four headline features:
+
+1. **Direct NDI ingest via the NewTek NDI SDK.** Skip NDI Virtual
+   Camera entirely. Receive NDICAM (and any other NDI sender on the
+   network) into our process via the SDK's C library
+   (`libndi.dylib` on Mac, `Processing.NDI.Lib.x64.dll` on Windows
+   — both installed alongside NDI Tools, which the user already
+   has). Two viable bindings: `ndi-python` (community, ctypes
+   wrapper, simplest) or a custom Rust crate if we go Tauri. Either
+   way the receiver runs in our process, frames stream into FFmpeg
+   via stdin or a UNIX socket, no AVCaptureSession involved.
+2. **Better camera previews.** The current
+   `getUserMedia`/AVFoundation preview conflicts with FFmpeg
+   capture for some virtual cameras and is constrained by browser
+   sandboxing. Native preview (Tauri's WebView with native frame
+   injection, or a separate native preview window) works against
+   any source we can read.
+3. **Multi-instance.** A single user wants to push *several*
+   different sources to *several* different ATEM inputs (or
+   destination devices) simultaneously. Each instance owns its own
+   port pair (HTTP + BMD protocol), its own state directory, its
+   own FFmpeg subprocess. macOS's `LSMultipleInstancesProhibited`
+   defaults to NO so the .app already supports relaunching; we
+   just need per-instance state isolation and a tiny launcher that
+   discovers a free port pair.
+4. **Cross-platform parity.** Mac arm64 already works; Windows
+   x64 is plumbed through CI but lightly tested. v0.2.0 should
+   include real Windows + Linux test rigs.
+
+**Architectural decision required**: stay Python (add
+`ndi-python` + a multi-instance launcher, keep PyInstaller
+packaging) OR pivot to **Tauri** (Rust shell + existing JS UI,
+direct NDI via Rust crate, native preview, ~50MB binaries
+cross-platform). Python is the lower-risk path; Tauri unlocks
+better preview UX and tighter NDI integration but is multi-week
+work. **Recommend starting with Python + ndi-python** to ship
+the NDI feature fast, then evaluate Tauri once the multi-instance
+feature stresses what the browser-based UI can do.
+
+### v0.2.0 UI / UX scope (queued)
+
+- **New hero subtitle**: "Turn multiple worldwide video sources,
+  from iPhones to Drones to NDI, into remote inputs that stream
+  directly into your ATEM Switcher or Blackmagic Streaming
+  Decoders / Bridges over the single ethernet cable. Even route
+  Dante audio onto a video source that maps directly to one of
+  your switcher's SDI or HDMI inputs!"
+- **New "What it does" paragraph**: "If you have an ATEM Mini
+  Extreme ISO G2, Television Studio HD8 ISO, or an upcoming
+  qualifying ST2110 ATEM Switcher, you can change a local input
+  into a remote input that can be sent over the public Internet
+  directly to your switcher from anywhere in the world. Blackmagic
+  Streaming Decoder and Streaming Bridges can also receive sources
+  from anywhere with a stable enough internet connection
+  (~2.5-3.5 Mbps upload), but previously this was limited to just
+  other Blackmagic hardware. Now, NDI, SDI, HDMI, non-Blackmagic
+  SRT and RTMP streams, etc. can all be converted into the special
+  Blackmagic flavor of SRT using this app. This is more of a demo
+  app showing what is now possible, a proof of concept, and should
+  only be used in real productions at your own risk. It is free
+  forever, until it either gets stopped by Blackmagic or they
+  fully embrace opening up their powerful stream decoding
+  ecosystem."
+- **Destination address clarity** — show an explicit example
+  format (e.g. `srt://192.168.1.50:1935` or
+  `srt://relay.example.com:1935`) and call out that the **port
+  matters** (most users miss this).
+- **Quality settings chooser in the wizard** — currently buried
+  in Advanced. Surface it at top level with **projected
+  bitrates** (High = 6 Mbps, Medium = 4.5 Mbps, Low = 2.5 Mbps)
+  and brief network-suitability text per option (fiber/cable,
+  DSL, cellular).
+- **RTMP/SRT relay re-design** — current implementation works but
+  the UX is confusing. Goal: user sets a custom RTMP/SRT
+  destination on their drone/camera/streaming device, that
+  publishes to a server this app runs, the app re-encodes to BMD
+  SRT and forwards to ATEM. Promote to a dedicated mini-wizard
+  that expands when the user clicks an "I want to receive a
+  stream" button — clearer step-by-step ("step 1: copy this URL,
+  step 2: paste into your camera, step 3: start receiver, step 4:
+  hit Start Stream").
+- **Bottom-of-page user guide** — full-width section below the
+  main grid containing:
+  - **Visual schematic** of the data flow (Source → This app →
+    Network → ATEM). SVG with annotated boxes.
+  - **Latency facts** — SRT push 200-500ms typical, encoder
+    50-100ms, total ~250-600ms end-to-end.
+  - **Expandable FAQ** (likely qs: "Why is the input black on the
+    ATEM?", "What's the minimum upload bandwidth?", "Can I use
+    this with [non-ATEM device]?", "Is this Blackmagic-approved?").
+  - **Mailto button** to <stephen@weirdmachine.org>
+  - **Author website link** to <https://weirdmachine.org>
+  - **GitHub repo link** to
+    <https://github.com/amateurmenace/atem-ip-patchbay>
+
 ## What this is
 
 Cross-platform proof-of-concept that pushes any video source into
