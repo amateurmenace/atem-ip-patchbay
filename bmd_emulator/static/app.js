@@ -299,6 +299,11 @@ function stopPreview() {
   }
   els.previewVideo.srcObject = null;
   els.previewVideo.hidden = true;
+  // Counterpart to the inline display:none we set on successful NDI
+  // ticks (cache-bypass defense). Clear it so .hidden = false below
+  // actually shows the bars again.
+  els.previewBars.style.display = '';
+  els.previewMessage.style.display = '';
   els.previewBars.hidden = false;
   els.previewMessage.hidden = true;
 }
@@ -489,6 +494,7 @@ let ndiPreviewImg = null;
 function startNdiPreview(senderName) {
   const key = `ndi:${senderName}`;
   if (previewKey === key) return;
+  console.log('[ndi-preview] startNdiPreview:', senderName);
   stopPreview();
   previewKey = key;
 
@@ -498,10 +504,13 @@ function startNdiPreview(senderName) {
     ndiPreviewImg.alt = 'NDI preview';
     // position:absolute so we overlay the SMPTE bars the same way
     // #preview-video does. Without this, the img would flow inline
-    // and the bars would still be visible alongside it.
+    // and the bars would still be visible alongside it. z-index 2
+    // beats the .live-badge (z-index 1 implicit) and any other
+    // children of .preview-frame.
     ndiPreviewImg.style.cssText =
-      'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;';
+      'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:2;';
     els.previewFrame.appendChild(ndiPreviewImg);
+    console.log('[ndi-preview] img element created and appended');
   }
   ndiPreviewImg.hidden = false;
   els.previewBars.hidden = true;
@@ -536,6 +545,7 @@ function startNdiPreview(senderName) {
         }
         return;
       }
+      const wasFirstFrame = nullStreak !== 0 || !ndiPreviewImg.dataset.objectUrl;
       nullStreak = 0;
       // Show the image again if the waiting-message fallback was rendered.
       if (ndiPreviewImg.hidden) {
@@ -543,6 +553,13 @@ function startNdiPreview(senderName) {
         els.previewBars.hidden = true;
         ndiPreviewImg.hidden = false;
       }
+      // Defensive: also hide the bars on every successful tick. If the
+      // CSS [hidden] !important rule isn't loaded yet (stale cache),
+      // setting hidden=true alone wouldn't actually hide the bars and
+      // they'd bleed through. Setting style.display = 'none' inline
+      // beats any cascade.
+      els.previewBars.style.display = 'none';
+      els.previewMessage.style.display = 'none';
       const blob = await r.blob();
       // Object URL avoids re-encoding the JPEG bytes through base64.
       const next = URL.createObjectURL(blob);
@@ -550,6 +567,9 @@ function startNdiPreview(senderName) {
       ndiPreviewImg.src = next;
       if (prev) URL.revokeObjectURL(prev);
       ndiPreviewImg.dataset.objectUrl = next;
+      if (wasFirstFrame) {
+        console.log(`[ndi-preview] first JPEG displayed: ${blob.size} bytes`);
+      }
     } catch (_e) {
       // Network blip — try again on the next tick.
     }
