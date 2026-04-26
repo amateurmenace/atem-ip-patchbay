@@ -145,13 +145,20 @@ destination at 6.5 Mbps with live stats updates.
 
 ### Open issues after bug-fix bundle (next session)
 
-- **NDI sources aren't working** — user-reported. Discovery via
-  `grafton-ndi` returns 0 senders even when NDICAM should be
-  visible (Phase 4 spike previously found it in 4 sec). Possibly
-  `grafton-ndi` macOS support being "experimental with limited
-  testing" biting us, or our discovery wait-time too short, or
-  some thread/runtime issue. Reproduce: launch dev, click an NDI
-  tile, expect frames; observe nothing.
+- **NDI direct-ingest streaming doesn't deliver frames** —
+  user-reported. NDI **discovery** works fine (`/api/ndi-senders`
+  returns the senders), but the receive→pipe→FFmpeg path doesn't
+  land bytes at the destination. The bug is downstream of
+  discovery: clicking an NDI tile, hitting Start Stream, doesn't
+  produce a working stream. Likely failure points (see
+  `src-tauri/src/ndi_capture.rs`): format probe timing out,
+  pixel-format mismatch (we ask for BGRX_BGRA — first frame may
+  arrive as something else), FFmpeg dying from rawvideo format
+  mismatch, or the mpsc channel filling up. Diagnostic plan:
+  add per-second frame-count debug logging to
+  `run_capture_loop`, run dev with NDICAM broadcasting, inspect
+  `/api/log` for FFmpeg's command + stderr, look for
+  "NDI capture probed:" log line.
 - **NDI dylib bundling NOT in the .app yet.** `cargo tauri build`
   produces a Hardened-runtime .app that crashes on launch with
   `Library not loaded: @rpath/libndi.dylib`. Hardened runtime
