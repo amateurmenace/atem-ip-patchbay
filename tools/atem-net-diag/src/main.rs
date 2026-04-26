@@ -8,13 +8,18 @@
 //!
 //! Usage:
 //!   atem-net-diag <srt://host:port[?streamid=...]>
+//!   atem-net-diag <srt://host:port> --key q1ry-...
+//!   atem-net-diag <srt://host:port> --key A --key B --key C    # rotation
 //!   atem-net-diag <srt://...> --interval 2 --summary-every 12
 //!   atem-net-diag <rtmp://host:port/app/key> --csv probes.csv
 //!
-//! Output: one line per probe, with state-change moments called out
-//! loudly (=== STATE CHANGE ===). Optional periodic summary line
-//! showing success rate + latency distribution. Optional CSV log of
-//! every probe for offline analysis.
+//! Output: one line per probe. With multiple --key flags, each key
+//! is probed in a burst (in order) per cycle, with per-key state
+//! tracking — most useful diagnostic for the "is it this key or
+//! the whole destination?" question. State-change moments are
+//! called out loudly. Optional periodic summary line shows
+//! success rate + latency distribution per key. Optional CSV log
+//! of every probe for offline analysis.
 //!
 //! What this won't do (yet):
 //!   - Inspect bandwidth / per-session stats. That requires a real
@@ -22,11 +27,8 @@
 //!     OR pcap-level inspection. Future iteration may grow a
 //!     `--pcap <iface>` mode that wraps tshark with a port 1935
 //!     filter and parses HSv5 control packets.
-//!   - Multi-key rotation (probe-with-key-A, probe-with-key-B, ...
-//!     to distinguish per-key lockouts from destination-wide).
-//!     Today, run multiple instances of the tool with different
-//!     URLs in separate terminals if you want this.
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -57,68 +59,103 @@ fn main() {
         std::process::exit(3);
     }
 
-    println!("[{}] probing {}  every {}s", clock_now(), cli.url, cli.interval.as_secs());
+    if cli.keys.is_empty() {
+        println!("[{}] probing {}  every {}s", clock_now(), cli.url, cli.interval.as_secs());
+    } else {
+        println!(
+            "[{}] probing {}  with {} key(s) {:?}  every {}s/cycle",
+            clock_now(),
+            cli.url,
+            cli.keys.len(),
+            cli.keys,
+            cli.interval.as_secs(),
+        );
+    }
     if cli.summary_every > 0 {
         println!(
-            "[{}] summary every {} probes ({:.0}s wall-clock)",
+            "[{}] summary every {} probes",
             clock_now(),
             cli.summary_every,
-            cli.interval.as_secs() as f64 * cli.summary_every as f64,
         );
     }
     if let Some(path) = cli.csv_path.as_deref() {
         println!("[{}] csv log: {path}", clock_now());
-        // Write header if the file's empty / new.
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() == 0 {
-                csv_write_header(path);
-            }
-        } else {
+        if std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true) {
             csv_write_header(path);
         }
     }
     println!("[{}] (Ctrl-C to stop)", clock_now());
 
-    let mut stats = Stats::default();
-    let mut last_state: Option<bool> = None;
-    let mut consecutive: u32 = 0;
+    // Per-key tracking. Empty-key string "" represents the no-key
+    // case (single URL probe), so the same data structures handle
+    // both modes uniformly.
+    let mut tracker = Tracker::default();
+
     loop {
-        let started = Instant::now();
-        let result = probe(&cli.url);
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        let label = result.label();
-        let state_bool = matches!(result, ProbeOutcome::Connected);
-        let changed = last_state.is_some() && last_state != Some(state_bool);
-        if changed {
-            consecutive = 1;
-            println!(
-                "[{}] === STATE CHANGE === -> {label}   ({elapsed_ms}ms)",
-                clock_now()
-            );
+        if cli.keys.is_empty() {
+            do_probe(&cli, "", &cli.url, &mut tracker);
         } else {
-            consecutive += 1;
-            println!(
-                "[{}] {label}  ({elapsed_ms}ms){}",
-                clock_now(),
-                if consecutive > 1 {
-                    format!("  [streak {consecutive}]")
-                } else {
-                    String::new()
+            for key in &cli.keys {
+                match build_bmd_srt_url(&cli.url, key) {
+                    Ok(url) => do_probe(&cli, key, &url, &mut tracker),
+                    Err(err) => {
+                        eprintln!("[{}] {key}  url-build failed: {err}", clock_now());
+                    }
                 }
-            );
+            }
         }
-        last_state = Some(state_bool);
-
-        stats.record(&result, elapsed_ms);
-        if let Some(path) = cli.csv_path.as_deref() {
-            csv_write_row(path, &result, elapsed_ms);
-        }
-
-        if cli.summary_every > 0 && stats.total_probes % cli.summary_every as u64 == 0 {
-            println!("[{}] {}", clock_now(), stats.summary_line());
-        }
-
         std::thread::sleep(cli.interval);
+    }
+}
+
+fn do_probe(cli: &Cli, key: &str, url: &str, tracker: &mut Tracker) {
+    let started = Instant::now();
+    let result = probe(url);
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let label = result.label();
+    let state_bool = matches!(result, ProbeOutcome::Connected);
+    let stats = tracker.stats.entry(key.to_string()).or_default();
+    let last = tracker.last_state.get(key).copied().flatten();
+    let changed = last.is_some() && last != Some(state_bool);
+    let prefix = if key.is_empty() { String::new() } else { format!("{key}  ") };
+    if changed {
+        tracker.consecutive.insert(key.to_string(), 1);
+        let prev_label = match last {
+            Some(true) => "CONNECTED",
+            Some(false) => "REJECTED ",
+            None => "??",
+        };
+        println!(
+            "[{}] === STATE CHANGE === {prefix}{prev_label} -> {label}   ({elapsed_ms}ms)",
+            clock_now()
+        );
+    } else {
+        let consec = tracker.consecutive.entry(key.to_string()).or_insert(0);
+        *consec += 1;
+        let streak = if *consec > 1 {
+            format!("  [streak {}]", *consec)
+        } else {
+            String::new()
+        };
+        println!(
+            "[{}] {prefix}{label}  ({elapsed_ms}ms){streak}",
+            clock_now()
+        );
+    }
+    tracker.last_state.insert(key.to_string(), Some(state_bool));
+    stats.record(&result, elapsed_ms);
+
+    if let Some(path) = cli.csv_path.as_deref() {
+        csv_write_row(path, key, &result, elapsed_ms);
+    }
+
+    if cli.summary_every > 0 && stats.total_probes % cli.summary_every as u64 == 0 {
+        let label = if key.is_empty() {
+            "summary".to_string()
+        } else {
+            format!("summary  key={key}")
+        };
+        println!("[{}] {} {}", clock_now(), label, stats.summary_tail());
     }
 }
 
@@ -147,13 +184,18 @@ impl ProbeOutcome {
 }
 
 #[derive(Default)]
+struct Tracker {
+    stats: HashMap<String, Stats>,
+    last_state: HashMap<String, Option<bool>>,
+    consecutive: HashMap<String, u32>,
+}
+
+#[derive(Default)]
 struct Stats {
     total_probes: u64,
     connected: u64,
     rejected: u64,
     timeout: u64,
-    /// Latency in ms across all probes regardless of outcome — useful
-    /// for spotting "destination is degrading" before it fully fails.
     latency_min_ms: u64,
     latency_max_ms: u64,
     latency_sum_ms: u64,
@@ -176,7 +218,7 @@ impl Stats {
         self.latency_sum_ms += latency_ms;
     }
 
-    fn summary_line(&self) -> String {
+    fn summary_tail(&self) -> String {
         let success_pct = if self.total_probes == 0 {
             0.0
         } else {
@@ -188,7 +230,7 @@ impl Stats {
             self.latency_sum_ms / self.total_probes
         };
         format!(
-            "summary  probes={}  ok={} ({:.1}%)  reject={}  timeout={}  latency: min={}ms avg={}ms max={}ms",
+            "probes={}  ok={} ({:.1}%)  reject={}  timeout={}  latency: min={}ms avg={}ms max={}ms",
             self.total_probes,
             self.connected,
             success_pct,
@@ -204,9 +246,6 @@ impl Stats {
 /// Spawn FFmpeg with a tight read window against the URL. Exit code
 /// 0 = handshake + first packet read worked = receiver is accepting.
 /// Anything else = receiver rejected, timed out, or unreachable.
-/// We discard stdout/stderr because the loop output is already
-/// noisy enough; users who want detail can run FFmpeg directly with
-/// the same URL.
 fn probe(url: &str) -> ProbeOutcome {
     let started = Instant::now();
     let status = Command::new("ffmpeg")
@@ -230,10 +269,6 @@ fn probe(url: &str) -> ProbeOutcome {
     match status {
         Ok(s) if s.success() => ProbeOutcome::Connected,
         Ok(_) => {
-            // Heuristic: if we ran for ~the timeout window, it was a
-            // timeout (network unreachable / silent drop). If we
-            // exited fast, the receiver actively rejected (HSv5
-            // conclusion with a reject reason, or TCP RST for RTMP).
             let elapsed = started.elapsed();
             if elapsed >= Duration::from_millis(2500) {
                 ProbeOutcome::Timeout
@@ -262,11 +297,11 @@ fn csv_write_header(path: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "unix_seconds,clock,outcome,latency_ms");
+        let _ = writeln!(f, "unix_seconds,clock,key,outcome,latency_ms");
     }
 }
 
-fn csv_write_row(path: &str, outcome: &ProbeOutcome, latency_ms: u64) {
+fn csv_write_row(path: &str, key: &str, outcome: &ProbeOutcome, latency_ms: u64) {
     if let Ok(mut f) = OpenOptions::new().append(true).open(path) {
         let unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -274,44 +309,26 @@ fn csv_write_row(path: &str, outcome: &ProbeOutcome, latency_ms: u64) {
             .unwrap_or(0);
         let _ = writeln!(
             f,
-            "{},{},{},{}",
+            "{},{},{},{},{}",
             unix,
             clock_now(),
+            key,
             outcome.csv_label(),
             latency_ms,
         );
     }
 }
 
-#[derive(Debug)]
-struct Cli {
-    url: String,
-    interval: Duration,
-    summary_every: u32,
-    csv_path: Option<String>,
-}
-
 /// Build a BMD-flavored SRT URL from an `srt://host:port` base + a
 /// stream key. The streamid is the URL-encoded form of
 /// `#!::bmd_uuid=<random>,bmd_name=ATEM-net-diag,u=<key>` — same
-/// shape the main app sends, so the receiver's accept rules see
-/// the same handshake. Caller-mode + 500ms latency match what the
-/// streamer uses by default.
+/// shape the main app sends.
 fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String> {
-    // Split off any query string / streamid the user may have already
-    // included; we're going to overwrite it.
     let host_port = base.split('?').next().unwrap_or(base);
     if !host_port.starts_with("srt://") {
-        return Err(format!(
-            "--key requires an srt:// base URL, got {base:?}"
-        ));
+        return Err(format!("--key requires an srt:// base URL, got {base:?}"));
     }
-    // A fixed pseudo-UUID per-process is fine — the receiver doesn't
-    // care, it just needs to PARSE the streamid. Use a constant
-    // tag-style identifier so log lines are matchable across runs.
     let bmd_uuid = "00000000-0000-0000-0000-617465616d646";
-    // bmd_name is a label the receiver may show in its UI; identifies
-    // this probe so the operator can spot diag traffic vs real streams.
     let bmd_name = "ATEM-net-diag";
     let streamid = format!("#!::bmd_uuid={bmd_uuid},bmd_name={bmd_name},u={key}");
     let encoded = url_encode(&streamid);
@@ -320,11 +337,6 @@ fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String> {
     ))
 }
 
-/// Minimal URL-component percent-encoding for the streamid value.
-/// Intentionally aggressive (encodes everything but unreserved
-/// chars) — the receiver decodes per RFC 3986 so over-encoding is
-/// safe; under-encoding (e.g. leaving `=` or `,` unescaped) breaks
-/// the URL parser.
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
@@ -339,6 +351,15 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+#[derive(Debug)]
+struct Cli {
+    url: String,
+    keys: Vec<String>,
+    interval: Duration,
+    summary_every: u32,
+    csv_path: Option<String>,
+}
+
 impl Cli {
     fn parse() -> Result<Self, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -349,16 +370,14 @@ impl Cli {
             return Err(usage());
         }
         let mut url: Option<String> = None;
-        let mut key: Option<String> = None;
+        let mut keys: Vec<String> = Vec::new();
         let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
         let mut summary_every = DEFAULT_SUMMARY_EVERY;
         let mut csv_path: Option<String> = None;
         let mut iter = args.into_iter();
         while let Some(a) = iter.next() {
             if a == "--interval" {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| "--interval needs a value (seconds)".to_string())?;
+                let v = iter.next().ok_or("--interval needs a value (seconds)")?;
                 let secs: u64 = v
                     .parse()
                     .map_err(|_| format!("--interval value not an integer: {v}"))?;
@@ -369,45 +388,45 @@ impl Cli {
             } else if a == "--summary-every" {
                 let v = iter
                     .next()
-                    .ok_or_else(|| "--summary-every needs a value (probes)".to_string())?;
+                    .ok_or("--summary-every needs a value (probes)")?;
                 summary_every = v
                     .parse()
                     .map_err(|_| format!("--summary-every value not an integer: {v}"))?;
             } else if a == "--no-summary" {
                 summary_every = 0;
             } else if a == "--csv" {
-                csv_path = Some(
-                    iter.next()
-                        .ok_or_else(|| "--csv needs a path".to_string())?,
-                );
+                csv_path = Some(iter.next().ok_or("--csv needs a path")?);
             } else if a == "--key" {
-                key = Some(
-                    iter.next()
-                        .ok_or_else(|| "--key needs a value".to_string())?,
-                );
+                let k = iter.next().ok_or("--key needs a value")?;
+                keys.push(k);
             } else if !a.starts_with('-') && url.is_none() {
                 url = Some(a);
             } else {
                 return Err(format!("unknown argument: {a}"));
             }
         }
-        let mut url = url.ok_or_else(usage)?;
+        let url = url.ok_or_else(usage)?;
         if !(url.starts_with("srt://") || url.starts_with("rtmp://") || url.starts_with("rtmps://"))
         {
             return Err(format!(
                 "URL should start with srt:// or rtmp(s):// — got {url}"
             ));
         }
-        // --key K rebuilds the URL with the BMD-flavored streamid the
-        // main app sends. SRT-only — RTMP keys go in the URL path,
-        // not the streamid, so --key on rtmp:// is a no-op.
-        if let Some(k) = key {
-            if url.starts_with("srt://") {
-                url = build_bmd_srt_url(&url, &k)?;
-            }
+        // RTMP + --key combinations are silently treated as no-key
+        // probes today — RTMP keys go in the URL path, not an SRT-
+        // style streamid query param. Surface the mismatch loudly
+        // so a user typing `--key K` on an rtmp:// URL doesn't get
+        // a confusing "key was ignored" experience.
+        if !keys.is_empty() && !url.starts_with("srt://") {
+            return Err(
+                "--key is SRT-only — RTMP keys are part of the URL path. \
+                 Drop --key and put the key in the URL like rtmp://host:port/app/KEY."
+                    .into(),
+            );
         }
         Ok(Self {
             url,
+            keys,
             interval,
             summary_every,
             csv_path,
@@ -421,26 +440,33 @@ fn usage() -> String {
 
 usage:
     atem-net-diag <srt://host:port[?streamid=...]> [flags]
-    atem-net-diag <rtmp://host:port/app/key>       [flags]
+    atem-net-diag <srt://host:port> --key KEY [flags]
+    atem-net-diag <srt://host:port> --key KEY1 --key KEY2 ... [flags]
+    atem-net-diag <rtmp://host:port/app/KEY>       [flags]
 
 flags:
-    --interval N         Probe every N seconds (default 5)
-    --summary-every N    Print a summary every N probes (default 12 == 1min @ 5s)
+    --interval N         Probe every N seconds (default 5; per cycle when
+                         multiple --key flags are used)
+    --summary-every N    Print a summary every N probes per key (default 12)
     --no-summary         Don't print periodic summaries
     --csv FILE           Append every probe to FILE as CSV (auto-creates with
-                         header: unix_seconds,clock,outcome,latency_ms)
+                         header: unix_seconds,clock,key,outcome,latency_ms)
     --key K              Build a BMD-flavored streamid (#!::bmd_uuid=...,u=K)
-                         and append it to the SRT URL — the same handshake
-                         the main app sends. Use this to probe-with-a-key
-                         without hand-crafting the streamid.
+                         and append it to the SRT URL. Repeat --key to rotate
+                         through multiple keys per cycle — useful for telling
+                         apart 'this key is locked' (only one rejects) vs
+                         'destination is locked' (all reject) vs 'destination
+                         is unreachable' (all timeout).
     -h, --help           Show this help
 
 what to look for:
-    CONNECTED in a row — destination is happy.
+    CONNECTED in a row  destination is happy.
     REJECTED bursts after a stream — receiver-state lockout (the
         slot is held for ~30s-2min after a previous source disconnects).
         Wait it out, or use a different key.
-    TIMEOUT — destination is unreachable. Network / power / wrong IP.
+    Mixed CONNECTED+REJECTED across keys — per-key lockout: the key
+        that REJECTs is held; others work.
+    All TIMEOUT — destination is unreachable. Network / power / wrong IP.
     State-change moments are called out with === STATE CHANGE ===.
 
 requires:
@@ -456,7 +482,6 @@ fn clock_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Naive local-time conversion; we just want elapsed-of-day.
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
     let s = secs % 60;
