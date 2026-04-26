@@ -99,12 +99,35 @@ jobs:
           security default-keychain -s build.keychain
           rm /tmp/cert.p12
 
+      - name: Disable signing in tauri.conf.json (no cert configured)
+        if: ${{ env.HAS_CERT != 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+        run: |
+          # When no cert is in the runner's keychain, tauri-cli's
+          # codesign call against the hardcoded "Developer ID
+          # Application: Stephen Walter (6M536MV7GT)" identity fails
+          # with "specified item could not be found in the keychain".
+          # Strip the signingIdentity field so the build produces an
+          # unsigned .app — Gatekeeper warns on first launch
+          # (recoverable via right-click -> Open), same as v0.1.0
+          # without a configured cert.
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('src-tauri/tauri.conf.json')
+          d = json.loads(p.read_text())
+          mac = d.get('bundle', {}).get('macOS', {})
+          mac.pop('signingIdentity', None)
+          p.write_text(json.dumps(d, indent=2) + '\n')
+          print('removed signingIdentity from tauri.conf.json')
+          "
+
       - name: Build .app + .dmg
         env:
-          # tauri.conf.json's bundle.macOS.signingIdentity is the
-          # default "Developer ID Application: Stephen Walter (6M536MV7GT)";
-          # MACOS_SIGN_IDENTITY override-on-secret is supported via
-          # the APPLE_SIGNING_IDENTITY env var that tauri-cli reads.
+          # When the cert IS configured, APPLE_SIGNING_IDENTITY (and
+          # bundle.macOS.signingIdentity in tauri.conf.json) drive the
+          # signing. The env var lets Phase 9's MACOS_SIGN_IDENTITY
+          # secret override the hardcoded identity in the conf.
           APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         working-directory: src-tauri
         run: cargo tauri build
