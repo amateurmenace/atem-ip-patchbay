@@ -373,6 +373,71 @@ function showNdiHint(senderName) {
       compiled with <code>libndi_newtek</code>, which this build doesn't have.
     </div>`);
   previewKey = `ndi:${senderName}`;
+  renderNdiSourceHint(senderName);
+}
+
+// Inline hint that lives right below the source-tile gallery — much
+// more discoverable than the preview-area message in the left column,
+// and exposes a one-click "use the bridge" button when the NDI Virtual
+// Camera AVF device exists locally (which means NDI Tools is installed).
+function renderNdiSourceHint(senderName) {
+  const ndiVideo = knownDevices.video.find(
+    (d) => /^ndi virtual (camera|input)$/i.test(d.name)
+  );
+  const ndiAudio = knownDevices.audio.find(
+    (d) => /^ndi audio$/i.test(d.name)
+  );
+
+  let body;
+  if (ndiVideo) {
+    body = `
+      <div class="ndi-hint-title">Bridge ${escapeHtml(senderName)} → this app</div>
+      <ol class="ndi-hint-steps">
+        <li>Open <strong>NDI Tools → NDI Virtual Camera</strong> in your menu bar.</li>
+        <li>Set its source to <strong>${escapeHtml(senderName)}</strong>.</li>
+        <li>Click the button below to switch this app to the NDI Virtual Camera input.</li>
+      </ol>
+      <button id="use-ndi-bridge" class="primary" type="button"
+        data-video-index="${ndiVideo.index}"
+        ${ndiAudio ? `data-audio-index="${ndiAudio.index}"` : ''}>
+        Use NDI Virtual Camera${ndiAudio ? ' + NDI Audio' : ''}
+      </button>`;
+  } else {
+    body = `
+      <div class="ndi-hint-title">${escapeHtml(senderName)} is broadcasting on your network</div>
+      <p>This build can't ingest NDI directly (FFmpeg lacks <code>libndi_newtek</code>).
+      To use it, install <a href="https://ndi.video/tools/" target="_blank" rel="noopener">NDI
+      Tools</a>, run <strong>NDI Virtual Camera</strong> from the menu bar pointed at
+      <em>${escapeHtml(senderName)}</em>, then refresh the device list (the
+      <a href="#" id="rescan-ndi-after-hint">rescan</a> link above the tiles) and pick
+      the <strong>NDI Virtual Camera</strong> tile.</p>`;
+  }
+
+  els.sourceHint.innerHTML = body;
+  els.sourceHint.hidden = false;
+  els.sourceHint.classList.add('ndi-hint');
+
+  const btn = document.getElementById('use-ndi-bridge');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const v = parseInt(btn.dataset.videoIndex, 10);
+      const patch = { source_id: 'avfoundation', av_video_index: v };
+      const a = parseInt(btn.dataset.audioIndex, 10);
+      if (!isNaN(a)) patch.av_audio_index = a;
+      applySettings(patch);
+      // Clear the hint and switch the preview to the camera.
+      els.sourceHint.hidden = true;
+      const tile = { sourceId: 'avfoundation', category: 'ndi', name: 'NDI Virtual Camera' };
+      setPreviewFor(tile);
+    });
+  }
+  const rescan = document.getElementById('rescan-ndi-after-hint');
+  if (rescan) {
+    rescan.addEventListener('click', (e) => {
+      e.preventDefault();
+      ensureDevicesLoaded(true);
+    });
+  }
 }
 
 // Decide which preview to show based on a clicked tile.
@@ -504,9 +569,16 @@ function buildSourceTiles(snap) {
 
 function selectSource(t) {
   if (t.sourceId === 'ndi-sender') {
-    // Informational only — show hint, don't change FFmpeg state.
+    // Informational only — show hint inline + in preview, don't change
+    // FFmpeg state. The hint includes a one-click bridge to NDI Virtual
+    // Camera when that AVF device exists.
     setPreviewFor(t);
     return;
+  }
+  // Hide the NDI inline hint when the user picks a real source.
+  if (els.sourceHint && els.sourceHint.classList.contains('ndi-hint')) {
+    els.sourceHint.hidden = true;
+    els.sourceHint.classList.remove('ndi-hint');
   }
   const patch = { source_id: t.sourceId };
   if (t.sourceId === 'avfoundation' && t.avIndex !== null) {

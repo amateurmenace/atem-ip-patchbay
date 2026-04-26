@@ -831,6 +831,32 @@ button.big { padding: 14px 18px; font-size: 14px; }
 
 .audio-row.single { grid-template-columns: 1fr; }
 
+/* ============= NDI INLINE HINT ========================== */
+.hint-panel.ndi-hint {
+  margin-top: 12px;
+  padding: 14px;
+  background: rgba(91, 192, 222, 0.06);
+  border: 1px solid rgba(91, 192, 222, 0.35);
+  border-radius: 10px;
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ndi-hint-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.ndi-hint-steps {
+  margin: 6px 0 12px;
+  padding-left: 20px;
+}
+.ndi-hint-steps li { margin: 4px 0; }
+.ndi-hint button.primary {
+  margin-top: 4px;
+  width: 100%;
+}
+
 /* ============= TABS ====================================== */
 .tabs {
   display: flex;
