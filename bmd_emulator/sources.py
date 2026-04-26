@@ -118,6 +118,14 @@ def avfoundation(
         )
 
     # AVFoundation token: prefer "name:name" over "index:index".
+    # NDI Virtual Camera failure mode (frame=0 forever) is a known
+    # FFmpeg-AVF incompatibility with virtual cameras and is NOT
+    # fixable via input flags — split-input + thread_queue_size + no
+    # pixel_format all tested, none worked. The fix is direct NDI
+    # ingest via the NewTek NDI SDK in Python (v0.2.0). For the
+    # alpha, hardware webcams + USB capture cards + screen capture +
+    # test pattern + the SRT/RTMP relay listener all work; NDI
+    # Virtual Camera is a documented limitation.
     if video_name:
         token = f"{video_name}:{audio_name}" if audio_name else video_name
     else:
@@ -131,13 +139,6 @@ def avfoundation(
             "-f", "avfoundation",
             "-framerate", fps_str,
             "-video_size", actual_size,
-            # Don't force a pixel format. Hardware webcams deliver uyvy422
-            # natively, but virtual cameras (NDI Virtual Camera, OBS) deliver
-            # yuv420p or nv12 — forcing uyvy422 made AVF silently fail to
-            # negotiate and FFmpeg sat reading 0 frames forever. Letting AVF
-            # pick whatever it has, then converting via the encoder pipeline
-            # (which already targets yuv420p output via -pix_fmt downstream),
-            # works for both classes of device.
             "-capture_cursor", "1",
             "-i", token,
         ],

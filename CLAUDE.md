@@ -121,48 +121,54 @@ SmartScreen prompts users with "More info → Run anyway" — recoverable.
 
 ## Currently-open issues
 
-### 1. NDI Virtual Camera doesn't deliver frames
+### 1. NDI Virtual Camera: confirmed-broken via FFmpeg AVF (workaround = v0.2.0 NDI SDK)
 
-Symptom: clicking the NDI Virtual Camera tile (or the bridge button
-after clicking NDICAM) and hitting Start Stream → FFmpeg opens the
-AVF device but no frames flow. Stream stays at "Connecting", bitrate
-0 indefinitely.
+**Confirmed not fixable via FFmpeg flags after extensive iteration.**
 
-What's confirmed:
-- Device IS in the AVF enumeration (`/api/devices` lists it correctly)
-- The mode probe returns supported modes (`1920x1080@[60.0 60.0]fps`)
-- Source factory builds the right command:
-  `-f avfoundation -framerate 60 -video_size 1920x1080 -pixel_format uyvy422 -i 'NDI Virtual Camera:NDI Audio'`
-- FFmpeg accepts the command and starts running — it just blocks on
-  the first frame read forever
+Symptom: clicking the NDI Virtual Camera tile and hitting Start Stream
+→ FFmpeg opens the AVF device cleanly (`Stream #0:0: Video: rawvideo
+(UYVY), uyvy422, 1920x1080`) → enters main loop ("Press [q] to stop")
+→ no frame callbacks fire → `frame=0` forever, audio bytes accumulate
+from any paired audio input. Encoder gets nothing on the video side.
 
-Most likely causes (priority order):
+What we ruled out via testing:
+- Device-name vs. index addressing (commit `b29b9f6`) — no change
+- Mode probe + framerate match (commit `b29b9f6`) — no change
+- Dropping `-pixel_format` so FFmpeg auto-negotiates (commit `13e4129`)
+  — no change; AVF auto-overrode yuv420p to uyvy422 correctly
+- Stop browser preview before starting FFmpeg (commit `80c367a`)
+  — no change
+- Splitting video + audio into separate AVF sessions
+  — no change (tested, reverted in this commit)
+- Bumping `-thread_queue_size 1024` — no change
 
-1. **NDI Virtual Input app has no source bound** — user must click its
-   menu-bar icon and select NDICAM. We can't programmatically read or
-   set this; NDI Virtual Input is sandboxed and its preferences live
-   inside `~/Library/Containers/com.newtek.Application-Mac-NDI-VirtualInput/`,
-   inaccessible without entitlements we don't have.
-2. **Camera permission for the running process**. Virtual cameras don't
-   trigger the TCC camera prompt (they bypass macOS's hardware-camera
-   gate), but frame data flow may still require permission for the
-   parent process. The `.app` has `NSCameraUsageDescription` in
-   Info.plist; the dev server inherits permission from whatever
-   Terminal launched python3.
-3. **Pixel format mismatch** at frame-receive time. Virtual cameras
-   sometimes only deliver specific formats (e.g. yuv420p, not uyvy422).
-   FFmpeg negotiates at open but might silently fail on first frame.
+What we know works against the same device:
+- **Photo Booth** plays NDICAM video live (proves NDI Virtual Input
+  → NDI Virtual Camera AVF bridge is healthy at the OS level)
+- The browser's `getUserMedia` path shows live preview in our own UI
+  (proves the AVF device delivers frames to high-level
+  `AVCaptureSession` consumers)
 
-Diagnostic next steps to try in priority order:
-- Have the user open NDI Studio Monitor and verify NDICAM is actually
-  delivering video to the local machine. If Studio Monitor sees frames,
-  NDICAM is reachable; if not, NDICAM itself is the problem.
-- Try removing `-pixel_format uyvy422` from the AVF source factory.
-  Let FFmpeg auto-negotiate the format.
-- Add `-stimeout 5000000` (5-sec read timeout) to detect the hang and
-  surface a clear "no frames received" error in the UI.
-- Try bypassing NDI Virtual Camera entirely — see "Direct NDI ingest"
-  in the v0.2.0 list below.
+Diagnosis: FFmpeg's `avfoundation` indev uses a lower-level
+`AVCaptureDeviceInput` + `AVCaptureVideoDataOutput` callback path
+that some virtual cameras don't service. This is a recurring
+complaint in the OBS / FFmpeg / NDI Tools issue trackers and has
+no flag-level fix. AVCaptureSession (Photo Booth, getUserMedia)
+works; AVCaptureVideoDataOutput callbacks (FFmpeg) doesn't.
+
+**The real fix is direct NDI ingest.** Bypass NDI Virtual Camera /
+AVF entirely; receive NDI frames in Python via the NewTek NDI SDK
+(`ndi-python` binding loads `libndi.dylib` from `/usr/local/lib/`,
+which NDI Tools installs); pipe raw frames to FFmpeg's stdin.
+Estimated work: ~1 day. See "v0.2.0 candidate features" → "Direct
+NDI ingest".
+
+For the **alpha**, document NDI Virtual Camera as a known limitation:
+"Direct NDI ingest is not supported in v0.1.0; use OBS Virtual
+Camera (which works because OBS implements both the high-level and
+low-level AVF callback paths), the SRT/RTMP relay listener, or wait
+for v0.2.0." Source factory keeps the simple combined `name:name`
+form that works for hardware webcams.
 
 ### 2. .app's bundled XML is only the placeholder
 
