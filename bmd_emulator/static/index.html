@@ -472,6 +472,28 @@
           </label>
         </div>
 
+        <!-- Channel selector for multi-channel audio devices (Dante VSC,
+             CoreAudio aggregate). Hidden by default; shown by app.js
+             when the active audio device's name matches "dante" or
+             "aggregate". 1-indexed, matching what Dante operators see
+             in Dante Controller. -->
+        <div class="audio-pan-row" id="audio-pan-row" hidden>
+          <label class="inline">
+            <span class="lbl">Channels (L · R)</span>
+            <span class="audio-pan-fields">
+              <input id="audio-pan-l" type="number" min="1" max="64" value="1" inputmode="numeric" aria-label="Left channel">
+              <span class="audio-pan-sep">·</span>
+              <input id="audio-pan-r" type="number" min="1" max="64" value="2" inputmode="numeric" aria-label="Right channel">
+            </span>
+          </label>
+          <p class="hint">
+            Multi-channel device detected (Dante / aggregate). Pick which channel
+            pair routes to the L/R of the outgoing stereo stream — for example
+            <code>5 · 6</code> for Dante channels 5 and 6. Default <code>1 · 2</code>
+            uses the first two channels (front stereo).
+          </p>
+        </div>
+
         <div class="pipe-only" hidden>
           <label>
             <span class="lbl">Where should we read the video from?</span>

@@ -323,6 +323,8 @@ struct SettingsPayload {
     av_video_name: Option<String>,
     av_audio_index: Option<i32>,
     av_audio_name: Option<String>,
+    audio_pan_l: Option<u8>,
+    audio_pan_r: Option<u8>,
     pipe_path: Option<String>,
     label: Option<String>,
     relay: Option<RelayPayload>,
@@ -483,6 +485,8 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             av_video_name: p.av_video_name,
             av_audio_index: p.av_audio_index,
             av_audio_name: p.av_audio_name,
+            audio_pan_l: p.audio_pan_l,
+            audio_pan_r: p.audio_pan_r,
             pipe_path: p.pipe_path,
             label: p.label,
             relay: p.relay.map(|r| crate::state::RelaySettingsUpdate {

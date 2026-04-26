@@ -56,6 +56,9 @@ const els = {
   sourceTiles:    $('#source-tiles'),
   sourceHint:     $('#source-hint'),
   avAudio:        $('#av-audio'),
+  audioPanRow:    $('#audio-pan-row'),
+  audioPanL:      $('#audio-pan-l'),
+  audioPanR:      $('#audio-pan-r'),
   videoMode:      $('#video-mode'),
   pipeOnly:       $$('.pipe-only'),
   pipePath:       $('#pipe-path'),
@@ -314,6 +317,28 @@ function showPreviewMessage(html) {
   els.previewMessage.innerHTML = html;
   els.previewMessage.hidden = false;
   els.previewBars.hidden = true;
+}
+
+// Show/hide the multi-channel audio pan picker based on whether the
+// active audio device looks like a multi-channel device (Dante VSC,
+// CoreAudio aggregate). Same heuristic the streamer uses on the Rust
+// side so the UI lines up exactly with when the FFmpeg pan filter
+// fires. For normal stereo mics the row stays hidden — surface it
+// only when the user actually has a routing decision to make.
+function updateAudioPanRow(snap) {
+  if (!els.audioPanRow) return;
+  const name = (snap.av_audio_name || '').toLowerCase();
+  const isMultichannel = (snap.source_id === 'avfoundation') &&
+    (name.includes('dante') || name.includes('aggregate'));
+  els.audioPanRow.hidden = !isMultichannel;
+  if (!isMultichannel) return;
+  // Don't clobber a value the user is currently editing.
+  if (document.activeElement !== els.audioPanL) {
+    els.audioPanL.value = snap.audio_pan_l || 1;
+  }
+  if (document.activeElement !== els.audioPanR) {
+    els.audioPanR.value = snap.audio_pan_r || 2;
+  }
 }
 
 // Sync the Preview / Stop Preview button to backend preview state +
@@ -908,6 +933,7 @@ function render(snap) {
       ...knownDevices.audio.map((d) => ({ value: d.index, label: `[${d.index}] ${d.name}` })),
     ], snap.av_audio_index);
   }
+  updateAudioPanRow(snap);
   setOptions(els.videoMode, snap.available_video_modes, snap.video_mode);
   if (els.formatDecoded) els.formatDecoded.textContent = decodeVideoMode(snap.video_mode);
   setOptions(els.quality, snap.available_quality_levels || [], snap.quality_level);
@@ -1324,6 +1350,19 @@ function bind() {
     const dev = knownDevices.audio.find((d) => d.index === idx);
     patch.av_audio_name = dev ? dev.name : '';
     applySettings(patch);
+  });
+  // Audio channel pan (multi-channel devices like Dante VSC).
+  // 'change' fires on blur or Enter — fine for number inputs since
+  // partial typing shouldn't fire a settings update mid-keystroke.
+  els.audioPanL.addEventListener('change', () => {
+    const v = Math.max(1, parseInt(els.audioPanL.value, 10) || 1);
+    els.audioPanL.value = v;
+    applySettings({ audio_pan_l: v });
+  });
+  els.audioPanR.addEventListener('change', () => {
+    const v = Math.max(1, parseInt(els.audioPanR.value, 10) || 1);
+    els.audioPanR.value = v;
+    applySettings({ audio_pan_r: v });
   });
   els.pipePath.addEventListener('change', () => applySettings({ pipe_path: els.pipePath.value }));
   els.rescanDevices.addEventListener('click', (e) => { e.preventDefault(); ensureDevicesLoaded(true); });

@@ -51,6 +51,13 @@ pub struct StreamPlan {
     /// Left None for native-resolution paths to preserve the v0.1.0
     /// plain-mapping behavior the bug-fix bundle restored.
     pub video_filter: Option<String>,
+    /// Optional `-af` filter expression applied to the mapped audio
+    /// stream. Currently only set when the source is a multi-channel
+    /// AVF audio device (Dante VSC, CoreAudio aggregate) — emits a
+    /// `pan=stereo|c0=cN|c1=cM` filter so the user can route a
+    /// specific channel pair to the outgoing stereo AAC stream
+    /// instead of FFmpeg auto-downmixing all N channels.
+    pub audio_filter: Option<String>,
 }
 
 impl StreamPlan {
@@ -333,6 +340,7 @@ impl Streamer {
 
         let source = crate::sources::resolve_source(&self.state)
             .map_err(|e| anyhow!("Source resolve failed: {e}"))?;
+        let audio_filter = build_audio_filter(&snap);
         Ok(StreamPlan {
             width,
             height,
@@ -345,6 +353,7 @@ impl Streamer {
             source,
             video_codec: snap.video_codec.to_lowercase(),
             video_filter: None,
+            audio_filter,
         })
     }
 
@@ -555,6 +564,14 @@ impl Streamer {
             ]);
         }
 
+        // Audio filter — currently only the pan filter for
+        // multi-channel devices (Dante VSC, CoreAudio aggregate). Goes
+        // before -c:a so the encoder sees the already-downmixed
+        // stereo result.
+        if let Some(filter) = plan.audio_filter.as_deref() {
+            cmd.push("-af".into());
+            cmd.push(filter.into());
+        }
         // Audio — AAC-LC 48k stereo.
         cmd.extend([
             "-c:a".into(), "aac".into(),
@@ -830,6 +847,34 @@ fn parse_progress(line: &str) -> Option<Progress> {
     } else {
         None
     }
+}
+
+/// Build an FFmpeg `-af` audio-filter expression when the active
+/// audio source is a multi-channel device that needs explicit L/R
+/// channel selection. Returns None for normal stereo mics + non-AVF
+/// sources (NDI, test pattern, pipe, relay) where FFmpeg's default
+/// channel handling already does the right thing.
+///
+/// The detection is name-based: any AVF audio device whose name
+/// matches "dante" or "aggregate" gets the pan filter applied.
+/// Without it, FFmpeg auto-downmixes all N channels into stereo
+/// using its built-in matrix — which mixes everything together
+/// (front+rear+center+LFE) and is rarely what a Dante operator wants.
+/// With it, the user-selected channel pair routes cleanly to L/R.
+fn build_audio_filter(snap: &Snapshot) -> Option<String> {
+    if snap.source_id != "avfoundation" {
+        return None;
+    }
+    let name = snap.av_audio_name.to_lowercase();
+    let is_multichannel = name.contains("dante") || name.contains("aggregate");
+    if !is_multichannel {
+        return None;
+    }
+    // 1-indexed in state (matches user-facing UI), 0-indexed in
+    // FFmpeg. max(1) defends against a UI bug submitting 0.
+    let l = snap.audio_pan_l.max(1) - 1;
+    let r = snap.audio_pan_r.max(1) - 1;
+    Some(format!("pan=stereo|c0=c{l}|c1=c{r}"))
 }
 
 fn build_rtmp_url(base_url: &str, stream_key: &str) -> String {

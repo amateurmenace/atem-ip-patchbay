@@ -121,6 +121,15 @@ struct Inner {
     av_audio_index: i32,
     av_video_name: String,
     av_audio_name: String,
+    /// 1-indexed channel numbers routed to the L/R of the outgoing
+    /// stereo AAC stream when the active audio device is multi-channel
+    /// (Dante VSC, CoreAudio aggregate). Defaults 1 and 2 give plain
+    /// front-stereo behavior. Wired into the FFmpeg cmd as
+    /// `-af pan="stereo|c0=cN-1|c1=cM-1"` only for devices the streamer
+    /// recognizes as multi-channel — for normal stereo mics the filter
+    /// is omitted so FFmpeg's default channel handling applies.
+    audio_pan_l: u8,
+    audio_pan_r: u8,
 
     pipe_path: String,
 
@@ -177,6 +186,8 @@ impl EncoderState {
                 av_audio_index: -1,
                 av_video_name: String::new(),
                 av_audio_name: String::new(),
+                audio_pan_l: 1,
+                audio_pan_r: 2,
                 pipe_path: String::new(),
                 ndi_source_name: String::new(),
                 relay_bind_host: "0.0.0.0".into(),
@@ -429,6 +440,12 @@ impl EncoderState {
         if let Some(v) = &update.av_audio_name {
             inner.av_audio_name = v.clone();
         }
+        if let Some(v) = update.audio_pan_l {
+            inner.audio_pan_l = v.max(1);
+        }
+        if let Some(v) = update.audio_pan_r {
+            inner.audio_pan_r = v.max(1);
+        }
         if let Some(v) = &update.pipe_path {
             inner.pipe_path = v.clone();
         }
@@ -548,6 +565,8 @@ impl EncoderState {
             av_audio_index: inner.av_audio_index,
             av_video_name: inner.av_video_name.clone(),
             av_audio_name: inner.av_audio_name.clone(),
+            audio_pan_l: inner.audio_pan_l,
+            audio_pan_r: inner.audio_pan_r,
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
             relay: RelaySnapshot {
@@ -723,6 +742,9 @@ pub struct SettingsUpdate {
     pub av_video_name: Option<String>,
     pub av_audio_index: Option<i32>,
     pub av_audio_name: Option<String>,
+    // Multi-channel audio L/R routing (Dante VSC, CoreAudio aggregate).
+    pub audio_pan_l: Option<u8>,
+    pub audio_pan_r: Option<u8>,
     // Pipe / URL source path.
     pub pipe_path: Option<String>,
     // Device label (IDENTITY's Label, also bmd_name in streamid).
@@ -789,6 +811,8 @@ pub struct Snapshot {
     pub av_audio_index: i32,
     pub av_video_name: String,
     pub av_audio_name: String,
+    pub audio_pan_l: u8,
+    pub audio_pan_r: u8,
     pub pipe_path: String,
     pub ndi_source_name: String,
     pub relay: RelaySnapshot,
