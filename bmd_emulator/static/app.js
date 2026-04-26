@@ -511,16 +511,24 @@ function startNdiPreview(senderName) {
       const r = await fetch(`/api/preview?ts=${Date.now()}`);
       if (r.status === 204 || !r.ok) {
         nullStreak += 1;
-        // After ~6s without frames, fall back to the waiting message
-        // so the user knows the stream isn't running yet.
+        // After ~6s without frames, swap to a "press Start Stream"
+        // hint. Important: do NOT call showPreviewMessage() here —
+        // that calls stopPreview() which would clear ndiPreviewTimer,
+        // and then no more ticks would fire, so the user would never
+        // see frames after they actually hit Start. Inline the DOM
+        // updates so the polling loop keeps running underneath the
+        // hint and can recover when the receiver comes up.
         if (nullStreak === 12 && ndiPreviewImg.hidden === false) {
-          showPreviewMessage(`
+          ndiPreviewImg.hidden = true;
+          els.previewBars.hidden = true;
+          els.previewMessage.hidden = false;
+          els.previewMessage.innerHTML = `
             <div>
               <strong>NDI sender: ${escapeHtml(senderName)}</strong>
               Direct NDI ingest is selected — press <strong>Start Stream</strong>
               below to begin receiving. The first preview frame will appear
               here once the receiver connects.
-            </div>`);
+            </div>`;
         }
         return;
       }
