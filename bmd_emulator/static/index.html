@@ -34,6 +34,7 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
+      <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
   </header>
@@ -63,11 +64,7 @@
           previously this was limited to just other Blackmagic hardware. Now,
           NDI, SDI, HDMI, non-Blackmagic SRT and RTMP streams, etc. can all
           be converted into the special Blackmagic flavor of SRT using this
-          app. This is more of a demo app showing what is now possible, a
-          proof of concept, and should only be used in real productions at
-          your own risk. It is free forever, until it either gets stopped by
-          Blackmagic or they fully embrace opening up their powerful stream
-          decoding ecosystem.
+          app.
         </p>
       </div>
       <div class="hero-col">
@@ -85,6 +82,13 @@
           that inspired this journey.
         </p>
       </div>
+    </div>
+    <div class="hero-disclaimer">
+      This is more of a demo app showing what is now possible, a proof of
+      concept, and should only be used in real productions at your own
+      risk. It is free forever, until it either gets stopped by Blackmagic
+      or they fully embrace opening up their powerful stream decoding
+      ecosystem.
     </div>
     <div class="hero-credit">
       Made by <a href="https://weirdmachine.org" target="_blank" rel="noopener">Stephen Walter</a>
@@ -463,73 +467,27 @@
         </div>
 
         <div class="pipe-only" hidden>
-          <label>Source path / URL
-            <input id="pipe-path" type="text" placeholder="/tmp/ndi.ts  or  rtsp://camera/stream  or  http://…" />
+          <label>
+            <span class="lbl">Where should we read the video from?</span>
+            <input id="pipe-path" type="text" placeholder="rtsp://192.168.1.50/stream  ·  http://example.com/live.m3u8  ·  /tmp/feed.ts" />
           </label>
           <p class="hint">
-            Bridge any FFmpeg-readable input. Examples: <code>rtsp://cam/stream</code>,
-            <code>http://server/playlist.m3u8</code>, a named pipe fed by GStreamer, etc.
+            Anything FFmpeg can open works here — paste the URL or file path your source emits to.
+            Common patterns:
+          </p>
+          <ul class="pipe-examples">
+            <li><strong>RTSP camera:</strong> <code>rtsp://username:password@192.168.1.50/stream</code></li>
+            <li><strong>HLS / HTTP stream:</strong> <code>http://server.example.com/live/playlist.m3u8</code></li>
+            <li><strong>Named pipe / file:</strong> <code>/tmp/feed.ts</code> (write into this from GStreamer, NDI Tools, OBS recorder, etc.)</li>
+            <li><strong>UDP MPEG-TS:</strong> <code>udp://0.0.0.0:1234</code></li>
+          </ul>
+          <p class="hint">
+            For an SRT or RTMP source where this app should be the receiver, use the
+            <strong>Receive a stream</strong> wizard above instead — it sets up the listener
+            and shows the publish URL to paste into your encoder.
           </p>
         </div>
 
-        <div class="relay-only" data-relay="srt_listen" hidden>
-          <div class="relay-url-row">
-            <label>Publish to this URL
-              <input id="relay-srt-url" type="text" readonly />
-            </label>
-            <button class="btn-secondary" id="relay-srt-copy" type="button">Copy</button>
-          </div>
-          <div class="relay-config-row">
-            <label class="inline">
-              <span class="lbl">Port</span>
-              <input id="relay-srt-port" type="number" min="1" max="65535" />
-            </label>
-            <label class="inline">
-              <span class="lbl">Latency (ms)</span>
-              <input id="relay-srt-latency" type="number" min="20" max="8000" />
-            </label>
-            <label class="inline">
-              <span class="lbl">Passphrase</span>
-              <input id="relay-srt-passphrase" type="password" placeholder="(optional)" />
-            </label>
-          </div>
-          <p class="hint">
-            Point any SRT-publishing app (OBS, Larix, FFmpeg, an iPhone) at the
-            URL above in <strong>caller mode</strong>. We re-encode incoming
-            MPEG-TS into BMD's preferred profile and forward to the destination
-            you've configured below. Click <strong>Start Stream</strong> to start
-            listening.
-          </p>
-        </div>
-
-        <div class="relay-only" data-relay="rtmp_listen" hidden>
-          <div class="relay-url-row">
-            <label>Publish server URL
-              <input id="relay-rtmp-url" type="text" readonly />
-            </label>
-            <button class="btn-secondary" id="relay-rtmp-copy" type="button">Copy</button>
-          </div>
-          <div class="relay-config-row">
-            <label class="inline">
-              <span class="lbl">Port</span>
-              <input id="relay-rtmp-port" type="number" min="1" max="65535" />
-            </label>
-            <label class="inline">
-              <span class="lbl">App</span>
-              <input id="relay-rtmp-app" type="text" />
-            </label>
-            <label class="inline">
-              <span class="lbl">Stream key</span>
-              <input id="relay-rtmp-key" type="text" />
-            </label>
-          </div>
-          <p class="hint">
-            In OBS: <strong>Settings → Stream → Service: Custom</strong>, paste
-            the URL above as the <em>Server</em>, the stream key as the
-            <em>Stream Key</em>. Click <strong>Start Stream</strong> here first
-            so the listener is bound before OBS connects.
-          </p>
-        </div>
       </section>
 
       <!-- Old tabbed Destination card replaced by the wizard at the

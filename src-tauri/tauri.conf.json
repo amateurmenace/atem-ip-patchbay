@@ -40,7 +40,9 @@
     "longDescription": "Cross-platform proof-of-concept that pushes NDI / SDI / HDMI / non-Blackmagic SRT or RTMP video sources into Blackmagic ATEM switchers, Streaming Decoders, and Streaming Bridges over the BMD-flavored SRT handshake.",
     "macOS": {
       "signingIdentity": "Developer ID Application: Stephen Walter (6M536MV7GT)",
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": null,
+      "infoPlist": "Info.plist"
     }
   }
 }

@@ -15,6 +15,7 @@ const els = {
   brandBtn:   $('#brand-btn'),
   statusPill: $('#status-pill'),
   duration:   $('#duration'),
+  refreshApp: $('#refresh-app'),
   monitorAux: $('#monitor-aux'),
   destAux:    $('#dest-aux'),
   connAux:    $('#conn-aux'),
@@ -61,17 +62,11 @@ const els = {
   ndiRescan:      $('#ndi-rescan'),
 
   // Relay (incoming SRT/RTMP server)
-  relayPanels:        $$('.relay-only'),
-  relaySrtUrl:        $('#relay-srt-url'),
-  relaySrtCopy:       $('#relay-srt-copy'),
-  relaySrtPort:       $('#relay-srt-port'),
-  relaySrtLatency:    $('#relay-srt-latency'),
-  relaySrtPassphrase: $('#relay-srt-passphrase'),
-  relayRtmpUrl:       $('#relay-rtmp-url'),
-  relayRtmpCopy:      $('#relay-rtmp-copy'),
-  relayRtmpPort:      $('#relay-rtmp-port'),
-  relayRtmpApp:       $('#relay-rtmp-app'),
-  relayRtmpKey:       $('#relay-rtmp-key'),
+  // Old per-tile relay-config panels removed in favor of the
+  // receive-stream wizard above (rw-* IDs). Settings (port,
+  // latency, passphrase, RTMP app/key) stay at their server-side
+  // defaults; advanced overrides can come back as a collapsible
+  // <details> in the wizard if a user actually needs them.
 
   // Destination wizard
   destAddress:    $('#dest-address'),
@@ -883,8 +878,6 @@ function render(snap) {
   if (document.activeElement !== els.pipePath) els.pipePath.value = snap.pipe_path || '';
   els.pipeOnly.forEach((e) => (e.hidden = snap.source_id !== 'pipe'));
 
-  renderRelayPanels(snap);
-
   const ov = snap.overlay || {};
   if (document.activeElement !== els.ovTitle) els.ovTitle.value = ov.title || '';
   if (document.activeElement !== els.ovSubtitle) els.ovSubtitle.value = ov.subtitle || '';
@@ -940,37 +933,6 @@ function sourceLabel(snap) {
 // -----------------------------------------------------------------
 // Relay panel rendering — show/hide + populate URLs and config
 // -----------------------------------------------------------------
-function renderRelayPanels(snap) {
-  const sid = snap.source_id;
-  const r = snap.relay || {};
-
-  els.relayPanels.forEach((el) => {
-    el.hidden = el.dataset.relay !== sid;
-  });
-
-  // Host shown in the publish URL: prefer the LAN IP we fetched at
-  // boot; fall back to the page hostname (which is usually 127.0.0.1
-  // or localhost). Either way the bind address remains 0.0.0.0
-  // server-side, so any interface accepts connections.
-  const host = lanIp || window.location.hostname || '127.0.0.1';
-
-  if (document.activeElement !== els.relaySrtPort)
-    els.relaySrtPort.value = r.srt_port ?? 9710;
-  if (document.activeElement !== els.relaySrtLatency)
-    els.relaySrtLatency.value = Math.round((r.srt_latency_us ?? 200_000) / 1000);
-  if (document.activeElement !== els.relaySrtPassphrase)
-    els.relaySrtPassphrase.value = r.srt_passphrase || '';
-  els.relaySrtUrl.value = `srt://${host}:${r.srt_port ?? 9710}`;
-
-  if (document.activeElement !== els.relayRtmpPort)
-    els.relayRtmpPort.value = r.rtmp_port ?? 1935;
-  if (document.activeElement !== els.relayRtmpApp)
-    els.relayRtmpApp.value = r.rtmp_app || 'live';
-  if (document.activeElement !== els.relayRtmpKey)
-    els.relayRtmpKey.value = r.rtmp_key || 'stream';
-  els.relayRtmpUrl.value = `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}`;
-}
-
 async function copyToClipboard(text, btn) {
   try {
     await navigator.clipboard.writeText(text);
@@ -1332,25 +1294,12 @@ function bind() {
   els.videoMode.addEventListener('change', () => applySettings({ video_mode: els.videoMode.value }));
   els.quality.addEventListener('change', () => applySettings({ quality_level: els.quality.value }));
 
-  // Relay panels — config inputs + copy buttons
-  const relayPatch = (patch) => applySettings({ relay: patch });
-  els.relaySrtPort.addEventListener('change', () => {
-    const p = parseInt(els.relaySrtPort.value, 10);
-    if (!isNaN(p)) relayPatch({ srt_port: p });
-  });
-  els.relaySrtLatency.addEventListener('change', () => {
-    const ms = parseInt(els.relaySrtLatency.value, 10);
-    if (!isNaN(ms)) relayPatch({ srt_latency_us: ms * 1000 });
-  });
-  els.relaySrtPassphrase.addEventListener('change', () => relayPatch({ srt_passphrase: els.relaySrtPassphrase.value }));
-  els.relaySrtCopy.addEventListener('click', () => copyToClipboard(els.relaySrtUrl.value, els.relaySrtCopy));
-  els.relayRtmpPort.addEventListener('change', () => {
-    const p = parseInt(els.relayRtmpPort.value, 10);
-    if (!isNaN(p)) relayPatch({ rtmp_port: p });
-  });
-  els.relayRtmpApp.addEventListener('change', () => relayPatch({ rtmp_app: els.relayRtmpApp.value }));
-  els.relayRtmpKey.addEventListener('change', () => relayPatch({ rtmp_key: els.relayRtmpKey.value }));
-  els.relayRtmpCopy.addEventListener('click', () => copyToClipboard(els.relayRtmpUrl.value, els.relayRtmpCopy));
+  // Relay panel inputs were removed along with the .relay-only blocks
+  // — the receive-stream wizard above now drives everything. Relay
+  // settings (port, latency, passphrase, RTMP app/key) stay at server
+  // defaults; if a user needs to override, they can POST to
+  // /api/settings { relay: { ... } } directly until the wizard grows
+  // an "advanced" subsection.
 
   // Encoder
   // Codec wiring is now via els.codecSegs above (segmented control).
@@ -1533,7 +1482,8 @@ ensureDevicesLoaded();
 ensureNdiLoaded();
 fetchJSON('/api/lan-ip').then((j) => {
   lanIp = j.ip || '';
-  if (lastSnapshot) renderRelayPanels(lastSnapshot);
+  // Wizard's publish URL also re-renders against this; render() will
+  // pick it up on the next poll cycle. No relay panels left to refresh.
 }).catch(() => {});
 poll();
 setInterval(poll, 1000);
@@ -1551,3 +1501,20 @@ document.addEventListener('keydown', (e) => {
     location.reload();
   }
 });
+
+// Visible Refresh button — wipes the SW cache (none today, here as
+// future-proofing) then force-reloads bypassing HTTP cache. Primary
+// way to bust a stale-JS state when keystrokes don't help.
+if (els.refreshApp) {
+  els.refreshApp.addEventListener('click', async () => {
+    if ('caches' in window) {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch (_e) { /* ignore */ }
+    }
+    // location.reload() in modern browsers always revalidates anyway,
+    // but spelling it out makes the intent obvious.
+    location.reload();
+  });
+}

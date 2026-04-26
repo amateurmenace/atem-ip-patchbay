@@ -151,6 +151,22 @@ body.is-streaming .title-block h1 {
 .status-pill.streaming { color: #fff; background: #1f8a3f; border-color: #2ecc71; box-shadow: 0 0 12px rgba(46,204,113,0.4); }
 .status-pill.connecting { color: #1a1208; background: var(--amber); border-color: var(--amber); }
 .status-pill.interrupted { color: #fff; background: #5a1f1f; border-color: var(--red); }
+
+.refresh-btn {
+  margin-left: 12px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.refresh-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(255,138,56,0.08); }
+.refresh-btn:active { transform: translateY(1px); }
 .duration { font-family: "SF Mono", monospace; font-size: 22px; letter-spacing: 0.05em; color: var(--text); }
 
 /* ============= HERO ====================================== */
@@ -179,6 +195,20 @@ body.is-streaming .title-block h1 {
 }
 .hero-credit a { color: var(--accent); border-bottom: 1px dotted var(--accent); }
 .hero-credit a:hover { color: #ffa166; text-decoration: none; }
+
+/* Full-width disclaimer strip — sits right above .hero-credit and
+   spans the entire hero so it reads as a clear "fine print" beat. */
+.hero-disclaimer {
+  margin: 28px 0 0;
+  padding: 16px 28px;
+  background: rgba(255, 191, 0, 0.06);
+  border-top: 1px solid rgba(255, 191, 0, 0.25);
+  border-bottom: 1px solid rgba(255, 191, 0, 0.25);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-align: center;
+}
 
 /* ============= MAIN GRID ================================== */
 .grid {
@@ -614,13 +644,53 @@ button.big { padding: 14px 18px; font-size: 14px; }
   grid-template-columns: 2fr 1fr;
   gap: 10px;
   align-items: center;
-  padding: 10px 12px;
+  padding: 16px 18px;
+  margin-top: 16px;
   background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(255, 138, 56, 0.2), 0 4px 14px rgba(0,0,0,0.18);
+}
+.audio-row .lbl {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+}
+.audio-row select,
+.audio-row input {
+  font-size: 14px;
+  padding: 10px 12px;
+  font-weight: 500;
 }
 
 .pipe-only { margin-top: 12px; padding: 12px; border-top: 1px dashed var(--line); }
+.pipe-only .lbl {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.pipe-only input {
+  font-size: 13px;
+  padding: 9px 11px;
+}
+.pipe-examples {
+  list-style: none;
+  margin: 6px 0 12px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.pipe-examples li { padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.pipe-examples li:last-child { border-bottom: none; }
+.pipe-examples strong { color: var(--text); display: inline-block; min-width: 130px; }
+.pipe-examples code { color: var(--accent); }
 
 .relay-only {
   margin-top: 12px;

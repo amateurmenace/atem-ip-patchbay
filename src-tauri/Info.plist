@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>ATEM IP Patchbay shows a live preview of the selected camera or capture device so you can confirm the right input before pressing Start Stream.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ATEM IP Patchbay enumerates and previews audio input devices so you can pick the right microphone or interface for the outgoing stream.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>ATEM IP Patchbay discovers NDI senders and connects to ATEM hardware on your local network.</string>
+</dict>
+</plist>
