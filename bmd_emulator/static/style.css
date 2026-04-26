@@ -294,6 +294,16 @@ body.is-streaming .preview-frame {
 .preview-message a { color: var(--signal); border-bottom: 1px dotted var(--signal); }
 .preview-message a:hover { color: #7cc0ff; text-decoration: none; }
 
+/* The user-agent [hidden] { display: none } rule has the same
+   specificity as .bars and .preview-message (both 0,1,0), and our
+   display:flex declarations come later in the cascade so they win
+   — meaning element.hidden = true doesn't actually hide them. The
+   camera <video> element happens to be position:absolute over the
+   bars so the bug is invisible there; NDI preview <img> revealed
+   it. Force the rule with !important so all hidden-via-attribute
+   calls in app.js (and any future ones) Just Work. */
+[hidden] { display: none !important; }
+
 .live-badge {
   position: absolute;
   top: 12px; left: 12px;

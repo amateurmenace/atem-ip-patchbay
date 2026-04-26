@@ -496,7 +496,11 @@ function startNdiPreview(senderName) {
     ndiPreviewImg = document.createElement('img');
     ndiPreviewImg.id = 'preview-ndi';
     ndiPreviewImg.alt = 'NDI preview';
-    ndiPreviewImg.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+    // position:absolute so we overlay the SMPTE bars the same way
+    // #preview-video does. Without this, the img would flow inline
+    // and the bars would still be visible alongside it.
+    ndiPreviewImg.style.cssText =
+      'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;';
     els.previewFrame.appendChild(ndiPreviewImg);
   }
   ndiPreviewImg.hidden = false;
@@ -654,8 +658,12 @@ function buildSourceTiles(snap) {
       els.sourceTiles.appendChild(sec);
       lastSection = t.section;
     }
+    // NDI tiles: state.source_id is "ndi" but the tile's sourceId is
+    // "ndi-sender" (the discovery list); match by ndi_source_name so
+    // the right sender within the discovered set highlights.
     const isActive =
-      snap.source_id === t.sourceId &&
+      ((snap.source_id === t.sourceId) ||
+       (snap.source_id === 'ndi' && t.sourceId === 'ndi-sender' && snap.ndi_source_name === t.name)) &&
       (t.sourceId !== 'avfoundation' || snap.av_video_index === t.avIndex);
     const div = document.createElement('div');
     div.className = 'tile' + (isActive ? ' active' : '') + (t.discovered ? ' discovered' : '');
