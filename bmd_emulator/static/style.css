@@ -981,6 +981,117 @@ pre {
 /* Log card with collapsible disclosure */
 .log-pane-card pre { margin-top: 4px; }
 
+/* ============= RECEIVE-STREAM MINI-WIZARD (Phase 8b) ===== */
+.receive-wizard {
+  margin: 14px 0 0;
+  background: var(--panel-2, #1d2030);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 9px;
+}
+.receive-wizard summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px;
+  color: var(--text, #e6e6ea);
+  list-style: none;
+}
+.receive-wizard summary::-webkit-details-marker { display: none; }
+.rw-icon {
+  display: inline-block;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
+  text-align: center; line-height: 20px;
+  font-size: 11px; font-weight: 700;
+  transition: transform 0.2s;
+}
+.receive-wizard[open] .rw-icon { transform: rotate(180deg); }
+.rw-title { font-weight: 500; }
+.rw-body {
+  padding: 4px 16px 16px;
+  display: flex; flex-direction: column; gap: 16px;
+  border-top: 1px solid var(--line, #2a2d36);
+}
+.rw-protocol, .rw-url, .rw-apps, .rw-start {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding-top: 12px;
+}
+.rw-step {
+  flex: 0 0 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--panel, #161821);
+  color: var(--accent, #5a8aff);
+  border: 1px solid var(--line, #2a2d36);
+  text-align: center; line-height: 22px;
+  font-size: 11px; font-weight: 700;
+}
+.rw-step-label {
+  display: block;
+  font-size: 11px; color: var(--muted, #9aa1ad);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.rw-step-content { flex: 1; min-width: 0; }
+.rw-protocol { align-items: center; }
+.rw-protocol .rw-step-label { margin: 0; }
+.rw-url-row {
+  display: flex; gap: 8px;
+}
+.rw-url-row input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  color: #b6e1c1;
+  font-family: monospace;
+  font-size: 12px;
+}
+.rw-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+  line-height: 1.5;
+}
+.rw-hint code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 10.5px; color: #b6e1c1;
+}
+.rw-app-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  color: var(--text, #e6e6ea);
+  font-size: 12px;
+}
+.rw-app-body {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted, #9aa1ad);
+}
+.rw-app-body strong { color: var(--text, #e6e6ea); }
+.rw-app-body code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.rw-app-body ol { margin: 0; padding-left: 20px; }
+.rw-app-body li { margin-bottom: 5px; }
+.rw-start button {
+  margin-top: 4px;
+}
+
 /* ============= USER GUIDE (Phase 8b) ===================== */
 .user-guide {
   max-width: 1080px;

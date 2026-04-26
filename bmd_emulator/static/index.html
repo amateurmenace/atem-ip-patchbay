@@ -393,6 +393,68 @@
 
         <div id="source-hint" class="paste-status hint-panel" hidden></div>
 
+        <!-- Phase 8b: receive-stream mini-wizard. Promotes the
+             relay-listener tiles (srt_listen / rtmp_listen) into a
+             discoverable flow. Clicking expands a panel with the
+             publish URL and per-app instructions. Activating
+             selects the underlying tile and shows its config panel
+             below. -->
+        <details class="receive-wizard" id="receive-wizard">
+          <summary>
+            <span class="rw-icon" aria-hidden="true">↓</span>
+            <span class="rw-title">Or: receive a stream from a camera, drone, OBS, or phone</span>
+          </summary>
+          <div class="rw-body">
+            <div class="rw-protocol">
+              <span class="rw-step">1</span>
+              <span class="rw-step-label">Pick a protocol</span>
+              <div class="seg-control" role="radiogroup" aria-label="Receive protocol">
+                <label class="seg"><input type="radio" name="rw-proto" value="srt_listen" checked /><span>SRT</span></label>
+                <label class="seg"><input type="radio" name="rw-proto" value="rtmp_listen" /><span>RTMP</span></label>
+              </div>
+            </div>
+
+            <div class="rw-url">
+              <span class="rw-step">2</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">Copy this URL into your camera, drone, or encoder app</span>
+                <div class="rw-url-row">
+                  <input id="rw-publish-url" type="text" readonly />
+                  <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+                </div>
+                <p class="rw-hint">
+                  Replace <code>0.0.0.0</code> with this machine's LAN IP if your encoder isn't on the same machine.
+                  Default port is 9710 for SRT, 1935 for RTMP — change them in the panel below if needed.
+                </p>
+              </div>
+            </div>
+
+            <div class="rw-apps">
+              <span class="rw-step">3</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">App-specific setup</span>
+                <select id="rw-app-pick" class="rw-app-select">
+                  <option value="">— pick your encoder app —</option>
+                  <option value="obs">OBS Studio</option>
+                  <option value="larix">Larix Broadcaster (iPhone/Android)</option>
+                  <option value="dji">DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</option>
+                  <option value="ffmpeg">FFmpeg command line</option>
+                  <option value="iphone-bm">Blackmagic Camera app (iPhone)</option>
+                </select>
+                <div id="rw-app-instructions" class="rw-app-body" hidden></div>
+              </div>
+            </div>
+
+            <div class="rw-start">
+              <span class="rw-step">4</span>
+              <div class="rw-step-content">
+                <span class="rw-step-label">Start the receiver — wait for your encoder to connect, then it'll re-stream to your ATEM destination above</span>
+                <button id="rw-start-receiver" type="button" class="primary">Start Receiver</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
         <div class="audio-row single">
           <label class="inline">
             <span class="lbl">Audio</span>

@@ -1333,6 +1333,125 @@ function bind() {
     const r = await fetch('/api/stop', { method: 'POST' });
     render(await r.json());
   });
+
+  // -----------------------------------------------------------------
+  // Phase 8b: receive-stream mini-wizard handlers
+  // -----------------------------------------------------------------
+  const rwProto = $$('input[name="rw-proto"]');
+  const rwUrl = $('#rw-publish-url');
+  const rwCopy = $('#rw-copy');
+  const rwAppPick = $('#rw-app-pick');
+  const rwAppBody = $('#rw-app-instructions');
+  const rwStart = $('#rw-start-receiver');
+
+  function getRwProto() {
+    for (const r of rwProto) if (r.checked) return r.value;
+    return 'srt_listen';
+  }
+
+  function refreshRwUrl() {
+    if (!rwUrl) return;
+    const proto = getRwProto();
+    const host = lanIp || window.location.hostname || '0.0.0.0';
+    const r = lastSnapshot?.relay || {};
+    if (proto === 'srt_listen') {
+      rwUrl.value = `srt://${host}:${r.srt_port ?? 9710}`;
+    } else {
+      rwUrl.value = `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    }
+  }
+
+  function renderRwApp(app) {
+    if (!rwAppBody) return;
+    if (!app) { rwAppBody.hidden = true; rwAppBody.innerHTML = ''; return; }
+    const proto = getRwProto();
+    const url = rwUrl?.value || '';
+    let html = '';
+    if (app === 'obs' && proto === 'srt_listen') {
+      html = `<strong>OBS → Settings → Stream</strong>
+        <ol>
+          <li>Service: <code>Custom...</code></li>
+          <li>Server: <code>${escapeHtml(url)}?streamid=publish</code></li>
+          <li>Stream Key: leave blank</li>
+          <li>Output → Encoder: x264 or HEVC, Keyframe Interval 2s, Bitrate to match what your network can carry</li>
+        </ol>`;
+    } else if (app === 'obs' && proto === 'rtmp_listen') {
+      html = `<strong>OBS → Settings → Stream</strong>
+        <ol>
+          <li>Service: <code>Custom...</code></li>
+          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
+          <li>Stream Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
+        </ol>`;
+    } else if (app === 'larix') {
+      html = `<strong>Larix Broadcaster (iPhone / Android)</strong>
+        <ol>
+          <li>Settings → Connections → New connection</li>
+          <li>Mode: <code>Caller</code></li>
+          <li>URL: <code>${escapeHtml(url)}</code></li>
+          <li>Format: MPEG-TS / FLV (matches the protocol you picked)</li>
+          <li>Encoder: H.264 or HEVC, Keyframe interval 2s</li>
+        </ol>`;
+    } else if (app === 'dji') {
+      html = `<strong>DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</strong>
+        <ol>
+          <li>In the Fly app: <em>Camera View → Transmission → Live Streaming Platform → RTMP Custom</em></li>
+          <li>RTMP URL: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}/${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
+          <li>(SRT isn't supported natively on most DJI consumer drones — pick RTMP above for these)</li>
+        </ol>`;
+    } else if (app === 'ffmpeg') {
+      const cmd = proto === 'srt_listen'
+        ? `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f mpegts '${url}'`
+        : `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f flv '${url}'`;
+      html = `<strong>FFmpeg from a file or device</strong>
+        <pre style="white-space:pre-wrap;font-size:11px;color:#b6e1c1;background:rgba(0,0,0,0.25);padding:8px 10px;border-radius:5px;">${escapeHtml(cmd)}</pre>`;
+    } else if (app === 'iphone-bm') {
+      html = `<strong>Blackmagic Camera app (iPhone)</strong>
+        <ol>
+          <li>Tap the gear icon → <em>Stream</em></li>
+          <li>Service: <code>Custom RTMP</code> (the BMD app speaks RTMP only)</li>
+          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
+          <li>Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
+          <li>Pick RTMP above (Blackmagic Camera doesn't do SRT yet)</li>
+        </ol>`;
+    } else {
+      html = `<em>Pick your encoder app above for tailored instructions.</em>`;
+    }
+    rwAppBody.innerHTML = html;
+    rwAppBody.hidden = false;
+  }
+
+  rwProto.forEach((r) => r.addEventListener('change', () => {
+    refreshRwUrl();
+    renderRwApp(rwAppPick?.value || '');
+  }));
+  if (rwAppPick) rwAppPick.addEventListener('change', () => renderRwApp(rwAppPick.value));
+  if (rwCopy) rwCopy.addEventListener('click', () => copyToClipboard(rwUrl.value, rwCopy));
+  if (rwStart) rwStart.addEventListener('click', async () => {
+    rwStart.disabled = true;
+    try {
+      // Switch the source to the chosen relay listener, then start the
+      // stream. The relay panel below the source tiles becomes visible
+      // automatically once source_id flips.
+      await applySettings({ source_id: getRwProto() });
+      const r = await fetch('/api/start', { method: 'POST' });
+      const j = await r.json();
+      if (j.error) {
+        els.error.hidden = false;
+        els.error.textContent = j.error;
+      } else {
+        render(j);
+      }
+    } finally {
+      setTimeout(() => (rwStart.disabled = false), 600);
+    }
+  });
+
+  // Refresh URL whenever the snapshot changes (port/app may move).
+  // The poll loop already calls render(snap) on every tick; we just
+  // need to re-render the URL when the wizard is open.
+  const urlRefreshTimer = setInterval(refreshRwUrl, 1000);
+  // No teardown needed — runs for the lifetime of the page.
+  void urlRefreshTimer;
 }
 
 bind();
