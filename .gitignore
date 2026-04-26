@@ -43,6 +43,12 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/Cargo.lock.bak
+# FFmpeg sidecar — downloaded by CI before `cargo tauri build` so the
+# bundled .app/.exe carries it. Local dev runs find FFmpeg via PATH.
+# The README.txt placeholder is committed (load-bearing for the
+# resources glob); only the actual ffmpeg{.exe} binaries are ignored.
+src-tauri/sidecar/ffmpeg
+src-tauri/sidecar/ffmpeg.exe
 
 # Stand-alone tools — each has its own Cargo build, but the build
 # artefacts and the per-tool Cargo.lock (no shared workspace lock)

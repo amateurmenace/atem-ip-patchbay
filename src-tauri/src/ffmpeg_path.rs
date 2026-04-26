@@ -31,9 +31,20 @@ pub fn ffmpeg_path() -> String {
 
     if let Some(root) = RESOURCE_ROOT.get() {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
-        let candidate = root.join(format!("ffmpeg{suffix}"));
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
+        // Tauri 2 bundles `bundle.resources` paths verbatim under
+        // Contents/Resources/. We download FFmpeg to
+        // src-tauri/sidecar/ffmpeg{.exe} in CI so it lands at
+        // <resource_root>/sidecar/ffmpeg{.exe} in the .app/.exe
+        // bundle. Plain <resource_root>/ffmpeg is checked as a
+        // fallback for legacy or hand-bundled layouts.
+        for relative in [
+            format!("sidecar/ffmpeg{suffix}"),
+            format!("ffmpeg{suffix}"),
+        ] {
+            let candidate = root.join(&relative);
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
         }
     }
 
