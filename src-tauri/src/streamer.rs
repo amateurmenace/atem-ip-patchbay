@@ -416,10 +416,67 @@ impl Streamer {
         // Video encoder — Main profile, no B-frames, fixed GOP. H.264
         // for broad compatibility, H.265 for Streaming Bridge native
         // mode (matches what real BMD WPs send to ATEM Mini built-in).
-        let bitrate_kbps = (plan.video_bitrate / 1000).to_string();
+        //
+        // On macOS, route through VideoToolbox (Apple ANE + GPU) so
+        // the encoder runs on dedicated silicon rather than CPU. The
+        // libx264 veryfast path costs ~80% of one core at 1080p30 and
+        // dominates the NDI ingest profile because the receiver
+        // thread is already CPU-bound; VT drops that to single-digit
+        // % and frees headroom for everything else. The flags below
+        // produce a Main-profile, no-B-frame, CBR-ish stream that the
+        // BMD SRT decoder accepts. Set ATEM_DISABLE_VT=1 to fall back
+        // to libx264/libx265 for BMD-parity verification.
         let bitrate_str = plan.video_bitrate.to_string();
         let fps_str = plan.fps.to_string();
-        if plan.video_codec == "h265" {
+        let use_vt = cfg!(target_os = "macos") && std::env::var("ATEM_DISABLE_VT").is_err();
+
+        if use_vt {
+            let codec = if plan.video_codec == "h265" {
+                "hevc_videotoolbox"
+            } else {
+                "h264_videotoolbox"
+            };
+            cmd.extend(
+                [
+                    "-c:v", codec,
+                    "-profile:v", "main",
+                    "-pix_fmt", "yuv420p",
+                    // Hint VT to prioritize encode latency over
+                    // quality — drops frames before delaying when
+                    // the encoder can't keep up. Right call for
+                    // live SRT, wrong call for VOD transcode.
+                    "-realtime", "1",
+                    // Allow software fallback if hardware encoding
+                    // can't initialize (rare; happens if another
+                    // process is holding all ANE slots). Slower
+                    // than libx264 in that mode but still streams.
+                    "-allow_sw", "1",
+                    // True CBR — matches what real BMD encoders
+                    // emit and what the ATEM SRT decoder expects
+                    // for clean pacing. macOS 13+ honors this; on
+                    // older macOS, FFmpeg silently ignores the
+                    // flag and VT runs in ABR which is also
+                    // accepted by ATEM in practice.
+                    "-constant_bit_rate", "1",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.extend([
+                "-b:v".into(), bitrate_str,
+                // Explicit no-B-frames. VT's default profile
+                // setting may already exclude B-frames at Main
+                // profile, but the flag is load-bearing for the
+                // BMD parity guarantee — pcap analysis showed
+                // real Web Presenters never emit B-frames.
+                "-bf".into(), "0".into(),
+                "-g".into(), gop.clone(),
+                "-keyint_min".into(), gop,
+                "-sc_threshold".into(), "0".into(),
+                "-r".into(), fps_str,
+            ]);
+        } else if plan.video_codec == "h265" {
+            let bitrate_kbps = (plan.video_bitrate / 1000).to_string();
             cmd.extend(
                 [
                     "-c:v",
@@ -443,11 +500,11 @@ impl Streamer {
                  repeat-headers=1:hrd=1:log-level=warning"
             ));
             cmd.extend([
-                "-b:v".into(), bitrate_str.clone(),
+                "-b:v".into(), bitrate_str,
                 "-g".into(), gop.clone(),
-                "-keyint_min".into(), gop.clone(),
+                "-keyint_min".into(), gop,
                 "-sc_threshold".into(), "0".into(),
-                "-r".into(), fps_str.clone(),
+                "-r".into(), fps_str,
             ]);
         } else {
             cmd.extend(
