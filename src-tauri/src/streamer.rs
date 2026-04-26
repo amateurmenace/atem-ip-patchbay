@@ -14,6 +14,7 @@
 use crate::ffmpeg_path::ffmpeg_path;
 use crate::ndi_capture::{NdiCapture, NdiVideoFormat};
 use crate::ndi_runtime;
+use crate::preview::Preview;
 use crate::sources::Source;
 use crate::state::{EncoderState, Snapshot};
 use crate::streamid::{build_srt_url, parse_srt_host_port, SrtUrlParams};
@@ -60,6 +61,10 @@ impl StreamPlan {
 
 pub struct Streamer {
     state: Arc<EncoderState>,
+    /// Pre-stream preview manager. start() tears any active preview
+    /// down before claiming the SDK / device handle for the streaming
+    /// receiver — see the handoff rationale in [`crate::preview`].
+    preview: Arc<Preview>,
     inner: Mutex<Inner>,
 }
 
@@ -74,9 +79,10 @@ struct Inner {
 }
 
 impl Streamer {
-    pub fn new(state: Arc<EncoderState>) -> Arc<Self> {
+    pub fn new(state: Arc<EncoderState>, preview: Arc<Preview>) -> Arc<Self> {
         Arc::new(Self {
             state,
+            preview,
             inner: Mutex::new(Inner {
                 child: None,
                 last_command: Vec::new(),
@@ -131,6 +137,16 @@ impl Streamer {
                 return Err(anyhow!("Stream already running."));
             }
         }
+
+        // Release any active pre-stream preview before claiming the
+        // SDK/device handle for the streaming receiver. NDI: avoids
+        // holding two Receivers per source from the same process
+        // (wasteful + would race the latest_jpeg slot). The
+        // _for_streamer variant keeps the last JPEG visible so the
+        // UI doesn't flicker during the preview->stream handoff —
+        // the streaming path's sampler will overwrite the slot
+        // within a frame or two.
+        self.preview.stop_for_streamer().await;
 
         let plan = self.build_plan()?;
         if !plan.source.available {

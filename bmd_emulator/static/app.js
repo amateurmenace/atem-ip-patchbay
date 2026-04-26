@@ -31,6 +31,7 @@ const els = {
   ovlProfile:     $('#ovl-profile'),
   ovlBitrate:     $('#ovl-bitrate'),
   startBtn:       $('#btn-start'),
+  previewBtn:     $('#btn-preview'),
   stopBtn:        $('#btn-stop'),
   error:          $('#error'),
 
@@ -313,6 +314,35 @@ function showPreviewMessage(html) {
   els.previewMessage.innerHTML = html;
   els.previewMessage.hidden = false;
   els.previewBars.hidden = true;
+}
+
+// Sync the Preview / Stop Preview button to backend preview state +
+// source kind. Called from render() on every state poll so the label
+// stays accurate even when something changes preview state out of
+// band (e.g. starting a stream tears the preview down server-side).
+function updatePreviewButton(snap) {
+  if (!els.previewBtn) return;
+  const isActive = snap.preview && snap.preview.active;
+  const supported = snap.source_id === 'ndi' && !!snap.ndi_source_name;
+  const isStreaming = snap.stats && (snap.stats.status === 'Streaming' || snap.stats.status === 'Connecting');
+
+  if (isActive) {
+    els.previewBtn.textContent = '◼ Stop Preview';
+    els.previewBtn.classList.add('preview-active');
+    els.previewBtn.disabled = false;
+    els.previewBtn.title = '';
+  } else {
+    els.previewBtn.textContent = '▶ Preview';
+    els.previewBtn.classList.remove('preview-active');
+    els.previewBtn.disabled = !supported || isStreaming;
+    if (isStreaming) {
+      els.previewBtn.title = 'Streaming — preview pane is already showing the live encoder output.';
+    } else if (supported) {
+      els.previewBtn.title = 'Spin up a low-bandwidth NDI receiver so you can see the source before starting the stream.';
+    } else {
+      els.previewBtn.title = 'Pre-stream preview is only available for NDI sources today (FFmpeg-snapshot backend for cameras / pipes lands in a follow-up).';
+    }
+  }
 }
 
 async function startCameraPreview(deviceLabel) {
@@ -870,6 +900,8 @@ function render(snap) {
     }
   }
 
+  updatePreviewButton(snap);
+
   if (knownDevices.audio.length) {
     setOptions(els.avAudio, [
       ...(snap.source_id === 'avfoundation' ? [] : [{ value: '-1', label: '— (auto / not used)' }]),
@@ -1360,6 +1392,45 @@ function bind() {
   els.stopBtn.addEventListener('click', async () => {
     const r = await fetch('/api/stop', { method: 'POST' });
     render(await r.json());
+  });
+
+  // Preview / Stop Preview — toggles the server-side pre-stream
+  // preview backend. Only NDI sources are supported today; the
+  // updatePreviewButton() helper greys it out for other source
+  // kinds so a click can't fire there.
+  els.previewBtn.addEventListener('click', async () => {
+    els.previewBtn.disabled = true;
+    const wasActive = lastSnapshot && lastSnapshot.preview && lastSnapshot.preview.active;
+    try {
+      if (wasActive) {
+        await fetch('/api/preview/stop', { method: 'POST' });
+        // Tear down the JS poll loop too. The Rust side has already
+        // dropped the receiver + cleared latest_jpeg, so the next
+        // /api/state will report preview.active=false and
+        // updatePreviewButton flips the label back.
+        stopPreview();
+      } else {
+        const r = await fetch('/api/preview/start', { method: 'POST' });
+        const j = await r.json();
+        if (j.error) {
+          els.error.hidden = false;
+          els.error.textContent = j.error;
+        } else {
+          els.error.hidden = true;
+          // Kick off the existing JPEG poll loop so frames render
+          // as soon as the receiver delivers them.
+          const snap = lastSnapshot;
+          if (snap && snap.source_id === 'ndi' && snap.ndi_source_name) {
+            setPreviewFor({ sourceId: 'ndi', name: snap.ndi_source_name, category: 'ndi' });
+          }
+        }
+      }
+      // Refresh state so the button label flips on the same tick.
+      const r2 = await fetch('/api/state');
+      render(await r2.json());
+    } finally {
+      setTimeout(() => (els.previewBtn.disabled = false), 400);
+    }
   });
 
   // -----------------------------------------------------------------
