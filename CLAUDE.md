@@ -59,23 +59,142 @@ modules under `src-tauri/src/`. The existing JS UI in
 `bmd_emulator/static/` is reused unchanged once Phase 1 wires up
 the embedded Axum HTTP server.
 
-Phase plan:
-- **Phase 0** (✓ scaffold) — `src-tauri/`, signing config
-  (Developer ID `6M536MV7GT`), Mac DMG + Windows NSIS targets,
-  placeholder webui.
-- **Phase 1** — Port `state.py` + `xml_loader.py` + start an
-  embedded Axum HTTP server. Tauri webview navigates to
-  `http://localhost:N`, existing JS UI runs unchanged.
+Phase plan (all phases ✓ shipped 2026-04-26 on `tauri-rewrite`):
+- **Phase 0** — `src-tauri/`, signing config (Developer ID
+  `6M536MV7GT`), Mac DMG + Windows NSIS targets, placeholder webui.
+- **Phase 1** — Port `state.py` + `xml_loader.py` + embedded Axum
+  HTTP server. Webview navigates to `http://localhost:N`, existing
+  JS UI runs unchanged.
 - **Phase 2** — Port `sources.py` + `device_scanner.py`.
 - **Phase 3** — Port `streamer.py` (FFmpeg subprocess + telemetry).
 - **Phase 4** — NDI direct ingest via `grafton-ndi` (headline).
 - **Phase 5** — Port `protocol.py` (BMD TCP on 9977).
-- **Phase 6** — Multi-instance support.
-- **Phase 7** — Native preview frame injection.
-- **Phase 8** — UI/UX bundle (six user-requested tweaks listed
-  below).
+- **Phase 6** — Multi-instance support (`--instance-name` +
+  per-instance state dir).
+- **Phase 7** — Native NDI preview (/api/preview JPEG @ 2 Hz).
+- **Phase 8** — UI/UX bundle (hero copy, address helper,
+  dup-service-name fix, quality chooser promotion, bottom-of-page
+  user guide, RTMP/SRT receive mini-wizard).
 - **Phase 9** — CI rewrite (`cargo-tauri` matrix replacing
   PyInstaller).
+
+### Bug-fix bundle (commit `45519ef`, 2026-04-26)
+
+Caught during dev-loop testing right after Phase 8b shipped. End-
+to-end verified streaming a test pattern through to a real ATEM
+destination at 6.5 Mbps with live stats updates.
+
+- **FFmpeg progress parser was blocked on `\n`.** FFmpeg's
+  `frame=… fps=… bitrate=…` progress lines are separated by
+  carriage returns, not newlines. tokio's `BufReader::lines()`
+  splits only on `\n`, so the read loop blocked on the first
+  progress chunk forever and the stats panel never updated.
+  Replaced with a byte-stream `read()` loop that splits on
+  either `\r` or `\n`. Stats now tick live.
+- **Always-on filter chain (vs v0.1.0 plain mapping).** Phase 3
+  wrapped every input in a `scale+pad+format` filter "to be
+  safe." Broke SRT against destinations where v0.1.0's plain
+  `-map 0:v:0 -map 1:a:0` worked. Removed; overlays will
+  conditionally re-add.
+- **URL parameter order matched v0.1.0.** v0.1.0 builds
+  `?mode=&latency=&streamid=` in insertion order; v0.2.0 was
+  BTreeMap-sorted (`?latency=&mode=&streamid=`). Switched to
+  Vec for byte-identical query strings.
+- **Status flipped to Streaming too early.** The "stream
+  mapping" log trigger fired before the SRT handshake, so
+  failed connections briefly showed Streaming with zero
+  bitrate. Removed; only `connection established` + first
+  progress tick mark Streaming now.
+- **Missing error tags.** Added `input/output error`,
+  `error opening output`, `could not write header`, `broken
+  pipe`, `connection reset`, `no such file or directory` to
+  the heuristic error-tag list so the UI flips to Interrupted
+  immediately on these failures.
+- **Settings DTO missing fields.** Audio dropdown wouldn't
+  change the source. The Audio change handler POSTed
+  `av_audio_index` + `av_audio_name`; same for `av_video_*`,
+  `pipe_path`, `label`, nested `relay`/`overlay`. None existed
+  in `SettingsUpdate`/`SettingsPayload`, so they were silently
+  dropped. Added all of them and wired through `apply_settings`.
+- **XML load response shape mismatch.** `/api/load_xml_text`
+  returned the snapshot directly; JS expected `{service,
+  snapshot}`. So the chip showed "Loaded service: undefined"
+  and the page didn't refresh. Backend wraps response now;
+  load implicitly clears existing services first (default
+  `replace=true` for UI loads, `false` for boot).
+- **`/api/services/clear` endpoint.** Clear XML button now
+  hits this endpoint to wipe services + custom_url instead of
+  just zeroing custom_url. UI hides the loaded-XML chip.
+- **Default quality matrix when no XML loaded.** Hardcoded
+  BMD-spec High/Medium/Low at 1080p30/60 and 720p30/60. Lets
+  the user stream against a manually-entered destination
+  without first dropping an XML, with the quality chooser
+  populated.
+- **Newest-XML-wins boot order.** `config/*.xml` are loaded in
+  mtime order (newest first) so first-load-wins activates the
+  most recently dropped XML. Drop a fresh XML in `config/` and
+  it becomes the boot-time active service.
+- **Clean exit prevents FFmpeg orphans.** Cmd-Q used to leave
+  FFmpeg running because `Drop` never fired on the Arc-held
+  Streamer (held forever by Axum's serve task). Now hooks
+  `RunEvent::Exit/ExitRequested` and synchronously calls
+  `streamer.stop()` before parent exit. Belt-and-suspenders:
+  spawn FFmpeg in its own process group via `setpgid` pre_exec,
+  then `killpg(SIGTERM)` then `SIGKILL` so an abrupt parent
+  crash can't leave the group running.
+
+### Open issues after bug-fix bundle (next session)
+
+- **NDI sources aren't working** — user-reported. Discovery via
+  `grafton-ndi` returns 0 senders even when NDICAM should be
+  visible (Phase 4 spike previously found it in 4 sec). Possibly
+  `grafton-ndi` macOS support being "experimental with limited
+  testing" biting us, or our discovery wait-time too short, or
+  some thread/runtime issue. Reproduce: launch dev, click an NDI
+  tile, expect frames; observe nothing.
+- **NDI dylib bundling NOT in the .app yet.** `cargo tauri build`
+  produces a Hardened-runtime .app that crashes on launch with
+  `Library not loaded: @rpath/libndi.dylib`. Hardened runtime
+  disables dyld fallback library paths so the system
+  `/usr/local/lib/libndi.dylib` isn't found. Fix: copy
+  libndi.dylib into `Contents/Frameworks/` via
+  `bundle.macOS.frameworks` config + `install_name_tool` post-
+  build to add an `@executable_path/../Frameworks` rpath. Until
+  this lands, **standalone .app testing is broken — use
+  `cargo tauri dev` instead**.
+- **Mac signing in CI requires four `MACOS_*` secrets.** Currently
+  unset, so `release.yml` strips `bundle.macOS.signingIdentity`
+  from `tauri.conf.json` and ships unsigned. Steps to enable in
+  the next session: user exports the cert via Keychain Access
+  GUI, then I run `gh secret set` for the four secrets.
+- **Notarization deferred.** Once signing works in CI, add
+  `xcrun notarytool submit … --wait` + `xcrun stapler staple`
+  to release.yml so end users don't see Gatekeeper at all.
+- **Receiver-state lockout after SIGKILL.** Killing the Tauri
+  parent abruptly leaves a per-key SRT session at the receiver
+  for ~30s-2min, during which new connections with the same key
+  fail with generic `Input/output error`. The clean-exit handler
+  fixes the common case (Cmd-Q); only force-quit / crash hits
+  this. Document if it bites again.
+
+### v0.2.0 release attempt — `tauri-rewrite` tags
+
+Three release attempts so far, none successful — production
+binaries not yet published.
+
+- `v0.2.0-alpha.1` (commit `16baa5d`): NDI SDK headers missing
+  on both Mac + Win runners.
+- `v0.2.0-alpha.2` (commit `b3f5e9c`): added NDI SDK install
+  steps (downloads.ndi.tv .pkg / .exe). Mac NDI install worked
+  but codesign failed because `tauri.conf.json` hardcodes
+  `signingIdentity` and the runner's keychain doesn't have the
+  cert.
+- `v0.2.0-alpha.3` (commit `2bb061a`): release.yml strips
+  `signingIdentity` when no `MACOS_CERTIFICATE_P12` secret is
+  set, so unsigned builds work. Status pending. Even if those
+  binaries publish, **they'll crash on launch on end-user
+  machines because of the NDI dylib bundling issue above** —
+  any further v0.2.0-alpha tag should wait until that's fixed.
 
 ### v0.2.0 UI / UX scope (queued)
 
