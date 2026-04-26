@@ -11,7 +11,7 @@
 //! (probe(), parse_tshark_line()) without disturbing them.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -118,18 +118,15 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         ..Default::default()
     }));
 
-    if !cli.url.starts_with("monitor://") {
-        let probe_state = state.clone();
-        let probe_cli = ProbeThreadConfig {
-            url: cli.url.clone(),
-            keys: cli.keys.clone(),
-            interval: cli.interval,
-        };
-        std::thread::Builder::new()
-            .name("probe-loop".into())
-            .spawn(move || probe_loop(probe_cli, probe_state))
-            .expect("spawn probe loop");
-    }
+    // Always start the probe loop in UI mode. Even if the user
+    // launched with no key (or url is "monitor://"), they may set
+    // one through the dashboard's config form, and we want the loop
+    // ready to pick up that change without a process restart.
+    let probe_state = state.clone();
+    std::thread::Builder::new()
+        .name("probe-loop".into())
+        .spawn(move || probe_loop(probe_state))
+        .expect("spawn probe loop");
 
     if let Some(iface) = cli.monitor_iface.clone() {
         let mon_state = state.clone();
@@ -162,20 +159,41 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .stderr(Stdio::null())
         .spawn();
 
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
         let url = request.url().to_string();
-        let response = match url.as_str() {
-            "/" | "/index.html" => {
+        let method = request.method().clone();
+        let is_post = matches!(method, tiny_http::Method::Post);
+        let response = match (is_post, url.as_str()) {
+            (false, "/") | (false, "/index.html") => {
                 let mut r = Response::from_string(INDEX_HTML);
                 r.add_header(html_header());
                 r
             }
-            "/api/state" => {
+            (false, "/api/state") => {
                 let body = build_state_json(&state);
                 let mut r = Response::from_string(body);
                 r.add_header(json_header());
                 r.add_header(no_cache_header());
                 r
+            }
+            (true, "/api/config") => {
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_err() {
+                    Response::from_string(r#"{"error":"failed to read body"}"#)
+                        .with_status_code(400)
+                } else {
+                    let result = apply_config_update(&state, &body);
+                    let mut r = Response::from_string(match &result {
+                        Ok(()) => r#"{"ok":true}"#.to_string(),
+                        Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
+                    });
+                    r.add_header(json_header());
+                    r.add_header(no_cache_header());
+                    if result.is_err() {
+                        r = r.with_status_code(400);
+                    }
+                    r
+                }
             }
             _ => Response::from_string("404").with_status_code(404),
         };
@@ -260,26 +278,110 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
 
-struct ProbeThreadConfig {
-    url: String,
-    keys: Vec<String>,
-    interval: Duration,
-}
-
-fn probe_loop(cli: ProbeThreadConfig, state: Arc<Mutex<DashboardState>>) {
+fn probe_loop(state: Arc<Mutex<DashboardState>>) {
     state.lock().unwrap().probe_thread_alive = true;
     loop {
-        if cli.keys.is_empty() {
-            do_one_probe(&cli.url, "", &state);
+        // Snapshot the config under the lock so we don't hold it
+        // through the FFmpeg shell-out (multi-second blocking call).
+        let (url, keys, interval) = {
+            let s = state.lock().unwrap();
+            (
+                s.config.url.clone(),
+                s.config.keys.clone(),
+                Duration::from_secs(s.config.interval_secs.max(1)),
+            )
+        };
+        // No URL configured yet (UI mode launched bare) — skip this
+        // cycle and try again. The dashboard's config form sets the
+        // URL when the user submits it.
+        if url.is_empty() || url == "monitor://" {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+        if keys.is_empty() {
+            do_one_probe(&url, "", &state);
         } else {
-            for key in &cli.keys {
-                if let Ok(url) = build_bmd_srt_url(&cli.url, key) {
-                    do_one_probe(&url, key, &state);
+            for key in &keys {
+                if let Ok(probe_url_built) = build_bmd_srt_url(&url, key) {
+                    do_one_probe(&probe_url_built, key, &state);
                 }
             }
         }
-        std::thread::sleep(cli.interval);
+        std::thread::sleep(interval);
     }
+}
+
+/// Parse a JSON config update from the dashboard form and apply it
+/// to the shared state. Per-key Stats / probe history are reset
+/// when the URL or keys change so the dashboard's success-rate /
+/// latency numbers reflect only the new configuration. If the user
+/// just tweaks the interval, history is preserved.
+fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("invalid JSON: {e}"))?;
+    let url = parsed
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let keys: Vec<String> = parsed
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let interval = parsed
+        .get("interval_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if !url.is_empty()
+        && !(url.starts_with("srt://")
+            || url.starts_with("rtmp://")
+            || url.starts_with("rtmps://"))
+    {
+        return Err(format!(
+            "URL must start with srt://, rtmp://, or rtmps:// (got {url:?})"
+        ));
+    }
+    let mut s = state.lock().unwrap();
+    let cfg_changed = s.config.url != url || s.config.keys != keys;
+    s.config.url = url;
+    s.config.keys = keys;
+    if interval > 0 {
+        s.config.interval_secs = interval;
+    }
+    if cfg_changed {
+        // Reset per-key stats + probe history when the target /
+        // keys change. Otherwise the dashboard mixes data from
+        // different probe targets into the same cards.
+        s.per_key.clear();
+        s.probes.clear();
+        s.last_probe_at = 0;
+    }
+    Ok(())
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn do_one_probe(url: &str, key: &str, state: &Arc<Mutex<DashboardState>>) {

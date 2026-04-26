@@ -671,7 +671,14 @@ pub(crate) fn build_bmd_srt_url(base: &str, key: &str) -> Result<String, String>
     if !host_port.starts_with("srt://") {
         return Err(format!("--key requires an srt:// base URL, got {base:?}"));
     }
-    let bmd_uuid = "00000000-0000-0000-0000-617465616d646";
+    // Valid UUID v4 format (8-4-4-4-12 hex chars). The previous
+    // hand-crafted value had 13 chars in the last group — malformed
+    // UUIDs make the BMD receiver fail handshake validation, so
+    // probes reported REJECTED even when the receiver was healthy.
+    // This UUID is fixed per-process; bmd_uuid is just an opaque
+    // identifier the receiver echoes back, so a deterministic value
+    // is fine and makes log correlation easier.
+    let bmd_uuid = "d1a90517-1c00-4e57-9fab-617465616d64";
     let bmd_name = "ATEM-net-diag";
     let streamid = format!("#!::bmd_uuid={bmd_uuid},bmd_name={bmd_name},u={key}");
     let encoded = url_encode(&streamid);

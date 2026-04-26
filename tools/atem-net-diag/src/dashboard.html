@@ -82,6 +82,33 @@
     .badge.timeout { background: rgba(243,196,75,0.18); color: var(--warn); }
     .badge.idle { background: rgba(154,161,173,0.18); color: var(--muted); }
 
+    .config-form {
+      display: grid; grid-template-columns: 2fr 1fr 2fr 1fr auto; gap: 8px; align-items: end;
+    }
+    .config-form label {
+      display: flex; flex-direction: column; gap: 4px;
+      font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); font-weight: 700;
+    }
+    .config-form input {
+      padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--line);
+      border-radius: 6px; color: var(--text); font-size: 13px; font-family: inherit;
+      letter-spacing: normal; text-transform: none; font-weight: 400;
+    }
+    .config-form input:focus { outline: none; border-color: var(--signal); box-shadow: 0 0 0 2px rgba(78,167,255,0.2); }
+    .config-form button {
+      padding: 8px 16px; background: linear-gradient(180deg, var(--signal) 0%, #3a8be0 100%);
+      border: 1px solid #3a8be0; border-radius: 6px; color: #fff; font-weight: 700;
+      font-size: 13px; cursor: pointer; height: 33px;
+    }
+    .config-form button:hover { filter: brightness(1.08); }
+    .config-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .config-status {
+      margin-top: 8px; font-size: 11.5px; color: var(--muted); min-height: 14px;
+    }
+    .config-status.error { color: var(--bad); }
+    .config-status.ok { color: var(--good); }
+    @media (max-width: 800px) { .config-form { grid-template-columns: 1fr; } }
+
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { text-align: left; padding: 6px 8px; }
     th {
@@ -123,6 +150,26 @@
   </header>
 
   <main>
+    <section class="card full">
+      <h2>Configure probe target</h2>
+      <form class="config-form" id="config-form" autocomplete="off">
+        <label>Host / IP
+          <input id="cfg-host" type="text" placeholder="192.168.1.50" />
+        </label>
+        <label>Port
+          <input id="cfg-port" type="number" min="1" max="65535" placeholder="1935" value="1935" />
+        </label>
+        <label>Stream key
+          <input id="cfg-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" />
+        </label>
+        <label>Interval (s)
+          <input id="cfg-interval" type="number" min="1" max="600" placeholder="5" value="5" />
+        </label>
+        <button id="cfg-apply" type="submit">Apply</button>
+      </form>
+      <div class="config-status" id="config-status"></div>
+    </section>
+
     <section class="card">
       <h2>Active probes <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="probes-summary"></span></h2>
       <div class="keys" id="keys"></div>
@@ -323,12 +370,88 @@
       }
     }
 
+    // Config form: pre-fills from current state, posts updates to
+    // /api/config. The probe loop in the Rust side picks up the new
+    // url/keys/interval on its next iteration, no restart needed.
+    let lastSyncedUrl = null;
+    let lastSyncedKeys = null;
+    let lastSyncedInterval = null;
+    function maybePopulateConfigForm(snap) {
+      const cfg = snap.config || {};
+      // Only populate fields the user isn't actively editing — and
+      // only when the backend's value changes (otherwise we'd
+      // clobber the user's typing every poll).
+      if (cfg.url !== lastSyncedUrl) {
+        lastSyncedUrl = cfg.url;
+        const m = (cfg.url || '').match(/^srt:\/\/([^:?\/]+)(?::(\d+))?/);
+        if (m) {
+          if (document.activeElement !== document.getElementById('cfg-host')) {
+            document.getElementById('cfg-host').value = m[1];
+          }
+          if (document.activeElement !== document.getElementById('cfg-port')) {
+            document.getElementById('cfg-port').value = m[2] || 1935;
+          }
+        }
+      }
+      if (JSON.stringify(cfg.keys || []) !== JSON.stringify(lastSyncedKeys)) {
+        lastSyncedKeys = (cfg.keys || []).slice();
+        if (document.activeElement !== document.getElementById('cfg-key')) {
+          document.getElementById('cfg-key').value = (cfg.keys || []).join(', ');
+        }
+      }
+      if (cfg.interval_secs !== lastSyncedInterval) {
+        lastSyncedInterval = cfg.interval_secs;
+        if (document.activeElement !== document.getElementById('cfg-interval')) {
+          document.getElementById('cfg-interval').value = cfg.interval_secs || 5;
+        }
+      }
+    }
+
+    document.getElementById('config-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const status = document.getElementById('config-status');
+      const btn = document.getElementById('cfg-apply');
+      const host = document.getElementById('cfg-host').value.trim();
+      const port = parseInt(document.getElementById('cfg-port').value, 10) || 1935;
+      const keyRaw = document.getElementById('cfg-key').value.trim();
+      const keys = keyRaw ? keyRaw.split(/[,\s]+/).filter(Boolean) : [];
+      const interval = parseInt(document.getElementById('cfg-interval').value, 10) || 5;
+      if (!host) {
+        status.className = 'config-status error';
+        status.textContent = 'Host is required.';
+        return;
+      }
+      const url = `srt://${host}:${port}`;
+      const body = JSON.stringify({ url, keys, interval_secs: interval });
+      btn.disabled = true;
+      status.className = 'config-status';
+      status.textContent = 'Applying…';
+      try {
+        const r = await fetch('/api/config', { method: 'POST', body, headers: { 'content-type': 'application/json' } });
+        const j = await r.json();
+        if (j.error) {
+          status.className = 'config-status error';
+          status.textContent = j.error;
+        } else {
+          status.className = 'config-status ok';
+          status.textContent = `Probing ${url} with ${keys.length} key${keys.length === 1 ? '' : 's'} every ${interval}s.`;
+          tick();  // refresh the dashboard immediately
+        }
+      } catch (err) {
+        status.className = 'config-status error';
+        status.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     async function tick() {
       try {
         const r = await fetch('/api/state', { cache: 'no-cache' });
         if (!r.ok) return;
         const s = await r.json();
         renderState(s);
+        maybePopulateConfigForm(s);
       } catch (e) {
         console.error('tick:', e);
       }
