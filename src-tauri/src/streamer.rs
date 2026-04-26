@@ -43,6 +43,13 @@ pub struct StreamPlan {
     pub protocol: String,
     pub source: Source,
     pub video_codec: String,
+    /// Optional `-vf` filter expression applied to the mapped video
+    /// stream just before the encoder. Set by source-specific builders
+    /// when the input dimensions don't match the configured video_mode
+    /// (e.g. NDI from a 720p iPhone fed into a 1080p ATEM target).
+    /// Left None for native-resolution paths to preserve the v0.1.0
+    /// plain-mapping behavior the bug-fix bundle restored.
+    pub video_filter: Option<String>,
 }
 
 impl StreamPlan {
@@ -321,6 +328,7 @@ impl Streamer {
             protocol,
             source,
             video_codec: snap.video_codec.to_lowercase(),
+            video_filter: None,
         })
     }
 
@@ -345,6 +353,26 @@ impl Streamer {
         let mut adjusted = plan.clone();
         adjusted.source.ffmpeg_input_args = input_args.split_off(0);
         adjusted.source.combined_av = false; // separate inputs (pipe + lavfi)
+
+        // Scale to the configured video_mode when the NDI source's
+        // native resolution doesn't match. ATEM hardware decoders only
+        // accept the resolutions they advertise (a 720p NDI stream
+        // sent unchanged into a 1080p ATEM input slot connects but
+        // never displays). Lanczos for the upscale path; FFmpeg's
+        // default bicubic is fine for downscale but lanczos is barely
+        // costlier and avoids a moiré pattern on text. Frame-rate
+        // mismatches are absorbed by the encoder's `-r` setting later
+        // — no fps filter needed unless we ever see source/target rate
+        // ratios that aren't clean integer multiples in practice.
+        if fmt.width != plan.width || fmt.height != plan.height {
+            let filter = format!("scale={}:{}:flags=lanczos", plan.width, plan.height);
+            log::info!(
+                "NDI scale required: {}x{} -> {}x{} via filter {filter:?}",
+                fmt.width, fmt.height, plan.width, plan.height,
+            );
+            adjusted.video_filter = Some(filter);
+        }
+
         self.build_ffmpeg_cmd(&adjusted)
     }
 
@@ -364,20 +392,26 @@ impl Streamer {
             ("0:v:0", "1:a:0")
         };
 
-        // Plain stream mapping with no filter chain — matches v0.1.0
-        // exactly. The Phase 3 commit always wrapped the input in a
-        // scale+pad+format filter "to be safe", but that turned out
+        // Plain stream mapping with no filter chain unless a source
+        // builder explicitly populated `plan.video_filter` (NDI does
+        // this when its native resolution differs from the configured
+        // video_mode). The Phase 3 commit always wrapped the input in
+        // a scale+pad+format filter "to be safe", but that turned out
         // to break SRT against destinations where v0.1.0's plain map
-        // worked. Overlays (drawtext / logo) used to add a filter
-        // chain conditionally; they come back in a later Phase 8
-        // commit when the overlay UI is reworked, gated by an
-        // "are there any overlays" check just like v0.1.0 had.
+        // worked — so the default stays plain. Overlays (drawtext /
+        // logo) come back in a later Phase 8 commit when the overlay
+        // UI is reworked, gated by an "are there any overlays" check
+        // and concatenated into the same filter expression.
         cmd.extend([
             "-map".into(),
             v_in.into(),
             "-map".into(),
             a_in.into(),
         ]);
+        if let Some(filter) = plan.video_filter.as_deref() {
+            cmd.push("-vf".into());
+            cmd.push(filter.into());
+        }
 
         // Video encoder — Main profile, no B-frames, fixed GOP. H.264
         // for broad compatibility, H.265 for Streaming Bridge native
