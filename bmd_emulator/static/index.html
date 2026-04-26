@@ -34,11 +34,6 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
-      <div class="kill-orphans-wrap">
-        <button id="kill-orphans" type="button" class="refresh-btn"
-                aria-label="Kill orphan FFmpeg streams">✖ Kill orphans<span class="kill-orphans-asterisk" aria-hidden="true">*</span></button>
-        <span class="kill-orphans-hint"><span class="kill-orphans-asterisk" aria-hidden="true">*</span>use if Stop didn't work after a crash / force-quit / dev restart</span>
-      </div>
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
@@ -191,6 +186,41 @@
         <input id="ov-clock" type="checkbox" />
         <span>Show clock (HH:MM:SS, bottom-left)</span>
       </label>
+    </section>
+
+    <!-- ---------- RECOVERY (left column, under Overlays) ----- -->
+    <section class="card recovery-card">
+      <div class="card-title"><span>Recovery</span></div>
+      <p class="recovery-lead">
+        If the <strong>Stop</strong> button isn't ending a stream, the
+        FFmpeg subprocess that's actually pushing the bytes has been
+        orphaned — the parent app crashed, was force-quit, or got
+        rebuilt during development, and the FFmpeg child kept running
+        in its own process group. The stream keeps going to your ATEM
+        until you kill the orphan or until the OS reaps it (which
+        could be a long time).
+      </p>
+      <p class="recovery-lead">
+        This button finds and kills any leftover FFmpeg streams
+        spawned by this app (matched by the BMD-flavored
+        <code>streamid=</code> pattern in the FFmpeg cmdline, so
+        unrelated FFmpeg jobs you have running stay untouched). It
+        sends <code>SIGTERM</code> first so the encoder flushes its
+        buffer + closes the SRT/RTMP connection cleanly, then
+        <code>SIGKILL</code> after a short settle for anything that
+        ignored the polite ask.
+      </p>
+      <button id="kill-orphans" type="button" class="primary big recovery-btn"
+              aria-label="Kill orphan FFmpeg streams">
+        ✖ Kill orphan streams
+      </button>
+      <p class="recovery-foot">
+        Safe to run anytime — won't touch unrelated FFmpeg jobs.
+        After clicking, your ATEM may still hold the receiver slot
+        for ~30s-2min before accepting a new connection on the same
+        stream key (this is a separate ATEM-side lockout, not
+        something the app can short-circuit).
+      </p>
     </section>
 
     </div><!-- /.config-stack (left) -->
