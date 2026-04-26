@@ -245,14 +245,29 @@ impl Streamer {
                  kill -TERM -{ff_pid} 2>/dev/null; sleep 1; \
                  kill -KILL -{ff_pid} 2>/dev/null"
             );
-            match std::process::Command::new("/bin/bash")
+            let mut watchdog = std::process::Command::new("/bin/bash");
+            watchdog
                 .arg("-c")
                 .arg(&cmd)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
+                .stderr(std::process::Stdio::null());
+            // setsid makes the watchdog a session leader in its own
+            // process group, so a group-targeted SIGKILL on us
+            // doesn't take it down. Without this, if cargo-tauri-dev
+            // ever decides to kill our process group instead of our
+            // PID alone, the watchdog dies before it can do its job
+            // and we're back to orphan-FFmpeg territory.
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                watchdog.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            match watchdog.spawn() {
                 Ok(_) => log::info!(
                     "FFmpeg watchdog armed: parent={parent_pid} -> ffmpeg pgid={ff_pid}"
                 ),
