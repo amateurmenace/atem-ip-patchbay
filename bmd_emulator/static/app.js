@@ -301,6 +301,11 @@ function stopPreview() {
   els.previewMessage.style.display = '';
   els.previewBars.hidden = false;
   els.previewMessage.hidden = true;
+  // Reset the dedup key so any future call to startNdiPreview /
+  // startCameraPreview / etc. for the SAME source actually re-runs
+  // (otherwise the early-return on previewKey-match leaves us
+  // permanently stuck after stopPreview).
+  previewKey = '';
 }
 
 function showPreviewMessage(html) {
@@ -572,8 +577,10 @@ function startNdiPreview(senderName) {
       if (wasFirstFrame) {
         console.log(`[ndi-preview] first JPEG displayed: ${blob.size} bytes`);
       }
-    } catch (_e) {
-      // Network blip — try again on the next tick.
+    } catch (e) {
+      // Was a silent catch — one of these threw and we never knew:
+      // fetch, .blob(), URL.createObjectURL, or DOM mutation.
+      console.error('[ndi-preview] tick threw:', e);
     }
   };
   // Kick off immediately + then every 500ms (~2 Hz). The Rust
