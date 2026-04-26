@@ -1178,6 +1178,16 @@ function bind() {
   // Start / stop
   els.startBtn.addEventListener('click', async () => {
     els.startBtn.disabled = true;
+    // Release the browser's getUserMedia hold on the camera before
+    // FFmpeg tries to open it. Some virtual cameras (NDI Virtual
+    // Camera in particular) serialize frame delivery to one consumer
+    // — when both the browser preview and FFmpeg try to read at the
+    // same time, only the browser gets frames and FFmpeg sits at
+    // frame=0 forever despite reporting a successful AVF open. The
+    // tradeoff: live preview disappears the moment streaming starts.
+    // Acceptable since the Monitor card switches to telemetry once
+    // the stream is up anyway.
+    stopPreview();
     try {
       const r = await fetch('/api/start', { method: 'POST' });
       const j = await r.json();
