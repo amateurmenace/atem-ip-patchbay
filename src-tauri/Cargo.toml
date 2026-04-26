@@ -1,6 +1,6 @@
 [package]
 name = "atem-ip-patchbay"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 description = "Push any video source into Blackmagic ATEM gear over BMD-flavored SRT"
 authors = ["Stephen Walter <stephen@weirdmachine.org>"]
 license = "MIT"

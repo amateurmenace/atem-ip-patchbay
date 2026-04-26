@@ -81,6 +81,35 @@ jobs:
           sudo installer -pkg /tmp/ndi-sdk.pkg -target /
           ls -la "/Library/NDI SDK for Apple/include" | head -3
 
+      - name: Stage libndi.dylib at /usr/local/lib for bundle.macOS.frameworks
+        run: |
+          # bundle.macOS.frameworks in tauri.conf.json points at
+          # /usr/local/lib/libndi.dylib (the standard NDI Tools install
+          # location end users have). CI runners don't have NDI Tools
+          # installed — we install the SDK above which puts the dylib
+          # under /Library/NDI SDK for Apple/lib/macOS/. Copy it to
+          # /usr/local/lib/ so the bundler's framework-copy step can
+          # find it. Whichever filename the SDK ships (libndi.dylib,
+          # libndi_for_macOS.dylib, etc.) gets normalized to libndi.dylib
+          # at /usr/local/lib/.
+          SDK_LIB="/Library/NDI SDK for Apple/lib/macOS"
+          echo "SDK lib directory contents:"
+          ls -la "$SDK_LIB/" || true
+          DYLIB=$(ls "$SDK_LIB/"libndi*.dylib 2>/dev/null | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: no libndi*.dylib found in $SDK_LIB/" >&2
+            exit 1
+          fi
+          sudo mkdir -p /usr/local/lib
+          sudo cp -v "$DYLIB" /usr/local/lib/libndi.dylib
+          # Pin install_name so binaries linking against this dylib
+          # get @rpath/libndi.dylib in their load commands — matches
+          # the NDI Tools shipped install_name and what the bundled
+          # .app expects via its LC_RPATH (added in build.rs).
+          sudo install_name_tool -id "@rpath/libndi.dylib" /usr/local/lib/libndi.dylib
+          ls -lh /usr/local/lib/libndi*
+          otool -D /usr/local/lib/libndi.dylib
+
       - name: Download FFmpeg sidecar (Jellyfin GPL build, arm64)
         run: |
           # Bundle FFmpeg into the .app so end users without Homebrew
