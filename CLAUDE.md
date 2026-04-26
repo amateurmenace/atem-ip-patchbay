@@ -1,0 +1,281 @@
+# ATEM IP Patchbay — CLAUDE.md
+
+> Internal-only doc that primes Claude Code with everything needed to
+> continue the build. The README is the user-facing version; this file
+> is the working state — what's broken, what's been tried, what's next.
+
+## What this is
+
+Cross-platform proof-of-concept that pushes any video source into
+Blackmagic ATEM gear (Mini Extreme G2, Television Studio, Streaming
+Decoder) over the BMD-flavored SRT handshake. macOS arm64 (`.dmg`) +
+Windows x64 (`Setup.exe`). MIT licensed.
+
+Repo: <https://github.com/amateurmenace/atem-ip-patchbay>
+
+The pitch: NDI / SDI / HDMI / non-Blackmagic SRT / RTMP all converted
+into ATEM-acceptable SRT. Made possible by a differential analysis of
+an iPhone Blackmagic Camera pcap vs. a Web Presenter pcap, which proved
+the BMOS extension is optional and standard libsrt + HEVC + MPEG-TS +
+the right `streamid` format works.
+
+## Run / build commands
+
+```sh
+# Dev server — loads ./config/*.xml, opens browser to localhost:8090
+python3 run.py
+
+# Mac build (.app + signed .dmg, ~3-5 min)
+python3 build/build.py
+# Output: build/dist/ATEM IP Patchbay.app + ATEM-IP-Patchbay-0.1.0-arm64.dmg
+
+# Windows build (run on Windows; macOS will refuse)
+python build\build.py
+
+# CI smoke (mirrors the GH Actions ci.yml check)
+python3 -m py_compile bmd_emulator/*.py run.py probe.py
+```
+
+The dev server's HTTP port is 8090 by default and walks forward to
+8091..8099 if taken (commit `607271d`). The BMD control protocol port
+is 9977 with the same walk behavior.
+
+**Important**: Dev server should be launched from the user's OWN
+Terminal — not via the Bash tool. Camera permission attaches to the
+launching process; a Bash-spawned `python3` inherits Claude Code's
+permission (often missing), so AVF capture hangs silently.
+
+## Architecture cheat-sheet
+
+```
+run.py                          # entry point — loads XMLs, starts protocol + HTTP servers
+config/                         # streaming-service XMLs (real ones gitignored)
+  example.xml                   #   tracked, placeholder host/key
+  1935 Test.xml                 #   gitignored, real ATEM key (n1sn-...)
+  Web Presenter 1.xml           #   gitignored, real ATEM key (j4fh-...)
+bmd_emulator/
+  state.py                      # EncoderState data model + snapshot dict
+  web.py                        # HTTP control panel + JSON API
+  static/                       # UI (single-page vanilla HTML/CSS/JS)
+    index.html                  #   Destination wizard at top of right column
+    app.js                      #   Wizard wiring, segmented controls, NDI hint
+    style.css                   #   Segmented controls, format-warning, port-fwd help
+  sources.py                    # avfoundation / dshow / gdigrab / pipe / srt_listen / rtmp_listen
+  device_scanner.py             # AVF + DirectShow scan + AVF mode probe
+  streamer.py                   # FFmpeg subprocess + telemetry monitor
+  streamid.py                   # BMD streamid: bmd_uuid=...,bmd_name=...,u=KEY
+  ffmpeg_path.py                # bundled-sidecar > PATH resolver (sys._MEIPASS)
+  protocol.py                   # TCP 9977 BMD control protocol server
+  discover.py                   # mDNS for _ndi._tcp.local.
+  paste_parser.py               # parses any-shape destination input
+  netinfo.py                    # LAN IP detection for relay-publish URL
+build/
+  build.py                      # Make-style orchestrator (Mac OR Windows path)
+  macos.spec / windows.spec     # PyInstaller specs
+  installer.iss                 # Inno Setup script
+  .cache/ .venv/ .work/ dist/   # all gitignored
+.github/workflows/
+  ci.yml                        # py_compile + HTTP smoke on PR / push to main
+  release.yml                   # tag-driven matrix build + GH release
+```
+
+## Conventions
+
+- **Commit messages**: detailed, "why" not "what". User likes the style
+  of recent commits (e.g. `b29b9f6`, `390594a`). Co-author tag at
+  bottom: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+- **License**: MIT. The packaged FFmpeg sidecar (Jellyfin GPL on Mac,
+  BtbN GPL on Windows) is distributed under GPL with attribution in the
+  README — separate executables, "aggregate" relationship.
+- **No autopush**: confirm with the user before `git push` unless
+  explicitly told to.
+- **No emoji** in code or text output unless the user asks. ASCII glyphs
+  preferred for cross-platform output (Windows cp1252 console can't
+  encode many unicode characters).
+- **No new files unless asked**. Especially no docs / READMEs.
+- **No tests** yet — CI just compile-checks + smoke-tests the HTTP server.
+- **Branch strategy**: solo dev, everything goes on `main`.
+
+## Real keys live where (DO NOT COMMIT)
+
+`config/1935 Test.xml` and `config/Web Presenter 1.xml` are gitignored
+and contain real ATEM stream keys. NEVER commit them. NEVER include
+their contents (especially key strings) in commit messages or anywhere
+the LLM might write to a tracked file. The `.gitignore` allowlist is
+configured so only `config/example.xml` is tracked.
+
+## Code-signing
+
+Mac builds are signed with `Developer ID Application: Stephen Walter
+(6M536MV7GT)` — the build script auto-detects the identity from
+keychain via `security find-identity -v -p codesigning`. Override with
+`SIGN_IDENTITY=...` env var.
+
+**Notarization is deferred** for the alpha. To enable later: run
+`xcrun notarytool store-credentials` once, then add `xcrun notarytool
+submit ... --wait` + `xcrun stapler staple` steps to `build.py` after
+the create-dmg step.
+
+Windows builds are unsigned (alpha doesn't have an EV cert).
+SmartScreen prompts users with "More info → Run anyway" — recoverable.
+
+## Currently-open issues
+
+### 1. NDI Virtual Camera doesn't deliver frames
+
+Symptom: clicking the NDI Virtual Camera tile (or the bridge button
+after clicking NDICAM) and hitting Start Stream → FFmpeg opens the
+AVF device but no frames flow. Stream stays at "Connecting", bitrate
+0 indefinitely.
+
+What's confirmed:
+- Device IS in the AVF enumeration (`/api/devices` lists it correctly)
+- The mode probe returns supported modes (`1920x1080@[60.0 60.0]fps`)
+- Source factory builds the right command:
+  `-f avfoundation -framerate 60 -video_size 1920x1080 -pixel_format uyvy422 -i 'NDI Virtual Camera:NDI Audio'`
+- FFmpeg accepts the command and starts running — it just blocks on
+  the first frame read forever
+
+Most likely causes (priority order):
+
+1. **NDI Virtual Input app has no source bound** — user must click its
+   menu-bar icon and select NDICAM. We can't programmatically read or
+   set this; NDI Virtual Input is sandboxed and its preferences live
+   inside `~/Library/Containers/com.newtek.Application-Mac-NDI-VirtualInput/`,
+   inaccessible without entitlements we don't have.
+2. **Camera permission for the running process**. Virtual cameras don't
+   trigger the TCC camera prompt (they bypass macOS's hardware-camera
+   gate), but frame data flow may still require permission for the
+   parent process. The `.app` has `NSCameraUsageDescription` in
+   Info.plist; the dev server inherits permission from whatever
+   Terminal launched python3.
+3. **Pixel format mismatch** at frame-receive time. Virtual cameras
+   sometimes only deliver specific formats (e.g. yuv420p, not uyvy422).
+   FFmpeg negotiates at open but might silently fail on first frame.
+
+Diagnostic next steps to try in priority order:
+- Have the user open NDI Studio Monitor and verify NDICAM is actually
+  delivering video to the local machine. If Studio Monitor sees frames,
+  NDICAM is reachable; if not, NDICAM itself is the problem.
+- Try removing `-pixel_format uyvy422` from the AVF source factory.
+  Let FFmpeg auto-negotiate the format.
+- Add `-stimeout 5000000` (5-sec read timeout) to detect the hang and
+  surface a clear "no frames received" error in the UI.
+- Try bypassing NDI Virtual Camera entirely — see "Direct NDI ingest"
+  in the v0.2.0 list below.
+
+### 2. .app's bundled XML is only the placeholder
+
+The Mac `.app` PyInstaller bundle includes `config/example.xml` (host
+`your-atem-or-streaming-bridge.example.com`), so first-launch users
+can't stream until they set the wizard's Address field. The dev server
+loads the user's real XMLs from on-disk `config/`, so dev testing has
+real destinations.
+
+Fix options:
+- Add **placeholder-URL detection** in the wizard render: if
+  `current_url` contains `example.com`, show a yellow warning ("set
+  your real ATEM address in the Address field above").
+- Have the `.app` scan `~/Library/Application Support/ATEM IP Patchbay/config/`
+  on launch for user-supplied XMLs.
+
+### 3. AVFoundation index → name fallback isn't airtight
+
+State stores both `av_video_index` and `av_video_name` (commit
+`b29b9f6`). UI sends both on tile click. Source factory uses names
+when present, indices as fallback. But if state is set without names
+— e.g. via `/api/settings` POST without `av_video_name`, or defaults
+from `run.py` at boot — it falls back to indices and the original
+"clicked the wrong device" bug returns.
+
+Fix: have `find_default_video_index` / `find_default_audio_index` in
+`device_scanner.py` ALSO populate the name fields when they pick a
+default at boot. Mirror that anywhere index is set without a name.
+
+### 4. Format-probe latency
+
+Every Start Stream re-probes the AVF device's supported modes (~1 sec).
+Could cache per-device-name with a 60-sec TTL alongside the existing
+device-list cache. Low priority.
+
+## Things DONE this session (≤ commit b29b9f6)
+
+- Mac `.app` builds + signs with Developer ID Application identity
+  (6M536MV7GT). create-dmg packaging. Notarization deferred.
+- Windows build pipeline (`build/build.py` Windows branch +
+  `windows.spec` + `installer.iss`). Verified by user on real Windows
+  hardware after fixing 3 PyInstaller bugs (utf-8 stdout, venv path,
+  PyInstaller pin for Python 3.14).
+- DirectShow scanner handles modern BtbN FFmpeg output format —
+  `[in#N @ ...]` prefix, inline `(audio, video)` / `(none)` markers.
+  Verified against user's 11-device sample.
+- Destination wizard at top of right column. Format selector with
+  yellow warning + live `1920 × 1080 @ 30 fps` decode + "how to find
+  your switcher format" expandable. Port-forwarding 101 expandable.
+- Port-walk fallback (8090→8099, 9977→9986) so a stale instance can't
+  silently brick a launch.
+- AVF device-NAME-based addressing + mode probe. NDI Virtual Camera's
+  locked 1080p60 mode is now correctly identified; FFmpeg command
+  built with the matching `-framerate 60 -video_size 1920x1080`.
+- GH Actions: `ci.yml` on PR + `release.yml` on tag push (Mac arm64 +
+  Windows x64 matrix, attaches `.dmg` / `Setup.exe` to GitHub Release
+  with auto-generated notes). CI is green on `main`.
+- NDI inline-hint UX: clicking a discovered NDI sender shows an inline
+  hint with a one-click "Use NDI Virtual Camera + NDI Audio" bridge
+  button.
+- SRT/RTMP relay sources (`srt_listen` / `rtmp_listen`) — turn the
+  patchbay into a server for OBS / Larix / iPhone to publish into.
+
+## Latest commits
+
+```
+b29b9f6 Fix two AVFoundation source bugs surfaced by NDI Virtual Camera
+e6eae96 Make NDI sender clicks discoverable + actionable
+8e9f52e GH Actions: CI smoke + tag-driven release pipeline
+390594a Redesign Destination as a top-of-column wizard
+607271d Port-walk fallback so a stale instance can't silently brick a launch
+5bbaf59 Fix dshow parser for modern FFmpeg output format
+b9f1995 Fix three Windows-build bugs found on first real run
+d671b51 Add macOS PyInstaller build pipeline (signed .dmg)
+75b9304 Add SRT/RTMP relay sources — turn the patchbay into a server
+1f56183 Initial commit: ATEM IP Patchbay v0.1.0
+```
+
+## What's next (priority order if picking up cold)
+
+1. **Fix NDI Virtual Camera streaming** — see "Currently-open issues #1".
+   Either find the missing FFmpeg flag / pixel-format / permission
+   piece, or definitively rule it out as a code bug and improve the
+   "no frames received" UX so the user understands they need to bind
+   NDI Virtual Input to NDICAM in its menu bar.
+2. **Notarize the Mac `.dmg`** so first-launch downloaders don't get
+   the Gatekeeper warning. One-time `xcrun notarytool
+   store-credentials` setup + a build-script step.
+3. **Cut `v0.1.0-alpha.1` tag** (`git tag v0.1.0-alpha.1 && git push
+   --tags`) and let the GH Actions release pipeline produce both
+   binaries.
+4. Polish: format-probe caching; placeholder-URL warning; default-
+   device names at boot.
+
+## v0.2.0 candidate features
+
+- **Direct NDI ingest** via custom FFmpeg with `libndi_newtek` (~1-2
+  days, would eliminate the NDI Virtual Camera bridge dependency).
+  Compile FFmpeg from source with libndi enabled; ship as the sidecar.
+  Inherits NDI SDK attribution requirement.
+- **NDI Discovery Server** support — query the centralized server's
+  HTTP API instead of relying on multicast mDNS. Lots of NDI deploys
+  use this. Config file lives at
+  `~/Library/Application Support/NewTek/NDI/ndi-config.v1.json` (Mac).
+- **Universal2 Mac binaries** — currently arm64-only. Add a `macos-13`
+  matrix entry to `release.yml` + a `lipo`-merge step to combine
+  arm64 + x86_64 FFmpeg sidecars.
+- **First-run wizard** — when no XML is loaded and `custom_url` is
+  empty, show a 3-step wizard ("Where's your ATEM?" → "Paste your
+  stream key" → "Pick a video source") instead of the current
+  always-on wizard.
+- **Source thumbnails** on tiles — periodic 1-frame capture from each
+  AVF device for the tile background.
+- **Persistent state** — save last-used destination + label + codec
+  to `~/Library/Application Support/ATEM IP Patchbay/state.json`
+  (and `%APPDATA%/...` on Windows).
