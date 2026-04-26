@@ -626,12 +626,15 @@
           </div>
 
           <p class="hint audio-mix-future">
+            <strong>Today:</strong> Custom audio replaces the Video Source's audio
+            entirely. Works for any video source — NDI camera + Dante audio is
+            the headline combo.
+            <br>
             <strong>Coming soon:</strong> volume mixing (custom + source side-by-side),
-            replace L only / R only, and per-leg gain. Today, picking a custom audio
-            source replaces the Video Source's audio entirely. For non-AVF video
-            sources (NDI direct, pipes, relay) the custom path will be wired in a
-            follow-up — for now, custom audio works with AVF cameras and screen
-            captures.
+            replace L only / R only, and per-leg gain. (For pipe / relay video
+            sources where the custom audio injection isn't yet wired, the field
+            shows the device but stream startup will fall back to Auto with a
+            log warning until those source paths are extended.)
           </p>
         </div>
 

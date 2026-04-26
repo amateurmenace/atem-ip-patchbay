@@ -405,15 +405,28 @@ fn resolve_capture_device(
     height: u32,
     fps: u32,
 ) -> Source {
+    // audio_mode gates whether the AVF audio device is wired in at
+    // all. "auto" / "silent" → audio comes from the video source's
+    // combined input (or, for silent, gets muted later by the
+    // streamer's audio_filter). "custom" → use the user-picked AVF
+    // audio device as a separate input.
+    let custom_audio = snap.audio_mode == "custom";
+    let effective_audio_index = if custom_audio { snap.av_audio_index } else { -1 };
+    let effective_audio_name = if custom_audio {
+        snap.av_audio_name.clone()
+    } else {
+        String::new()
+    };
+
     let devs = list_capture_devices(false);
     let v_dev = devs.video.iter().find(|d| d.index == snap.av_video_index);
-    let a_dev = devs.audio.iter().find(|d| d.index == snap.av_audio_index);
+    let a_dev = devs.audio.iter().find(|d| d.index == effective_audio_index);
     let v_name_lookup = v_dev.map(|d| d.name.clone()).unwrap_or_else(|| {
         format!("video[{}]", snap.av_video_index)
     });
     let a_name_lookup = a_dev.map(|d| d.name.clone()).unwrap_or_else(|| {
-        if snap.av_audio_index >= 0 {
-            format!("audio[{}]", snap.av_audio_index)
+        if effective_audio_index >= 0 {
+            format!("audio[{}]", effective_audio_index)
         } else {
             String::new()
         }
@@ -425,9 +438,9 @@ fn resolve_capture_device(
         } else {
             v_name_lookup
         };
-        let a_name_final = if !snap.av_audio_name.is_empty() {
-            snap.av_audio_name.clone()
-        } else if snap.av_audio_index >= 0 {
+        let a_name_final = if !effective_audio_name.is_empty() {
+            effective_audio_name.clone()
+        } else if effective_audio_index >= 0 {
             a_name_lookup
         } else {
             String::new()
@@ -447,7 +460,7 @@ fn resolve_capture_device(
             height,
             fps,
             snap.av_video_index,
-            snap.av_audio_index,
+            effective_audio_index,
             &v_clean,
             &a_clean,
             &v_name_final,
