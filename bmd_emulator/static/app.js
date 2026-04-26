@@ -836,6 +836,20 @@ function render(snap) {
 
   buildSourceTiles(snap);
 
+  // Auto-start NDI preview whenever state shows we're on an NDI
+  // source. Without this, hitting Start Stream without first
+  // clicking the NDICAM tile (e.g. because the source was already
+  // selected from a prior session, or set via the API) leaves the
+  // preview area showing the default SMPTE bars even while the
+  // backend is streaming and producing JPEGs. previewKey de-dupes
+  // so this is a no-op when the right preview is already running.
+  if (snap.source_id === 'ndi' && snap.ndi_source_name) {
+    const wantKey = `ndi:${snap.ndi_source_name}`;
+    if (previewKey !== wantKey) {
+      setPreviewFor({ sourceId: 'ndi', name: snap.ndi_source_name, category: 'ndi' });
+    }
+  }
+
   if (knownDevices.audio.length) {
     setOptions(els.avAudio, [
       ...(snap.source_id === 'avfoundation' ? [] : [{ value: '-1', label: '— (auto / not used)' }]),
