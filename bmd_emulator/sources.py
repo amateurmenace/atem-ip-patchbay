@@ -131,7 +131,13 @@ def avfoundation(
             "-f", "avfoundation",
             "-framerate", fps_str,
             "-video_size", actual_size,
-            "-pixel_format", "uyvy422",
+            # Don't force a pixel format. Hardware webcams deliver uyvy422
+            # natively, but virtual cameras (NDI Virtual Camera, OBS) deliver
+            # yuv420p or nv12 — forcing uyvy422 made AVF silently fail to
+            # negotiate and FFmpeg sat reading 0 frames forever. Letting AVF
+            # pick whatever it has, then converting via the encoder pipeline
+            # (which already targets yuv420p output via -pix_fmt downstream),
+            # works for both classes of device.
             "-capture_cursor", "1",
             "-i", token,
         ],
