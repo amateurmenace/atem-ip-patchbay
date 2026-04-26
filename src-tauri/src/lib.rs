@@ -3,6 +3,8 @@ mod ffmpeg_path;
 mod http;
 mod sources;
 mod state;
+mod streamer;
+mod streamid;
 mod xml;
 
 use std::path::PathBuf;
@@ -12,6 +14,7 @@ use tauri::Manager;
 
 use crate::http::HttpAppState;
 use crate::state::EncoderState;
+use crate::streamer::Streamer;
 
 const HTTP_START_PORT: u16 = 8090;
 
@@ -42,8 +45,10 @@ pub fn run() {
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
 
+            let streamer = Streamer::new(encoder.clone());
             let http_state = HttpAppState {
                 encoder: encoder.clone(),
+                streamer: streamer.clone(),
             };
 
             // Bind synchronously so we know the port before creating
@@ -61,9 +66,10 @@ pub fn run() {
                 }
             });
 
-            // Manage encoder so future commands / Tauri-IPC handlers
-            // can grab it via app.state().
+            // Manage encoder + streamer so future Tauri commands /
+            // event handlers can grab them via app.state().
             app.manage(encoder);
+            app.manage(streamer);
             app.manage(http_state_marker(port));
 
             // The window is declared in tauri.conf.json (visible: false

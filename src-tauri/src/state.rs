@@ -237,6 +237,15 @@ impl EncoderState {
         }
     }
 
+    /// Mutate the StreamStats in place under the write lock. Used by
+    /// the Phase 3 streamer's monitor task to push telemetry updates
+    /// (bitrate, fps, frames_sent, etc.) atomically and cheaply
+    /// (~200 ns per call).
+    pub fn stats_in_place<F: FnOnce(&mut StreamStats)>(&self, f: F) {
+        let mut inner = self.inner.write().unwrap();
+        f(&mut inner.stats);
+    }
+
     /// Set the AVFoundation / DirectShow defaults from a fresh device
     /// scan. Called once at boot from Tauri's setup() so the source
     /// dropdowns have something selected on first launch.

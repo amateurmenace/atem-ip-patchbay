@@ -15,10 +15,12 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 
 use crate::state::EncoderState;
+use crate::streamer::Streamer;
 
 #[derive(Clone)]
 pub struct HttpAppState {
     pub encoder: Arc<EncoderState>,
+    pub streamer: Arc<Streamer>,
 }
 
 /// Bind a TCP listener on the requested port, walking forward up to nine
@@ -68,12 +70,12 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         }))
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
-        .route("/api/log", get(api_log_stub))
+        .route("/api/log", get(api_log))
         .route("/api/devices", get(api_devices))
         .route("/api/discover", get(api_discover_stub))
         .route("/api/ndi-senders", get(api_ndi_senders_stub))
-        .route("/api/start", post(api_start_stub))
-        .route("/api/stop", post(api_stop_stub))
+        .route("/api/start", post(api_start))
+        .route("/api/stop", post(api_stop))
         .route("/api/settings", post(api_settings))
         .route("/api/load_xml", post(api_load_xml))
         .route("/api/load_xml_text", post(api_load_xml_text))
@@ -105,16 +107,15 @@ fn guess_loopback() -> String {
 }
 
 #[derive(Serialize)]
-struct LogStub {
-    command: Vec<String>,
+struct LogResponse {
+    command: String,
     lines: Vec<String>,
 }
 
-async fn api_log_stub() -> impl IntoResponse {
-    Json(LogStub {
-        command: vec![],
-        lines: vec![],
-    })
+async fn api_log(State(state): State<HttpAppState>) -> impl IntoResponse {
+    let command = state.streamer.last_command().await;
+    let lines = state.streamer.last_log_tail(50).await;
+    Json(LogResponse { command, lines })
 }
 
 /// AVFoundation (Mac) / DirectShow (Win) device scan, served from the
@@ -144,19 +145,24 @@ async fn api_ndi_senders_stub(Query(_q): Query<HashMap<String, String>>) -> impl
     Json(NdiSendersStub { senders: vec![] })
 }
 
-/// Phase 3 will wire these to the real Rust streamer module.
-async fn api_start_stub(State(_): State<HttpAppState>) -> impl IntoResponse {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"error": "streamer not yet implemented (Phase 3)"})),
-    )
+async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {
+    match state.streamer.start().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 
-async fn api_stop_stub(State(_): State<HttpAppState>) -> impl IntoResponse {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"error": "streamer not yet implemented (Phase 3)"})),
-    )
+async fn api_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
+    match state.streamer.stop().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 
 /// Settings mutation — accepts a JSON object with any subset of the
