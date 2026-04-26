@@ -43,6 +43,14 @@ fn default_bitrate(quality: &str, resolution: &str, fps: u32) -> Option<u64> {
 
 pub const AVAILABLE_VIDEO_MODES: &[&str] = &[
     "Auto",
+    "2160p23.98",
+    "2160p24",
+    "2160p25",
+    "2160p29.97",
+    "2160p30",
+    "2160p50",
+    "2160p59.94",
+    "2160p60",
     "1080p23.98",
     "1080p24",
     "1080p25",
@@ -676,7 +684,14 @@ pub fn video_dimensions(mode: &str) -> (u32, u32, u32) {
         return (1920, 1080, 30);
     };
     let height: u32 = h.parse().unwrap_or(1080);
-    let width = if height == 1080 { 1920 } else { 1280 };
+    // 4K UHD (3840x2160) for the 4K ATEM switchers (Constellation 4K,
+    // upcoming ST2110 hardware), 1080p for the HD line, 720p for older
+    // gear and the original Mini.
+    let width = match height {
+        2160 => 3840,
+        1080 => 1920,
+        _ => 1280,
+    };
     let fps = fps.parse::<f32>().unwrap_or(30.0).round() as u32;
     (width, height, fps)
 }

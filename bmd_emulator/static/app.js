@@ -674,15 +674,34 @@ function buildSourceTiles(snap) {
     const c = d.category || 'camera';
     (groups[c] || groups.camera).push(d);
   }
+  // NDI senders go BETWEEN screens and NDI Bridge — direct NDI ingest
+  // is the recommended path on this app, so it should surface above
+  // the legacy Virtual Camera bridge tiles. Synthetic 'ndi_senders'
+  // entry in the order array slots them in cleanly without splitting
+  // the loop.
   const order = [
     ['camera',       'Cameras'],
     ['capture_card', 'Capture cards'],
     ['iphone',       'iPhone (Continuity)'],
     ['screen',       'Screens'],
+    ['ndi_senders',  'NDI senders on your network'],
     ['ndi',          'NDI Bridge (NDI Virtual Camera)'],
     ['virtual',      'Virtual cameras'],
   ];
   for (const [cat, label] of order) {
+    if (cat === 'ndi_senders') {
+      for (const sender of knownNdi) {
+        tiles.push({
+          sourceId: 'ndi-sender',
+          avIndex: null,
+          name: `${sender.source || sender.name} · ${sender.machine || ''}`.replace(/\s·\s$/, ''),
+          category: 'ndi',
+          section: label,
+          discovered: true,
+        });
+      }
+      continue;
+    }
     for (const d of groups[cat]) {
       tiles.push({
         sourceId: 'avfoundation',
@@ -692,19 +711,6 @@ function buildSourceTiles(snap) {
         section: label,
       });
     }
-  }
-
-  // NDI senders discovered via mDNS — these are NOT directly playable
-  // (no libndi in FFmpeg), so they're informational tiles.
-  for (const sender of knownNdi) {
-    tiles.push({
-      sourceId: 'ndi-sender',
-      avIndex: null,
-      name: `${sender.source || sender.name} · ${sender.machine || ''}`.replace(/\s·\s$/, ''),
-      category: 'ndi',
-      section: 'NDI senders on your network',
-      discovered: true,
-    });
   }
 
   tiles.push({

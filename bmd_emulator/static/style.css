@@ -679,6 +679,29 @@ button.big { padding: 14px 18px; font-size: 14px; }
   font-size: 14px;
   padding: 10px 12px;
   font-weight: 500;
+  /* Explicit font-family — WKWebView occasionally renders <select>
+     options in the macOS system font even when font-family: inherit
+     is in the global rule, which made this dropdown look out of
+     place vs every other input on the page. */
+  font-family: -apple-system, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+}
+
+/* Make the audio dropdown read as a CONTROL the user is meant to
+   touch, not a passive read-only field. Cyan accent that's distinct
+   from the orange .accent / blue --signal CTAs already on the page,
+   so the eye lands here when the user is sourcing audio for the
+   first time (especially Dante operators who have to pick an
+   unusual device). */
+.audio-row select#av-audio {
+  background: linear-gradient(180deg, rgba(64,200,210,0.16) 0%, rgba(40,150,170,0.10) 100%);
+  border-color: rgba(80,200,220,0.55);
+  box-shadow: 0 0 0 1px rgba(80,200,220,0.18), 0 2px 8px rgba(40,150,170,0.10);
+  color: var(--text);
+  font-weight: 600;
+}
+.audio-row select#av-audio:focus {
+  border-color: rgba(120,220,235,0.85);
+  box-shadow: 0 0 0 3px rgba(80,200,220,0.30), 0 2px 12px rgba(40,150,170,0.18);
 }
 
 /* Channel-pair pickers for multi-channel audio (Dante VSC, aggregate).
@@ -726,6 +749,92 @@ button.big { padding: 14px 18px; font-size: 14px; }
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 11.5px;
+}
+
+/* Port-forwarding callout — sits right under the destination Address
+   field. Yellow because it's an info-level "you might miss this"
+   prompt, not an error. */
+.port-fwd-callout {
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  background: rgba(243, 196, 75, 0.10);
+  border-left: 3px solid #f3c44b;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Using Dante? help expandable — same shape as the port-fwd-help
+   details so the audio section reads consistently with the
+   destination section. */
+.dante-help {
+  margin-top: 10px;
+  padding: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dante-help > summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: none;
+  position: relative;
+}
+.dante-help > summary::-webkit-details-marker { display: none; }
+.dante-help > summary::after {
+  content: '＋';
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-weight: 400;
+}
+.dante-help[open] > summary::after { content: '−'; }
+.dante-help .help-body {
+  padding: 0 14px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.dante-help ol { padding-left: 20px; }
+.dante-help li { margin-bottom: 6px; }
+.dante-help a { color: var(--signal); text-decoration: underline; }
+
+/* SRT / RTMP SERVER: prefix on the receive-wizard summary. Reads as
+   a label tag rather than part of the prose. */
+.rw-prefix {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 7px;
+  background: rgba(78, 167, 255, 0.16);
+  color: var(--signal);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+
+/* Footer brand — Weird Machine logo, links to weirdmachine.org. */
+.footer-brand {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 6px;
+  opacity: 0.78;
+  transition: opacity 0.15s ease;
+}
+.footer-brand:hover { opacity: 1; }
+.footer-logo {
+  height: 36px;
+  width: auto;
+  display: block;
+  /* Logo is a black-on-white drawing; invert for the dark UI. */
+  filter: invert(0.92);
 }
 
 .pipe-only { margin-top: 12px; padding: 12px; border-top: 1px dashed var(--line); }
