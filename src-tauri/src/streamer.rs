@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
@@ -165,6 +165,25 @@ impl Streamer {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // Put FFmpeg in its own process group so it doesn't inherit
+        // the Tauri parent's signals AND so we can SIGTERM the whole
+        // group from the exit handler if the normal Drop path didn't
+        // fire. Otherwise an abrupt parent crash leaves FFmpeg
+        // reparented to launchd, streaming to the destination forever
+        // — exactly the orphan bug we're fixing.
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                // setpgid(0, 0) makes the child the leader of a new
+                // process group with pgid = its own pid.
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
         let mut child = command
             .spawn()
             .map_err(|e| anyhow!("failed to spawn ffmpeg: {e}"))?;
@@ -225,11 +244,20 @@ impl Streamer {
             capture.stop();
         }
         if let Some(child) = inner.child.as_mut() {
-            // tokio's Child::kill sends SIGKILL on Unix; FFmpeg will
-            // tear down quickly and the SRT receiver detects the drop.
-            // If we ever need a graceful close (the receiver wants a
-            // clean teardown), add a `nix`-based SIGINT-then-SIGKILL
-            // path here.
+            // First send SIGTERM to the whole process group so
+            // FFmpeg can flush + close the SRT/RTMP connection
+            // cleanly. Falls through to SIGKILL via tokio's
+            // start_kill() so a stuck FFmpeg is still guaranteed
+            // to die.
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                unsafe {
+                    // Negative pid = process group; -pid means group
+                    // led by `pid`. Best-effort; if it fails (group
+                    // already gone), no-op.
+                    libc::killpg(pid as i32, libc::SIGTERM);
+                }
+            }
             let _ = child.start_kill();
         }
         Ok(())
@@ -336,21 +364,17 @@ impl Streamer {
             ("0:v:0", "1:a:0")
         };
 
-        // Filter chain: scale to target dimensions + format yuv420p so
-        // the encoder gets clean input even if the source delivered
-        // something else. (Overlays — drawtext/logo — were in v0.1.0;
-        // they come back in Phase 8 once the overlay UI is reworked.)
-        let filter = format!(
-            "[{v_in}]scale={w}:{h}:force_original_aspect_ratio=decrease,\
-             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v0]",
-            w = plan.width,
-            h = plan.height,
-        );
-        cmd.push("-filter_complex".into());
-        cmd.push(filter);
+        // Plain stream mapping with no filter chain — matches v0.1.0
+        // exactly. The Phase 3 commit always wrapped the input in a
+        // scale+pad+format filter "to be safe", but that turned out
+        // to break SRT against destinations where v0.1.0's plain map
+        // worked. Overlays (drawtext / logo) used to add a filter
+        // chain conditionally; they come back in a later Phase 8
+        // commit when the overlay UI is reworked, gated by an
+        // "are there any overlays" check just like v0.1.0 had.
         cmd.extend([
             "-map".into(),
-            "[v0]".into(),
+            v_in.into(),
             "-map".into(),
             a_in.into(),
         ]);
@@ -458,8 +482,48 @@ impl Streamer {
     }
 
     async fn run_monitor(self: Arc<Self>, stderr: tokio::process::ChildStderr) {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
+        // FFmpeg's progress (`frame=… fps=… bitrate=…`) terminates each
+        // update with a CARRIAGE RETURN, not a newline — a terminal
+        // overwrites the prior line in place. `read_until(b'\n')`
+        // therefore blocks indefinitely waiting for the next `\n`,
+        // which only arrives when the process exits. We need to
+        // process bytes as they arrive and split on either `\r` or
+        // `\n` so each progress tick becomes its own logical line.
+        use tokio::io::AsyncReadExt;
+        let mut stderr = stderr;
+        let mut chunk = [0u8; 1024];
+        let mut acc: Vec<u8> = Vec::with_capacity(2048);
+        loop {
+            let n = match stderr.read(&mut chunk).await {
+                Ok(0) => break, // EOF
+                Ok(n) => n,
+                Err(err) => {
+                    log::warn!("ffmpeg stderr read failed: {err}");
+                    break;
+                }
+            };
+            acc.extend_from_slice(&chunk[..n]);
+            // Walk the accumulator emitting each complete sub-line
+            // (sep = \r or \n). Anything trailing without a sep stays
+            // in the buffer for the next read.
+            let mut start = 0usize;
+            for (i, &b) in acc.iter().enumerate() {
+                if b == b'\r' || b == b'\n' {
+                    if i > start {
+                        let line = String::from_utf8_lossy(&acc[start..i]).to_string();
+                        self.handle_log_line(&line).await;
+                    }
+                    start = i + 1;
+                }
+            }
+            if start > 0 {
+                acc.drain(..start);
+            }
+        }
+        // Flush any final partial line (FFmpeg's last progress tick
+        // before the process exited may not have a trailing sep).
+        if !acc.is_empty() {
+            let line = String::from_utf8_lossy(&acc).to_string();
             self.handle_log_line(&line).await;
         }
 
@@ -526,9 +590,14 @@ impl Streamer {
 
         let lower = line.to_lowercase();
 
-        // Connection-state heuristics — flip to Streaming once we see
-        // FFmpeg's stream mapping or an SRT connection-established log.
-        if lower.contains("connection established") || lower.contains("stream mapping") {
+        // Connection-state heuristic — flip to Streaming only on a
+        // libsrt "connection established" log. The earlier "stream
+        // mapping" trigger was too eager: FFmpeg prints that line
+        // BEFORE attempting the SRT handshake, so failed-to-connect
+        // outputs would briefly show "Streaming" with zero bitrate
+        // until the exit code caught up. Progress-line parsing below
+        // also bumps status to Streaming on the first frame=N tick.
+        if lower.contains("connection established") {
             self.state.stats_in_place(|s| {
                 if s.status != "Streaming" {
                     s.status = "Streaming".into();
@@ -573,6 +642,10 @@ impl Streamer {
     }
 }
 
+/// Substrings in FFmpeg stderr that mean the stream isn't going to
+/// recover. When any of these are seen, status flips to Interrupted
+/// and the line becomes the visible error in the UI's error banner
+/// — without waiting for the process to actually exit.
 const ERROR_TAGS: &[&str] = &[
     "connection refused",
     "connection setup failure",
@@ -580,6 +653,12 @@ const ERROR_TAGS: &[&str] = &[
     "no route to host",
     "srt error",
     "protocol not found",
+    "input/output error",
+    "error opening output",
+    "could not write header",
+    "broken pipe",
+    "connection reset",
+    "no such file or directory",
 ];
 
 #[derive(Debug, Default)]

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Build the unencoded streamid string in Blackmagic format. The
@@ -71,17 +70,22 @@ pub fn build_srt_url(p: &SrtUrlParams) -> String {
         )
     };
 
-    // BTreeMap so query params have a stable order — easier to diff
-    // against a real BMD pcap when something goes wrong.
-    let mut params: BTreeMap<&str, String> = BTreeMap::new();
-    params.insert("mode", p.mode.to_string());
-    params.insert("latency", p.latency_us.to_string());
+    // Insertion-ordered Vec (not BTreeMap) so the query string is
+    // byte-identical to v0.1.0 Python's `urllib.parse.urlencode`:
+    // mode first, then latency, then streamid, then passphrase.
+    // Some libsrt versions parse forgivingly regardless of order;
+    // others bail on streamid before mode. Matching v0.1.0 exactly
+    // eliminates a class of "works in Python, broken in Rust"
+    // regressions.
+    let mut params: Vec<(&str, String)> = Vec::with_capacity(4);
+    params.push(("mode", p.mode.to_string()));
+    params.push(("latency", p.latency_us.to_string()));
     if p.mode != "listener" && !streamid.trim().is_empty() {
-        params.insert("streamid", streamid);
+        params.push(("streamid", streamid));
     }
     if let Some(pass) = p.passphrase {
         if !pass.is_empty() {
-            params.insert("passphrase", pass.to_string());
+            params.push(("passphrase", pass.to_string()));
         }
     }
 

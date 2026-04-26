@@ -1129,8 +1129,19 @@ async function applyXmlText(text) {
       showStatus(els.xmlStatus, false, j.error || 'Could not load XML.');
       return;
     }
-    showStatus(els.xmlStatus, true, `Loaded service: ${j.service}`);
-    if (j.snapshot) render(j.snapshot);
+    // Backend now returns {service, snapshot}. Each load implicitly
+    // replaces the existing service registry so dropping a fresh XML
+    // wipes the previous one cleanly (the boot loader passes
+    // replace=false to preserve the accumulate-on-startup behavior).
+    showStatus(els.xmlStatus, true, `Loaded service: ${j.service || '(unnamed)'}`);
+    if (j.snapshot) {
+      render(j.snapshot);
+      // Refresh the loaded-XML chip with the just-loaded service name.
+      if (els.xmlLoaded) {
+        els.xmlLoaded.hidden = false;
+        if (els.xmlLoadedName) els.xmlLoadedName.textContent = j.service || '(unnamed)';
+      }
+    }
   } catch (e) {
     showStatus(els.xmlStatus, false, 'Error: ' + e);
   }
@@ -1218,12 +1229,25 @@ function bind() {
   // XML drop-zone (in wizard) + clear button
   setupXmlDrop();
   if (els.xmlClear) {
-    els.xmlClear.addEventListener('click', () => {
-      // No "unload XML" endpoint exists yet; for now, clearing the
-      // chip just removes the custom_url override (if any) and leaves
-      // the loaded service in place. A future improvement would add
-      // an /api/clear_service that empties state.services.
-      applySettings({ custom_url: '' });
+    els.xmlClear.addEventListener('click', async () => {
+      // POST /api/services/clear (with default body) wipes loaded
+      // services AND custom_url so the destination is fully blank.
+      // The user can then type a manual address into the Address
+      // field, or drop a fresh XML to load a new service.
+      try {
+        const r = await fetch('/api/services/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (r.ok) {
+          const snap = await r.json();
+          render(snap);
+          // Hide the loaded-XML chip + clear status text.
+          if (els.xmlLoaded) els.xmlLoaded.hidden = true;
+          if (els.xmlStatus) els.xmlStatus.hidden = true;
+        }
+      } catch (_e) { /* ignore */ }
     });
   }
 

@@ -14,7 +14,7 @@ mod xml;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 use crate::http::HttpAppState;
 use crate::protocol::ProtocolServer;
@@ -148,8 +148,29 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // On Cmd-Q / window-close-causes-app-quit, Tauri fires
+            // ExitRequested then Exit. We hook BOTH because some
+            // platforms emit only one — and we synchronously stop
+            // the streamer + NDI capture before the parent process
+            // dies, otherwise FFmpeg orphans to launchd and keeps
+            // streaming to the destination forever.
+            match event {
+                RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                    if let Some(streamer) = app_handle.try_state::<Arc<Streamer>>() {
+                        let s = streamer.inner().clone();
+                        // block_on inside the Tauri run-loop is fine
+                        // here; we want a hard sync barrier before the
+                        // process exits so all child cleanup completes.
+                        let runtime = tauri::async_runtime::handle();
+                        let _ = runtime.block_on(s.stop());
+                    }
+                }
+                _ => {}
+            }
+        });
 }
 
 /// Run an initial AVF / DirectShow scan and pre-select the most
@@ -191,7 +212,21 @@ fn load_default_xml_files(app_handle: &tauri::AppHandle, encoder: &EncoderState)
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("xml"))
             .collect();
-        xml_paths.sort();
+        // Load in newest-first order so the most recently modified
+        // XML wins as the active service via add_service_from_xml's
+        // first-load-wins semantics. UX: drop a fresh XML in
+        // config/, it becomes the default destination on next launch
+        // without the user having to pick it from the dropdown.
+        // Older XMLs still register in the services map for the
+        // dropdown — first-modified-wins would have made the user's
+        // newest test config invisible until manually selected.
+        xml_paths.sort_by_key(|p| {
+            std::cmp::Reverse(
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok(),
+            )
+        });
         for path in &xml_paths {
             match encoder.add_service_from_xml(path, None) {
                 Ok(()) => log::info!("loaded service from {}", path.display()),

@@ -81,6 +81,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/settings", post(api_settings))
         .route("/api/load_xml", post(api_load_xml))
         .route("/api/load_xml_text", post(api_load_xml_text))
+        .route("/api/services/clear", post(api_clear_services))
         .route("/api/destination/paste", post(api_destination_paste_stub))
         .nest_service("/static", static_service)
         .with_state(state)
@@ -225,6 +226,33 @@ struct SettingsPayload {
     current_service_name: Option<String>,
     current_server_name: Option<String>,
     ndi_source_name: Option<String>,
+    av_video_index: Option<i32>,
+    av_video_name: Option<String>,
+    av_audio_index: Option<i32>,
+    av_audio_name: Option<String>,
+    pipe_path: Option<String>,
+    label: Option<String>,
+    relay: Option<RelayPayload>,
+    overlay: Option<OverlayPayload>,
+}
+
+#[derive(Deserialize)]
+struct RelayPayload {
+    bind_host: Option<String>,
+    srt_port: Option<u16>,
+    srt_latency_us: Option<u32>,
+    srt_passphrase: Option<String>,
+    rtmp_port: Option<u16>,
+    rtmp_app: Option<String>,
+    rtmp_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OverlayPayload {
+    title: Option<String>,
+    subtitle: Option<String>,
+    logo_path: Option<String>,
+    clock: Option<bool>,
 }
 
 async fn api_settings(
@@ -239,17 +267,24 @@ async fn api_settings(
 struct LoadXmlPayload {
     path: String,
     make_active: Option<bool>,
+    /// When true (default for UI loads), wipe the existing service
+    /// registry before loading. The boot loader passes false so all
+    /// config/*.xml files accumulate at startup.
+    replace: Option<bool>,
 }
 
 async fn api_load_xml(
     State(state): State<HttpAppState>,
     Json(payload): Json<LoadXmlPayload>,
 ) -> impl IntoResponse {
+    if payload.replace.unwrap_or(true) {
+        state.encoder.clear_services();
+    }
     match state
         .encoder
         .add_service_from_xml(std::path::Path::new(&payload.path), payload.make_active)
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Ok(()) => xml_load_response(&state),
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -261,22 +296,65 @@ async fn api_load_xml(
 struct LoadXmlTextPayload {
     text: String,
     make_active: Option<bool>,
+    replace: Option<bool>,
 }
 
 async fn api_load_xml_text(
     State(state): State<HttpAppState>,
     Json(payload): Json<LoadXmlTextPayload>,
 ) -> impl IntoResponse {
+    if payload.replace.unwrap_or(true) {
+        state.encoder.clear_services();
+    }
     match state
         .encoder
         .add_service_from_xml_text(&payload.text, payload.make_active.unwrap_or(true))
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Ok(()) => xml_load_response(&state),
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": err.to_string()})),
         ),
     }
+}
+
+/// Wraps the snapshot in `{service, snapshot}` shape so the UI can
+/// show the just-loaded service's name in the status chip without
+/// having to re-derive it from current_service_name.
+fn xml_load_response(state: &HttpAppState) -> (StatusCode, Json<serde_json::Value>) {
+    let snap = state.encoder.snapshot();
+    let service = snap.current_service_name.clone();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "service": service,
+            "snapshot": snap,
+        })),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct ClearServicesPayload {
+    /// When true (default), also clear `custom_url`. Pass false to
+    /// retain a manual destination across the clear.
+    clear_custom_url: Option<bool>,
+}
+
+async fn api_clear_services(
+    State(state): State<HttpAppState>,
+    Json(payload): Json<ClearServicesPayload>,
+) -> impl IntoResponse {
+    state.encoder.clear_services();
+    if payload.clear_custom_url.unwrap_or(true) {
+        // Wipe the custom URL too so the UI is back to a fully blank
+        // destination state. The Clear XML button calls this with no
+        // body so the default takes effect.
+        state.encoder.apply_settings(&crate::state::SettingsUpdate {
+            custom_url: Some(String::new()),
+            ..Default::default()
+        });
+    }
+    Json(state.encoder.snapshot())
 }
 
 async fn api_destination_paste_stub() -> impl IntoResponse {
@@ -308,6 +386,27 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             current_service_name: p.current_service_name,
             current_server_name: p.current_server_name,
             ndi_source_name: p.ndi_source_name,
+            av_video_index: p.av_video_index,
+            av_video_name: p.av_video_name,
+            av_audio_index: p.av_audio_index,
+            av_audio_name: p.av_audio_name,
+            pipe_path: p.pipe_path,
+            label: p.label,
+            relay: p.relay.map(|r| crate::state::RelaySettingsUpdate {
+                bind_host: r.bind_host,
+                srt_port: r.srt_port,
+                srt_latency_us: r.srt_latency_us,
+                srt_passphrase: r.srt_passphrase,
+                rtmp_port: r.rtmp_port,
+                rtmp_app: r.rtmp_app,
+                rtmp_key: r.rtmp_key,
+            }),
+            overlay: p.overlay.map(|o| crate::state::OverlaySettingsUpdate {
+                title: o.title,
+                subtitle: o.subtitle,
+                logo_path: o.logo_path,
+                clock: o.clock,
+            }),
         }
     }
 }

@@ -151,6 +151,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "grafton-ndi",
+ "libc",
  "local-ip-address",
  "log",
  "once_cell",

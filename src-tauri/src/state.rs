@@ -7,6 +7,40 @@ use std::sync::RwLock;
 use std::time::Instant;
 use uuid::Uuid;
 
+/// BMD-spec quality matrix used when no service XML is loaded — so
+/// the UI's quality chooser is populated and the user can stream
+/// against a manually-entered destination without first dropping an
+/// XML. Bitrates match the sample XMLs (Remote 1/2.xml) shipped
+/// alongside the binary.
+///
+/// Lookup order at FFmpeg-cmd-build time: matched (resolution, fps)
+/// from the active service's profile -> fallback to this matrix
+/// keyed by the same (quality_level, resolution, fps).
+pub const DEFAULT_QUALITY_LEVELS: &[&str] =
+    &["Streaming High", "Streaming Medium", "Streaming Low"];
+const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
+const DEFAULT_KEYFRAME_INTERVAL: u32 = 2;
+
+/// (quality_level, resolution, fps) -> video bitrate (bits/sec).
+fn default_bitrate(quality: &str, resolution: &str, fps: u32) -> Option<u64> {
+    let bps = match (quality, resolution, fps) {
+        ("Streaming High",   "1080p", 60) => 9_000_000,
+        ("Streaming High",   "1080p", 30) => 6_000_000,
+        ("Streaming High",   "720p",  60) => 6_000_000,
+        ("Streaming High",   "720p",  30) => 4_000_000,
+        ("Streaming Medium", "1080p", 60) => 7_600_000,
+        ("Streaming Medium", "1080p", 30) => 4_500_000,
+        ("Streaming Medium", "720p",  60) => 4_500_000,
+        ("Streaming Medium", "720p",  30) => 3_000_000,
+        ("Streaming Low",    "1080p", 60) => 4_500_000,
+        ("Streaming Low",    "1080p", 30) => 3_000_000,
+        ("Streaming Low",    "720p",  60) => 2_250_000,
+        ("Streaming Low",    "720p",  30) => 1_500_000,
+        _ => return None,
+    };
+    Some(bps)
+}
+
 pub const AVAILABLE_VIDEO_MODES: &[&str] = &[
     "Auto",
     "1080p23.98",
@@ -203,6 +237,22 @@ impl EncoderState {
         Ok(())
     }
 
+    /// Drop every loaded service and reset the destination state to
+    /// "no service selected". Used by the UI's Clear XML button so the
+    /// user can switch to a manual `custom_url` destination, and by
+    /// `add_service_from_xml_text(replace=true)` so dropping a new
+    /// XML replaces the old one instead of accumulating.
+    pub fn clear_services(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.services.clear();
+        inner.current_service_name.clear();
+        inner.current_server_name = "SRT".into();
+        inner.stream_key.clear();
+        inner.passphrase.clear();
+        // Don't touch custom_url — clearing services + having a custom
+        // URL is the "I want to use a manual destination" state.
+    }
+
     pub fn add_service_from_xml_text(&self, text: &str, make_active: bool) -> Result<()> {
         let mut svc = load_service_text(text)?;
         // Same disambiguation as the file path; pasted text has no
@@ -367,6 +417,39 @@ impl EncoderState {
         if let Some(v) = &update.ndi_source_name {
             inner.ndi_source_name = v.clone();
         }
+        if let Some(v) = update.av_video_index {
+            inner.av_video_index = v;
+        }
+        if let Some(v) = &update.av_video_name {
+            inner.av_video_name = v.clone();
+        }
+        if let Some(v) = update.av_audio_index {
+            inner.av_audio_index = v;
+        }
+        if let Some(v) = &update.av_audio_name {
+            inner.av_audio_name = v.clone();
+        }
+        if let Some(v) = &update.pipe_path {
+            inner.pipe_path = v.clone();
+        }
+        if let Some(v) = &update.label {
+            inner.label = v.clone();
+        }
+        if let Some(r) = &update.relay {
+            if let Some(v) = &r.bind_host { inner.relay_bind_host = v.clone(); }
+            if let Some(v) = r.srt_port { inner.relay_srt_port = v; }
+            if let Some(v) = r.srt_latency_us { inner.relay_srt_latency_us = v; }
+            if let Some(v) = &r.srt_passphrase { inner.relay_srt_passphrase = v.clone(); }
+            if let Some(v) = r.rtmp_port { inner.relay_rtmp_port = v; }
+            if let Some(v) = &r.rtmp_app { inner.relay_rtmp_app = v.clone(); }
+            if let Some(v) = &r.rtmp_key { inner.relay_rtmp_key = v.clone(); }
+        }
+        if let Some(o) = &update.overlay {
+            if let Some(v) = &o.title { inner.overlay_title = v.clone(); }
+            if let Some(v) = &o.subtitle { inner.overlay_subtitle = v.clone(); }
+            if let Some(v) = &o.logo_path { inner.overlay_logo_path = v.clone(); }
+            if let Some(v) = o.clock { inner.overlay_clock = v; }
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -386,19 +469,20 @@ impl EncoderState {
                     .collect()
             })
             .unwrap_or_default();
-        let available_quality_levels: Vec<String> = svc
-            .map(|s| s.profiles.iter().map(|p| p.name.clone()).collect())
-            .unwrap_or_default();
         let available_services: Vec<String> = inner.services.keys().cloned().collect();
-
-        // Phase 8b: bitrate per quality level at the current video_mode.
-        // Lets the UI's promoted quality chooser show "High - 6 Mbps"
-        // labels and update them when the user changes the format.
         let (_, height, fps) = video_dimensions(&inner.video_mode);
         let res = if height == 1080 { "1080p" } else { "720p" };
-        let quality_options: Vec<QualityOption> = svc
-            .map(|s| {
-                s.profiles
+
+        // Quality levels + per-mode bitrates. Source the active
+        // service's profile data when one is loaded; otherwise fall
+        // back to the BMD-spec defaults so the UI chooser is always
+        // populated and the user can stream against a manually-
+        // entered destination without first loading an XML.
+        let (available_quality_levels, quality_options): (Vec<String>, Vec<QualityOption>) =
+            if let Some(s) = svc {
+                let names: Vec<String> = s.profiles.iter().map(|p| p.name.clone()).collect();
+                let opts: Vec<QualityOption> = s
+                    .profiles
                     .iter()
                     .map(|p| {
                         let bitrate = p
@@ -411,9 +495,19 @@ impl EncoderState {
                             bitrate,
                         }
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+                (names, opts)
+            } else {
+                let names: Vec<String> = DEFAULT_QUALITY_LEVELS.iter().map(|s| s.to_string()).collect();
+                let opts: Vec<QualityOption> = DEFAULT_QUALITY_LEVELS
+                    .iter()
+                    .map(|q| QualityOption {
+                        name: (*q).to_string(),
+                        bitrate: default_bitrate(q, res, fps).unwrap_or(0),
+                    })
+                    .collect();
+                (names, opts)
+            };
 
         let active_config = resolve_active_config(&inner).map(|cfg| ActiveConfig {
             resolution: cfg.resolution.clone(),
@@ -513,14 +607,41 @@ fn current_active_server(inner: &Inner) -> Option<(String, String, String)> {
     Some((s.name.clone(), s.url.clone(), s.protocol()))
 }
 
-fn resolve_active_config(inner: &Inner) -> Option<&StreamConfig> {
-    let svc = inner.services.get(&inner.current_service_name)?;
-    let profile = svc.find_profile(&inner.quality_level).or_else(|| svc.get_default_profile())?;
+fn resolve_active_config(inner: &Inner) -> Option<StreamConfig> {
     let (_, height, fps) = video_dimensions(&inner.video_mode);
     let res = if height == 1080 { "1080p" } else { "720p" };
-    profile
-        .find_config(res, fps)
-        .or_else(|| profile.configs.iter().max_by_key(|c| c.bitrate))
+
+    // Service-loaded path: pick the matching profile + config.
+    if let Some(svc) = inner.services.get(&inner.current_service_name) {
+        if let Some(profile) = svc
+            .find_profile(&inner.quality_level)
+            .or_else(|| svc.get_default_profile())
+        {
+            if let Some(cfg) = profile
+                .find_config(res, fps)
+                .or_else(|| profile.configs.iter().max_by_key(|c| c.bitrate))
+            {
+                return Some(cfg.clone());
+            }
+        }
+    }
+
+    // No-service fallback: synthesize a config from the default
+    // BMD-spec quality matrix so the user can stream against a
+    // manually-entered destination. quality_level may be a default
+    // ("Streaming High") or a stale name from a previous XML — we
+    // try the explicit value first, then High as the safest default.
+    let codec_str = if inner.video_codec == "h264" { "H264" } else { "H265" };
+    let bitrate = default_bitrate(&inner.quality_level, res, fps)
+        .or_else(|| default_bitrate("Streaming High", res, fps))?;
+    Some(StreamConfig {
+        resolution: res.to_string(),
+        fps,
+        codec: codec_str.to_string(),
+        bitrate,
+        audio_bitrate: DEFAULT_AUDIO_BITRATE,
+        keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
+    })
 }
 
 /// Returns (width, height, fps) for a "1080p59.94"-style video mode string.
@@ -597,6 +718,38 @@ pub struct SettingsUpdate {
     pub current_service_name: Option<String>,
     pub current_server_name: Option<String>,
     pub ndi_source_name: Option<String>,
+    // AVF / DirectShow device selection — Phase 8b fix.
+    pub av_video_index: Option<i32>,
+    pub av_video_name: Option<String>,
+    pub av_audio_index: Option<i32>,
+    pub av_audio_name: Option<String>,
+    // Pipe / URL source path.
+    pub pipe_path: Option<String>,
+    // Device label (IDENTITY's Label, also bmd_name in streamid).
+    pub label: Option<String>,
+    // Nested relay + overlay sub-structs. Each field optional so a
+    // partial update from the UI doesn't clobber unrelated values.
+    pub relay: Option<RelaySettingsUpdate>,
+    pub overlay: Option<OverlaySettingsUpdate>,
+}
+
+#[derive(Debug, Default)]
+pub struct RelaySettingsUpdate {
+    pub bind_host: Option<String>,
+    pub srt_port: Option<u16>,
+    pub srt_latency_us: Option<u32>,
+    pub srt_passphrase: Option<String>,
+    pub rtmp_port: Option<u16>,
+    pub rtmp_app: Option<String>,
+    pub rtmp_key: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct OverlaySettingsUpdate {
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub logo_path: Option<String>,
+    pub clock: Option<bool>,
 }
 
 // ---- Snapshot DTO ----------------------------------------------------------
