@@ -521,40 +521,11 @@
         </label>
       </section>
 
-      <!-- ---------- SRT ADVANCED ----------------------------- -->
-      <details class="card collapsible srt-only">
-        <summary class="card-title">SRT Advanced</summary>
-        <div class="row-3">
-          <label>Mode
-            <select id="srt-mode">
-              <option value="caller">caller (push)</option>
-              <option value="listener">listener (pull)</option>
-              <option value="rendezvous">rendezvous</option>
-            </select>
-          </label>
-          <label>Latency (ms)
-            <input id="srt-latency" type="number" min="20" max="8000" step="20" placeholder="500" />
-          </label>
-          <label class="srt-listener-only" hidden>Listen Port
-            <input id="srt-listen-port" type="number" min="1" max="65535" placeholder="9710" />
-          </label>
-        </div>
-        <label>Streamid override <span class="hint">(blank = use BMD default)</span>
-          <input id="streamid-override" type="text" placeholder="#!::bmd_uuid=…,u=KEY" />
-        </label>
-        <label class="check">
-          <input id="streamid-legacy" type="checkbox" />
-          <span>Use legacy <code>r=KEY,m=publish</code> form
-            <span class="hint">(third-party convention; default off matches real BMD encoders)</span>
-          </span>
-        </label>
-        <p class="hint guide">
-          <strong>500 ms latency</strong> is a safe default for public-internet pushes. Drop to
-          120–200 ms on a low-RTT LAN, raise to 1000+ ms on flaky connections. SRT will use the
-          buffer to retransmit lost packets — too-low latency means dropped packets, too-high
-          means visible delay between source and program output.
-        </p>
-      </details>
+      <!-- The standalone "SRT Advanced" details card was a duplicate
+           of the same fields living inside the destination wizard
+           above (srt-mode / srt-latency / srt-listen-port /
+           streamid-override / streamid-legacy). Removed to clear
+           the duplicate-id browser warnings. -->
 
     </div><!-- /.config-stack (right) -->
   </main>

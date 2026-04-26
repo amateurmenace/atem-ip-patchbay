@@ -66,19 +66,36 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
     )
     .layer(ServeDir::new(&static_dir));
     let index_path = static_dir.join("index.html");
-    let index_html = std::fs::read_to_string(&index_path).unwrap_or_else(|err| {
-        log::warn!(
-            "could not read index.html from {}: {} — serving placeholder",
-            index_path.display(),
-            err
-        );
-        "<!doctype html><title>ATEM IP Patchbay</title><h1>UI not found</h1>".to_string()
-    });
 
+    // Re-read index.html on every request rather than caching a copy
+    // at boot. Caching at boot meant any edit to index.html was
+    // invisible until the dev process restarted, even though edits
+    // to JS/CSS (served by ServeDir) showed up immediately. The cost
+    // is one stat + read per page load, which is negligible at
+    // anything below high-traffic-server scale and the file is small
+    // enough that the OS will keep it in the page cache anyway. If we
+    // ever serve from inside a bundled .app's Resources/ where the
+    // file genuinely never changes, we can swap in a OnceCell-cached
+    // path keyed off cfg!(debug_assertions).
     Router::new()
         .route("/", get(move || {
-            let html = index_html.clone();
-            async move { axum::response::Html(html) }
+            let path = index_path.clone();
+            async move {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(html) => axum::response::Html(html),
+                    Err(err) => {
+                        log::warn!(
+                            "could not read index.html from {}: {}",
+                            path.display(),
+                            err
+                        );
+                        axum::response::Html(
+                            "<!doctype html><title>ATEM IP Patchbay</title><h1>UI not found</h1>"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
         }))
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
