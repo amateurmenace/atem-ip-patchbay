@@ -30,7 +30,7 @@
 
 mod dashboard;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -303,6 +303,41 @@ fn ffmpeg_available() -> bool {
 
 // ---- Monitor mode (tshark wrapper) ------------------------------------------
 
+/// Build the tshark argv for live capture with the field set we
+/// want for the dashboard. Shared between the CLI monitor mode and
+/// the UI's background monitor thread so we get identical
+/// behaviour from both surfaces.
+pub(crate) fn tshark_field_args(iface: &str, filter: &str) -> Vec<String> {
+    [
+        "-i", iface, "-l", "-f", filter,
+        "-T", "fields", "-E", "separator=,",
+        // Per-frame identity: timestamp, IPs, ports, protocol label,
+        // total wire length.
+        "-e", "frame.time_relative",
+        "-e", "ip.src",
+        "-e", "tcp.srcport",
+        "-e", "udp.srcport",
+        "-e", "ip.dst",
+        "-e", "tcp.dstport",
+        "-e", "udp.dstport",
+        "-e", "_ws.col.Protocol",
+        "-e", "frame.len",
+        // SRT-only fields, populated by the dissector when this
+        // frame is a recognized SRT control packet (typically an
+        // ACKD with bandwidth + RTT). Empty strings on non-SRT or
+        // SRT-data frames; that's fine, the parser handles it.
+        "-e", "srt.iscontrol",
+        "-e", "srt.bw",
+        "-e", "srt.rate",
+        "-e", "srt.rtt",
+        "-e", "srt.rttvar",
+        "-e", "srt.bufavail",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 pub(crate) const TSHARK_PATHS: &[&str] = &[
     "/Applications/Wireshark.app/Contents/MacOS/tshark",
     "/usr/local/bin/tshark",
@@ -367,35 +402,7 @@ fn run_monitor(cli: &Cli, iface: &str) {
     println!("[{}] (Ctrl-C to stop)", clock_now());
 
     let mut child = match Command::new(tshark)
-        .args([
-            "-i",
-            iface,
-            "-l", // line-buffered output so we see packets in real time
-            "-f",
-            &filter,
-            "-T",
-            "fields",
-            "-E",
-            "separator=,",
-            "-e",
-            "frame.time_relative",
-            "-e",
-            "ip.src",
-            "-e",
-            "tcp.srcport",
-            "-e",
-            "udp.srcport",
-            "-e",
-            "ip.dst",
-            "-e",
-            "tcp.dstport",
-            "-e",
-            "udp.dstport",
-            "-e",
-            "_ws.col.Protocol",
-            "-e",
-            "frame.len",
-        ])
+        .args(tshark_field_args(iface, &filter))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -481,6 +488,27 @@ pub(crate) struct PacketInfo {
     pub is_udp: bool,
     pub protocol: String,
     pub bytes: u64,
+    /// SRT-only: present when tshark's SRT dissector parsed an ACKD
+    /// control packet from this frame. Receivers send ACKs every
+    /// ~10ms during a healthy stream so these tick frequently.
+    pub srt: Option<SrtAck>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SrtAck {
+    pub is_control: bool,
+    /// Bandwidth estimate from receiver (in pkts/s; multiply by MTU
+    /// for byte rate — most BMD streams use 1316-byte SRT payload
+    /// in MPEG-TS-over-SRT mode).
+    pub bw_pkts_s: Option<u32>,
+    /// Receive rate from receiver (pkts/s).
+    pub rate_pkts_s: Option<u32>,
+    /// Round-trip time in microseconds.
+    pub rtt_us: Option<u32>,
+    /// RTT variance in microseconds.
+    pub rttvar_us: Option<u32>,
+    /// Receiver buffer available (pkts).
+    pub buf_avail_pkts: Option<u32>,
 }
 
 impl PacketInfo {
@@ -512,22 +540,79 @@ pub(crate) struct FlowStats {
     pub total_packets: u64,
     pub window_bytes: u64,
     pub window_packets: u64,
+    pub control_packets: u64,
     pub last_seen: Option<Instant>,
+    pub first_seen: Option<Instant>,
+    /// Last SRT ACK received from the receiver of this flow. For
+    /// SRT senders, this is the destination's ack to our packets.
+    /// For receivers, it's our ack to the sender. Either way, the
+    /// numbers describe live network conditions for THIS flow.
+    pub last_srt_ack: Option<SrtAck>,
+    pub last_srt_ack_at: Option<Instant>,
+    /// Rolling bitrate samples (bytes per second over 1s windows).
+    /// Capped at 60 entries so the UI can draw a 60-second sparkline.
+    pub bitrate_samples: VecDeque<u64>,
+    /// When the last 1-second window started (for emitting samples).
+    pub bitrate_window_start: Option<Instant>,
+    /// Bytes accumulated in the current 1-second sample window.
+    pub bitrate_window_bytes: u64,
 }
 
 impl FlowStats {
     pub fn record(&mut self, bytes: u64) {
+        let now = Instant::now();
         self.total_bytes += bytes;
         self.total_packets += 1;
         self.window_bytes += bytes;
         self.window_packets += 1;
-        self.last_seen = Some(Instant::now());
+        self.last_seen = Some(now);
+        if self.first_seen.is_none() {
+            self.first_seen = Some(now);
+        }
+        // Bitrate sampling: emit a sample every ~1s of wall clock.
+        match self.bitrate_window_start {
+            Some(start) if now.duration_since(start) >= Duration::from_millis(1000) => {
+                self.bitrate_samples.push_back(self.bitrate_window_bytes);
+                while self.bitrate_samples.len() > 60 {
+                    self.bitrate_samples.pop_front();
+                }
+                self.bitrate_window_start = Some(now);
+                self.bitrate_window_bytes = bytes;
+            }
+            None => {
+                self.bitrate_window_start = Some(now);
+                self.bitrate_window_bytes = bytes;
+            }
+            _ => {
+                self.bitrate_window_bytes += bytes;
+            }
+        }
+    }
+
+    pub fn record_srt_ack(&mut self, ack: SrtAck) {
+        self.control_packets += 1;
+        self.last_srt_ack = Some(ack);
+        self.last_srt_ack_at = Some(Instant::now());
     }
 }
 
 pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
-    // 9 fields separated by commas:
-    // time, ip.src, tcp.srcport, udp.srcport, ip.dst, tcp.dstport, udp.dstport, proto, frame.len
+    // 15 fields separated by commas (was 9 before SRT extension):
+    //   0  time.relative
+    //   1  ip.src
+    //   2  tcp.srcport
+    //   3  udp.srcport
+    //   4  ip.dst
+    //   5  tcp.dstport
+    //   6  udp.dstport
+    //   7  _ws.col.Protocol
+    //   8  frame.len
+    //   9  srt.iscontrol
+    //  10  srt.bw           (ACKD bandwidth, pkts/s)
+    //  11  srt.rate         (ACKD receive rate, pkts/s)
+    //  12  srt.rtt          (ACKD RTT, microseconds)
+    //  13  srt.rttvar       (ACKD RTT variance, microseconds)
+    //  14  srt.bufavail     (receiver buffer available, pkts)
     let fields: Vec<&str> = line.split(',').collect();
     if fields.len() < 9 {
         return None;
@@ -550,6 +635,40 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
     };
     let protocol = fields[7].trim().to_string();
     let bytes: u64 = fields[8].trim().parse().unwrap_or(0);
+
+    // SRT fields are present only on UDP frames the dissector
+    // recognized as SRT — non-SRT UDP and TCP packets have empty
+    // strings for these slots. Treat any populated field as a
+    // signal that this is an SRT control packet worth recording.
+    let srt = if fields.len() >= 15 {
+        let is_control = parse_tshark_bool(fields[9]);
+        let bw = fields[10].trim().parse::<u32>().ok();
+        let rate = fields[11].trim().parse::<u32>().ok();
+        let rtt = fields[12].trim().parse::<u32>().ok();
+        let rttvar = fields[13].trim().parse::<u32>().ok();
+        let bufavail = fields[14].trim().parse::<u32>().ok();
+        if is_control.is_some()
+            || bw.is_some()
+            || rate.is_some()
+            || rtt.is_some()
+            || rttvar.is_some()
+            || bufavail.is_some()
+        {
+            Some(SrtAck {
+                is_control: is_control.unwrap_or(false),
+                bw_pkts_s: bw,
+                rate_pkts_s: rate,
+                rtt_us: rtt,
+                rttvar_us: rttvar,
+                buf_avail_pkts: bufavail,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Some(PacketInfo {
         src_ip,
         src_port,
@@ -558,7 +677,16 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
         is_udp,
         protocol,
         bytes,
+        srt,
     })
+}
+
+fn parse_tshark_bool(field: &str) -> Option<bool> {
+    match field.trim() {
+        "1" | "True" | "true" => Some(true),
+        "0" | "False" | "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn print_flow_table(flows: &HashMap<FlowKey, FlowStats>, window: Duration) {

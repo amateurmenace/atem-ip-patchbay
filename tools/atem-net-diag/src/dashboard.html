@@ -120,6 +120,62 @@
     td.right { text-align: right; }
     td .small { color: var(--muted); font-size: 11px; }
 
+    /* Live-stream cards — the headline feature. One card per
+       observed flow on the monitored interface. */
+    .stream-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+      gap: 12px;
+    }
+    .stream-card {
+      background: var(--panel-2); border: 1px solid var(--line);
+      border-radius: 9px; padding: 14px 14px 10px;
+      display: flex; flex-direction: column; gap: 8px;
+      position: relative; overflow: hidden;
+    }
+    .stream-card.streaming { border-color: rgba(70,201,134,0.5); }
+    .stream-card.streaming::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: var(--good); animation: pulse 2s ease-in-out infinite;
+    }
+    .stream-card.stalling { border-color: rgba(243,196,75,0.5); }
+    .stream-card.idle { opacity: 0.65; }
+    .stream-card.handshake { border-color: rgba(78,167,255,0.5); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+    }
+    .stream-head {
+      display: flex; align-items: center; gap: 8px;
+      flex-wrap: wrap;
+    }
+    .stream-head .badge { flex-shrink: 0; }
+    .stream-route {
+      font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+      font-size: 11.5px; color: var(--text);
+      word-break: break-all; flex: 1; min-width: 0;
+    }
+    .stream-route .arrow { color: var(--muted); margin: 0 4px; }
+    .stream-bitrate {
+      font-size: 28px; font-weight: 800; line-height: 1.1;
+      color: var(--text); letter-spacing: -0.01em;
+    }
+    .stream-bitrate .unit {
+      font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 4px;
+    }
+    .stream-stats {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px;
+      font-size: 11px;
+    }
+    .stream-stats .label {
+      color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase;
+      font-size: 9.5px; font-weight: 700;
+    }
+    .stream-stats .value {
+      color: var(--text); font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    }
+    .stream-spark {
+      display: block; width: 100%; height: 28px;
+    }
     .timeline {
       display: flex; gap: 2px; flex-wrap: wrap;
     }
@@ -196,22 +252,13 @@
     </section>
 
     <section class="card full">
-      <h2>Live flows <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="flows-summary"></span></h2>
-      <table id="flow-table" hidden>
-        <thead>
-          <tr>
-            <th>source</th>
-            <th>destination</th>
-            <th>proto</th>
-            <th class="right">total bytes</th>
-            <th class="right">recent (5s)</th>
-            <th class="right">idle</th>
-          </tr>
-        </thead>
-        <tbody id="flow-table-body"></tbody>
-      </table>
+      <h2>Live streams <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="flows-summary"></span></h2>
+      <div class="stream-grid" id="stream-grid"></div>
       <div class="empty" id="flows-empty">
-        Monitor mode not enabled. Start the tool with <code>--monitor en0</code> (or your LAN interface) to populate this panel.
+        No traffic on the monitored ports yet. Make sure your encoder is pointed
+        at this network's ATEM, then watch streams populate here as they
+        connect. The capture interface and ports are configurable via CLI
+        flags (<code>--monitor IFACE</code>, <code>--port N</code>).
       </div>
     </section>
   </main>
@@ -335,39 +382,167 @@
             </tr>`).join('');
       }
 
-      // Flows
+      // Live streams — per-flow cards
       const flows = s.flows || [];
       const flowEmpty = $('#flows-empty');
-      const flowTable = $('#flow-table');
+      const grid = $('#stream-grid');
       const flowSummary = $('#flows-summary');
       if (!cfg.monitor_iface) {
         flowEmpty.hidden = false;
-        flowEmpty.innerHTML = `Monitor mode not enabled. Start the tool with <code>--monitor en0</code> (or your LAN interface) to populate this panel.`;
-        flowTable.hidden = true;
+        flowEmpty.innerHTML = `Monitor not running. Make sure tshark is installed (<code>brew install --cask wireshark</code>) and capture permissions are set (Wireshark installer's "Install ChmodBPF" option).`;
+        grid.innerHTML = '';
         flowSummary.textContent = '';
       } else if (flows.length === 0) {
         flowEmpty.hidden = false;
-        flowEmpty.innerHTML = `Listening on <code>${cfg.monitor_iface}</code> for ports <code>${(cfg.monitor_ports.length ? cfg.monitor_ports : [1935, 9710, 9977, 1936]).join(', ')}</code> — no traffic yet.`;
-        flowTable.hidden = true;
+        flowEmpty.innerHTML = `Listening on <code>${cfg.monitor_iface}</code> for ports <code>${(cfg.monitor_ports.length ? cfg.monitor_ports : [1935, 9710, 9977, 1936]).join(', ')}</code> — no traffic yet. Streams will appear as cards here as they connect.`;
+        grid.innerHTML = '';
         flowSummary.textContent = '';
       } else {
         flowEmpty.hidden = true;
-        flowTable.hidden = false;
-        flowSummary.textContent = `${flows.length} active`;
-        $('#flow-table-body').innerHTML = flows.slice(0, 30).map((f) => {
-          const proto = f.protocol || (f.is_udp ? 'UDP' : 'TCP');
-          const rate = f.recent_bytes ? fmtBytes(Math.round(f.recent_bytes / 5)) + '/s' : '—';
-          return `
-            <tr ${f.recent_bytes > 0 ? 'class="row-recent"' : ''}>
-              <td class="mono">${f.src_ip}:${f.src_port}</td>
-              <td class="mono">${f.dst_ip}:${f.dst_port}</td>
-              <td>${proto}</td>
-              <td class="right mono">${fmtBytes(f.total_bytes)}</td>
-              <td class="right mono">${rate}</td>
-              <td class="right mono">${fmtAgo(f.idle_secs)}</td>
-            </tr>`;
-        }).join('');
+        const summary = flows.reduce((acc, f) => {
+          if (f.health === 'streaming') acc.streaming++;
+          else if (f.health === 'stalling') acc.stalling++;
+          else if (f.health === 'handshake') acc.handshake++;
+          else if (f.health === 'idle') acc.idle++;
+          return acc;
+        }, { streaming: 0, stalling: 0, handshake: 0, idle: 0 });
+        const parts = [];
+        if (summary.streaming) parts.push(`${summary.streaming} streaming`);
+        if (summary.handshake) parts.push(`${summary.handshake} handshake`);
+        if (summary.stalling) parts.push(`${summary.stalling} stalling`);
+        if (summary.idle) parts.push(`${summary.idle} idle`);
+        flowSummary.textContent = parts.join(' · ');
+        grid.innerHTML = flows.slice(0, 12).map(renderStreamCard).join('');
+        // Draw the bitrate sparklines after DOM insertion.
+        flows.slice(0, 12).forEach((f, i) => {
+          const canvas = grid.querySelector(`#spark-${i}`);
+          if (canvas) drawSparkline(canvas, f.bitrate_samples || []);
+        });
       }
+    }
+
+    function renderStreamCard(f, i) {
+      const proto = f.protocol || (f.is_udp ? 'UDP' : 'TCP');
+      const isSrt = f.is_udp && (f.last_srt_rtt_ms != null || f.protocol === 'SRT');
+      // Current bitrate: prefer SRT receiver-reported rate (truth from the
+      // wire) when available, else last sample from the locally-measured
+      // bitrate ring buffer.
+      let bitrateKbps = 0;
+      if (f.last_srt_rate_kbps && f.last_srt_rate_kbps > 0) {
+        bitrateKbps = f.last_srt_rate_kbps;
+      } else if (f.bitrate_samples && f.bitrate_samples.length > 0) {
+        // Last sample is bytes/second; convert to kbps.
+        bitrateKbps = Math.round(f.bitrate_samples[f.bitrate_samples.length - 1] * 8 / 1000);
+      }
+      const bitrateDisplay = bitrateKbps >= 1000
+        ? { value: (bitrateKbps / 1000).toFixed(2), unit: 'Mbps' }
+        : { value: bitrateKbps.toString(), unit: 'kbps' };
+
+      const stats = [];
+      if (f.last_srt_rtt_ms != null) {
+        const rttvar = f.last_srt_rttvar_ms != null ? ` ±${f.last_srt_rttvar_ms}` : '';
+        stats.push({ label: 'RTT', value: `${f.last_srt_rtt_ms} ms${rttvar}` });
+      }
+      if (f.last_srt_buf_pkts != null) {
+        stats.push({ label: 'Buffer', value: `${f.last_srt_buf_pkts} pkt` });
+      }
+      stats.push({ label: 'Total', value: fmtBytes(f.total_bytes) });
+      stats.push({ label: 'Duration', value: fmtDuration(f.duration_secs) });
+      stats.push({ label: 'Packets', value: f.total_packets.toLocaleString() });
+      const lastSeenStr = fmtAgo(f.idle_secs);
+      stats.push({ label: 'Last pkt', value: lastSeenStr });
+
+      const health = f.health || 'unknown';
+      const healthLabel = {
+        streaming: 'STREAMING',
+        stalling: 'STALLING',
+        handshake: 'HANDSHAKE',
+        idle: 'IDLE',
+        unknown: '—',
+      }[health] || health.toUpperCase();
+      const healthClass = {
+        streaming: 'connected',
+        stalling: 'timeout',
+        handshake: 'idle',
+        idle: 'idle',
+      }[health] || 'idle';
+
+      return `
+        <div class="stream-card ${health}">
+          <div class="stream-head">
+            <span class="badge ${healthClass}">${healthLabel}</span>
+            <span class="badge idle">${proto}${isSrt && proto !== 'SRT' ? ' / SRT' : ''}</span>
+          </div>
+          <div class="stream-route">
+            <span>${f.src_ip}:${f.src_port}</span>
+            <span class="arrow">→</span>
+            <span>${f.dst_ip}:${f.dst_port}</span>
+          </div>
+          <div class="stream-bitrate">
+            ${bitrateDisplay.value}<span class="unit">${bitrateDisplay.unit}</span>
+          </div>
+          <canvas id="spark-${i}" class="stream-spark" width="300" height="28"></canvas>
+          <div class="stream-stats">
+            ${stats.map((s) => `
+              <div>
+                <div class="label">${s.label}</div>
+                <div class="value">${s.value}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>`;
+    }
+
+    function drawSparkline(canvas, samples) {
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || canvas.width;
+      const h = canvas.clientHeight || canvas.height;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+      if (!samples || samples.length === 0) {
+        ctx.fillStyle = '#555';
+        ctx.font = '10px -apple-system';
+        ctx.fillText('(no data)', 4, 16);
+        return;
+      }
+      const max = Math.max(...samples, 1);
+      const stepX = w / Math.max(samples.length - 1, 1);
+      ctx.beginPath();
+      samples.forEach((v, i) => {
+        const x = i * stepX;
+        const y = h - (v / max) * (h - 2) - 1;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      // Fill under the line
+      ctx.lineTo((samples.length - 1) * stepX, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(70,201,134,0.18)';
+      ctx.fill();
+      // Stroke the line on top
+      ctx.beginPath();
+      samples.forEach((v, i) => {
+        const x = i * stepX;
+        const y = h - (v / max) * (h - 2) - 1;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = '#46c986';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    function fmtDuration(s) {
+      if (!s || s < 1) return '<1s';
+      if (s < 60) return Math.floor(s) + 's';
+      if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return h + 'h ' + m + 'm';
     }
 
     // Config form: pre-fills from current state, posts updates to

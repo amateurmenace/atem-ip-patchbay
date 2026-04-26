@@ -20,8 +20,8 @@ use serde::Serialize;
 use tiny_http::{Header, Response, Server};
 
 use crate::{
-    build_bmd_srt_url, find_tshark, parse_tshark_line, probe as probe_url, FlowKey, FlowStats,
-    ProbeOutcome, Stats,
+    build_bmd_srt_url, find_tshark, parse_tshark_line, probe as probe_url, tshark_field_args,
+    FlowKey, FlowStats, ProbeOutcome, Stats,
 };
 
 const KEEP_LAST_PROBES: usize = 250;
@@ -97,8 +97,25 @@ pub struct FlowSnapshot {
     pub protocol: String,
     pub total_bytes: u64,
     pub total_packets: u64,
+    pub control_packets: u64,
     pub recent_bytes: u64,
     pub idle_secs: f64,
+    pub duration_secs: f64,
+    /// Per-second byte samples over the last 60s (or however many
+    /// have been collected). Front of vec is oldest.
+    pub bitrate_samples: Vec<u64>,
+    /// Most recent SRT ACK we saw for this flow, if any. None for
+    /// non-SRT flows or SRT flows where no ACKs have arrived yet
+    /// (e.g. the very first second of a fresh handshake).
+    pub last_srt_rtt_ms: Option<u64>,
+    pub last_srt_rttvar_ms: Option<u64>,
+    pub last_srt_bw_kbps: Option<u32>,
+    pub last_srt_rate_kbps: Option<u32>,
+    pub last_srt_buf_pkts: Option<u32>,
+    pub last_srt_ack_idle_secs: Option<f64>,
+    /// Health classification — driven by the data points above.
+    /// "streaming" / "stalling" / "idle" / "handshake" / "unknown".
+    pub health: String,
 }
 
 /// Run the dashboard. Spawns probe + (optional) monitor threads,
@@ -128,16 +145,33 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .spawn(move || probe_loop(probe_state))
         .expect("spawn probe loop");
 
-    if let Some(iface) = cli.monitor_iface.clone() {
+    // Auto-start the flow monitor in UI mode even if --monitor
+    // wasn't explicitly passed. The dashboard's value proposition
+    // is "see what streams are flowing right now", and that needs
+    // tshark — making the operator pass an extra flag for the
+    // headline feature is a bad default. If tshark is missing, the
+    // monitor thread exits cleanly and the dashboard reports the
+    // missing dep.
+    let monitor_iface = cli.monitor_iface.clone().unwrap_or_else(|| {
+        if cfg!(target_os = "macos") {
+            "en0".to_string()
+        } else {
+            "any".to_string()
+        }
+    });
+    {
         let mon_state = state.clone();
         let ports = if cli.monitor_ports.is_empty() {
             crate::DEFAULT_MONITOR_PORTS.to_vec()
         } else {
             cli.monitor_ports.clone()
         };
+        // Reflect the auto-picked iface into config so the UI can
+        // show + edit it.
+        state.lock().unwrap().config.monitor_iface = Some(monitor_iface.clone());
         std::thread::Builder::new()
             .name("monitor-loop".into())
-            .spawn(move || monitor_loop(iface, ports, mon_state))
+            .spawn(move || monitor_loop(monitor_iface, ports, mon_state))
             .expect("spawn monitor loop");
     }
 
@@ -237,17 +271,61 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         );
     }
     let now = now_secs();
+    let now_inst = Instant::now();
     let mut flows: Vec<FlowSnapshot> = s
         .flows
         .iter()
         .filter_map(|(k, fs)| {
             let idle_secs = fs
                 .last_seen
-                .map(|t| Instant::now().duration_since(t).as_secs_f64())
+                .map(|t| now_inst.duration_since(t).as_secs_f64())
                 .unwrap_or(f64::INFINITY);
             if idle_secs > FLOW_STALE_SECS as f64 {
                 return None;
             }
+            let duration_secs = fs
+                .first_seen
+                .map(|t| now_inst.duration_since(t).as_secs_f64())
+                .unwrap_or(0.0);
+            let bitrate_samples: Vec<u64> = fs.bitrate_samples.iter().copied().collect();
+            let ack_idle = fs
+                .last_srt_ack_at
+                .map(|t| now_inst.duration_since(t).as_secs_f64());
+            // SRT ACK fields: bandwidth + rate are reported as
+            // packets/second; convert to a kbps approximation
+            // assuming 1316-byte SRT payload (the BMD-flavored
+            // MPEG-TS-over-SRT default — close enough for live
+            // bandwidth display).
+            let pkts_to_kbps = |pkts: u32| (pkts as u64 * 1316 * 8 / 1000) as u32;
+            let last_srt_rtt_ms = fs.last_srt_ack.as_ref()
+                .and_then(|a| a.rtt_us.map(|u| (u / 1000) as u64));
+            let last_srt_rttvar_ms = fs.last_srt_ack.as_ref()
+                .and_then(|a| a.rttvar_us.map(|u| (u / 1000) as u64));
+            let last_srt_bw_kbps = fs.last_srt_ack.as_ref()
+                .and_then(|a| a.bw_pkts_s.map(pkts_to_kbps));
+            let last_srt_rate_kbps = fs.last_srt_ack.as_ref()
+                .and_then(|a| a.rate_pkts_s.map(pkts_to_kbps));
+            let last_srt_buf_pkts = fs.last_srt_ack.as_ref()
+                .and_then(|a| a.buf_avail_pkts);
+            // Health heuristic. "streaming" if bytes flowed in the
+            // current/last sample window. "stalling" if the flow
+            // was active but recent_bytes is zero (packets stopped
+            // mid-stream). "idle" if it's been quiet for several
+            // seconds. "handshake" if we've seen control packets
+            // but very few data packets — sender warming up.
+            let total_data_packets = fs.total_packets.saturating_sub(fs.control_packets);
+            let health = if fs.window_bytes > 0 {
+                "streaming"
+            } else if idle_secs > 5.0 {
+                "idle"
+            } else if total_data_packets < 10 && fs.control_packets > 0 {
+                "handshake"
+            } else if fs.total_packets > 0 {
+                "stalling"
+            } else {
+                "unknown"
+            }
+            .to_string();
             Some(FlowSnapshot {
                 src_ip: k.src_ip.clone(),
                 src_port: k.src_port,
@@ -257,8 +335,18 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
                 protocol: k.protocol.clone(),
                 total_bytes: fs.total_bytes,
                 total_packets: fs.total_packets,
+                control_packets: fs.control_packets,
                 recent_bytes: fs.window_bytes,
                 idle_secs,
+                duration_secs,
+                bitrate_samples,
+                last_srt_rtt_ms,
+                last_srt_rttvar_ms,
+                last_srt_bw_kbps,
+                last_srt_rate_kbps,
+                last_srt_buf_pkts,
+                last_srt_ack_idle_secs: ack_idle,
+                health,
             })
         })
         .collect();
@@ -422,12 +510,7 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
         .collect::<Vec<_>>()
         .join(" or ");
     let mut child = match Command::new(tshark)
-        .args([
-            "-i", &iface, "-l", "-f", &filter, "-T", "fields", "-E", "separator=,",
-            "-e", "frame.time_relative", "-e", "ip.src", "-e", "tcp.srcport",
-            "-e", "udp.srcport", "-e", "ip.dst", "-e", "tcp.dstport", "-e",
-            "udp.dstport", "-e", "_ws.col.Protocol", "-e", "frame.len",
-        ])
+        .args(tshark_field_args(&iface, &filter))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -449,6 +532,9 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
             let key = packet.flow_key();
             let stats = s.flows.entry(key).or_default();
             stats.record(packet.bytes);
+            if let Some(ack) = packet.srt {
+                stats.record_srt_ack(ack);
+            }
             s.last_flow_at = now_secs();
         }
     }
