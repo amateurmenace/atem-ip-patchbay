@@ -55,3 +55,4 @@ src-tauri/sidecar/ffmpeg.exe
 # stay out of source control.
 tools/*/target/
 tools/*/Cargo.lock
+.claude/
