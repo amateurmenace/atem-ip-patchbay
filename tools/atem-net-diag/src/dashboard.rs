@@ -10,7 +10,7 @@
 //! so it gets its own surface that reuses the existing helpers
 //! (probe(), parse_tshark_line()) without disturbing them.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -129,6 +129,75 @@ pub struct WanSnapshot {
     pub isp_org: Option<String>,
     pub wan_latency_ms: Option<u64>,
     pub wan_status: Option<String>,
+    pub gw_cpu_pct: Option<f64>,
+    pub gw_mem_pct: Option<f64>,
+    pub gw_uptime_secs: Option<u64>,
+}
+
+/// Status of the slower-cadence "system" poll (switches, alarms).
+/// Separate from UnifiStatus so a slow / failing system endpoint
+/// doesn't make the client poll look broken.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SystemStatus {
+    NotConfigured,
+    Connecting,
+    Connected { last_poll_at: u64 },
+    Failed { error: String, last_attempt: u64 },
+}
+
+impl Default for SystemStatus {
+    fn default() -> Self { SystemStatus::NotConfigured }
+}
+
+/// Snapshot of one UniFi switch (USW). Surfaces per-port real-time
+/// utilization, errors, and link state — operator can spot a
+/// saturated port, errors creeping up on the ATEM port, or an SFP
+/// running hot before it fails. Only USW devices populate; UAPs
+/// and the UDM itself are excluded since their "ports" are wireless
+/// or routed and have different surface.
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchSnapshot {
+    pub mac: String,
+    pub name: String,
+    pub model: String,
+    pub cpu_pct: Option<f64>,
+    pub mem_pct: Option<f64>,
+    pub uptime_secs: Option<u64>,
+    pub ports: Vec<SwitchPortSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchPortSnapshot {
+    pub port_idx: u32,
+    pub name: String,
+    pub media: Option<String>,
+    pub speed_mbps: u32,
+    pub up: bool,
+    pub tx_kbps: u64,
+    pub rx_kbps: u64,
+    pub tx_errors: u64,
+    pub rx_errors: u64,
+    pub tx_dropped: u64,
+    pub rx_dropped: u64,
+    pub link_down_count: u64,
+    pub connected_mac: Option<String>,
+    pub connected_ip: Option<String>,
+    pub is_atem_port: bool,
+    pub sfp_temp_c: Option<f64>,
+    pub sfp_tx_dbm: Option<f64>,
+    pub sfp_rx_dbm: Option<f64>,
+}
+
+/// Active alarm reported by the UDM. Empty list = healthy. Surfaces
+/// security warnings, link-down events, AP-adoption issues, etc.
+#[derive(Clone, Debug, Serialize)]
+pub struct AlarmSnapshot {
+    pub key: String,
+    pub msg: String,
+    pub subsystem: String,
+    pub time: u64,
+    pub severity: Option<String>,
 }
 
 impl Default for UnifiStatus {
@@ -196,6 +265,21 @@ pub struct DashboardState {
     /// Front of deque is oldest sample.
     pub wan_upload_history: VecDeque<(u64, u64)>,
     pub wan_download_history: VecDeque<(u64, u64)>,
+
+    /// Switch + alarm data from the slower-cadence system poll.
+    pub switches: Vec<SwitchSnapshot>,
+    pub alarms: Vec<AlarmSnapshot>,
+    pub system_status: SystemStatus,
+    pub last_system_poll_at: u64,
+    pub system_thread_alive: bool,
+
+    /// Reverse-DNS cache + work queue. The poller adds source IPs
+    /// (from observed flows) to `rdns_pending`; a background worker
+    /// resolves them and writes the result here. Cache value is
+    /// `Some(hostname)` on success, `None` after a failed lookup
+    /// (so we don't retry forever for IPs without PTR records).
+    pub rdns_cache: HashMap<String, Option<String>>,
+    pub rdns_pending: HashSet<String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -272,6 +356,12 @@ pub struct StateResponse<'a> {
     pub wan_thread_alive: bool,
     pub wan_upload_kbps_history: Vec<u64>,
     pub wan_download_kbps_history: Vec<u64>,
+    pub switches: &'a [SwitchSnapshot],
+    pub alarms: &'a [AlarmSnapshot],
+    pub system_status: &'a SystemStatus,
+    pub last_system_poll_at: u64,
+    pub system_thread_alive: bool,
+    pub rdns_cache: HashMap<String, Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -389,10 +479,27 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         // doesn't starve client polling and vice versa.
         let wan_state = state.clone();
         let wan_host = state.lock().unwrap().config.unifi_host.clone();
+        let wan_creds = creds.clone();
         std::thread::Builder::new()
             .name("wan-poll".into())
-            .spawn(move || unifi::wan_poll_loop(wan_host, creds, wan_state))
+            .spawn(move || unifi::wan_poll_loop(wan_host, wan_creds, wan_state))
             .expect("spawn wan poll");
+
+        // System poll: switches + alarms (slower cadence: 5s).
+        let sys_state = state.clone();
+        let sys_host = state.lock().unwrap().config.unifi_host.clone();
+        std::thread::Builder::new()
+            .name("system-poll".into())
+            .spawn(move || unifi::system_poll_loop(sys_host, creds, sys_state))
+            .expect("spawn system poll");
+
+        // Reverse-DNS resolver thread: pulls source IPs out of the
+        // pending queue, runs `host` to look them up, caches results.
+        let rdns_state = state.clone();
+        std::thread::Builder::new()
+            .name("rdns-worker".into())
+            .spawn(move || unifi::rdns_worker_loop(rdns_state))
+            .expect("spawn rdns worker");
     }
 
     // Auto-start the flow monitor in UI mode even if --monitor
@@ -604,6 +711,7 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
     flows.sort_by(|a, b| b.recent_bytes.cmp(&a.recent_bytes));
     let wan_upload_kbps_history: Vec<u64> = s.wan_upload_history.iter().map(|(_, kbps)| *kbps).collect();
     let wan_download_kbps_history: Vec<u64> = s.wan_download_history.iter().map(|(_, kbps)| *kbps).collect();
+    let rdns_cache = s.rdns_cache.clone();
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -625,6 +733,12 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         wan_thread_alive: s.wan_thread_alive,
         wan_upload_kbps_history,
         wan_download_kbps_history,
+        switches: &s.switches,
+        alarms: &s.alarms,
+        system_status: &s.system_status,
+        last_system_poll_at: s.last_system_poll_at,
+        system_thread_alive: s.system_thread_alive,
+        rdns_cache,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
@@ -920,6 +1034,17 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
         if let Some(packet) = parse_tshark_line(&line) {
             let mut s = state.lock().unwrap();
             let flow_key = packet.flow_key();
+            // Enqueue the flow's source IP for reverse DNS resolution
+            // if we haven't seen it before. Skip RFC1918 / loopback
+            // since reverse DNS for those rarely produces useful
+            // names and we don't want to spam the resolver.
+            let src = flow_key.src_ip.clone();
+            if !is_private_or_loopback(&src)
+                && !s.rdns_cache.contains_key(&src)
+                && !s.rdns_pending.contains(&src)
+            {
+                s.rdns_pending.insert(src);
+            }
             let stats = s.flows.entry(flow_key.clone()).or_default();
             stats.record(packet.bytes);
             if let Some(ack) = packet.srt {
@@ -946,6 +1071,22 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Heuristic: skip reverse-DNS lookups for IPs that almost never have
+/// useful PTR records (RFC1918 LAN ranges, loopback, link-local). The
+/// public-internet sources we DO want to resolve get queued normally.
+pub fn is_private_or_loopback(ip: &str) -> bool {
+    let octets: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();
+    if octets.len() != 4 { return true; } // IPv6 or malformed — skip for now
+    let (a, b) = (octets[0], octets[1]);
+    a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || a == 127
+        || a == 0
+        || (a == 169 && b == 254)
+        || a >= 224 // multicast / reserved
 }
 
 fn html_header() -> Header {
