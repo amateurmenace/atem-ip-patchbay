@@ -271,15 +271,36 @@ jobs:
 
       - name: Install NDI SDK (Windows)
         shell: pwsh
+        timeout-minutes: 5
         run: |
-          # NewTek's NDI 6 SDK Windows installer is a small .exe
-          # that lays headers + libs under "C:\Program Files\NDI\NDI 6 SDK".
+          # NewTek's NDI 6 SDK Windows installer. Built with
+          # InstallShield (NOT Inno Setup), so the /S flag we
+          # initially tried hung the runner waiting on a UAC dialog
+          # — alpha.6's Windows job ran for 59 minutes on this step
+          # before being cancelled. /s /v"/qn" is the standard
+          # InstallShield silent install: /s skips the wrapper UI,
+          # /v"/qn" forwards "/qn" to msiexec for the underlying
+          # MSI. timeout-minutes caps the disaster radius if the
+          # installer changes idiom again — better to fail fast and
+          # iterate on alpha.N+1 than waste 6h of CI per botched run.
           $url = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20SDK.exe"
           $out = "$env:RUNNER_TEMP\ndi-sdk.exe"
           Invoke-WebRequest -Uri $url -OutFile $out
-          # /S = silent, /D= = install dir (Inno Setup convention).
-          Start-Process -FilePath $out -ArgumentList "/S" -Wait -NoNewWindow
-          Get-ChildItem "C:\Program Files\NDI\NDI 6 SDK\Include" | Select-Object -First 3
+          $proc = Start-Process -FilePath $out -ArgumentList @('/s', '/v"/qn"') -Wait -NoNewWindow -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "Installer exited with code $($proc.ExitCode)"
+          }
+          # The SDK lays out under either "C:\Program Files\NDI\NDI 6 SDK"
+          # or "C:\Program Files\NDI\NDI SDK for Windows" depending on
+          # version; surface whichever exists so the build sees the headers.
+          if (Test-Path "C:\Program Files\NDI\NDI 6 SDK\Include") {
+            Get-ChildItem "C:\Program Files\NDI\NDI 6 SDK\Include" | Select-Object -First 3
+          } elseif (Test-Path "C:\Program Files\NDI\NDI SDK for Windows\Include") {
+            Get-ChildItem "C:\Program Files\NDI\NDI SDK for Windows\Include" | Select-Object -First 3
+          } else {
+            Write-Host "WARNING: NDI SDK install completed but no Include directory found"
+            Get-ChildItem "C:\Program Files\NDI" -ErrorAction SilentlyContinue | Format-Table
+          }
 
       - name: Download FFmpeg sidecar (BtbN GPL build, x64)
         shell: pwsh
@@ -321,6 +342,14 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build-macos, build-windows]
+    # Release if the Mac build succeeded — even if Windows
+    # failed/cancelled. Mac-only alphas are still useful, and
+    # blocking the .dmg publish on a flaky Windows installer was
+    # what stranded alpha.6's Mac build at the artifact-only stage
+    # for an hour. The Windows .exe simply doesn't appear in the
+    # release if its build failed; users see a clear absence rather
+    # than a stale .exe from a previous run.
+    if: always() && needs.build-macos.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -338,8 +367,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Build the file list dynamically — Windows artifact may
+          # be missing if its build failed (we still publish the
+          # Mac build alone).
+          FILES=()
+          if compgen -G "artifacts/macos-arm64/*.dmg" > /dev/null; then
+            FILES+=(artifacts/macos-arm64/*.dmg)
+          fi
+          if compgen -G "artifacts/windows-x64/*.exe" > /dev/null; then
+            FILES+=(artifacts/windows-x64/*.exe)
+          fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            artifacts/macos-arm64/*.dmg \
-            artifacts/windows-x64/*.exe
+            "${FILES[@]}"
