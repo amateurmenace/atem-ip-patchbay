@@ -86,21 +86,35 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
                 match tokio::fs::read_to_string(&path).await {
                     Ok(html) => axum::response::Html(html),
                     Err(err) => {
-                        log::warn!(
-                            "could not read index.html from {}: {}",
+                        log::error!(
+                            "UI bundle missing — could not read index.html from {}: {}",
                             path.display(),
                             err
                         );
-                        axum::response::Html(
-                            "<!doctype html><title>ATEM IP Patchbay</title><h1>UI not found</h1>"
-                                .to_string(),
-                        )
+                        axum::response::Html(format!(
+                            "<!doctype html>\
+                             <html><head><meta charset=\"utf-8\"><title>ATEM IP Patchbay</title>\
+                             <style>body{{font-family:-apple-system,system-ui,sans-serif;\
+                             background:#0e0f12;color:#e6e6ea;margin:0;padding:48px;line-height:1.6;}}\
+                             code{{background:#0a0b0e;padding:2px 6px;border-radius:4px;font-size:13px;}}\
+                             a{{color:#7fc8ff;}}</style></head><body>\
+                             <h1>UI bundle missing</h1>\
+                             <p>The static UI was not bundled into this build. \
+                             Tried to read <code>{}</code>.</p>\
+                             <p>This is a packaging bug — please report it at \
+                             <a href=\"https://github.com/amateurmenace/atem-ip-patchbay/issues\">\
+                             github.com/amateurmenace/atem-ip-patchbay/issues</a> with the \
+                             release version you downloaded.</p>\
+                             </body></html>",
+                            path.display()
+                        ))
                     }
                 }
             }
         }))
         .route("/api/state", get(api_state))
         .route("/api/lan-ip", get(api_lan_ip))
+        .route("/api/lan-ips", get(api_lan_ips))
         .route("/api/preview", get(api_preview))
         .route("/api/preview/start", post(api_preview_start))
         .route("/api/preview/stop", post(api_preview_stop))
@@ -144,14 +158,156 @@ struct LanIp {
 }
 
 async fn api_lan_ip() -> impl IntoResponse {
-    let ip = local_ip_address::local_ip()
-        .map(|i| i.to_string())
-        .unwrap_or_else(|_| guess_loopback());
+    // Legacy single-IP endpoint kept for back-compat with any UI code
+    // that hasn't migrated to /api/lan-ips. Prefers the result of the
+    // smarter multi-IP picker; falls back to local_ip_address's
+    // default-route guess; falls back to empty string so the UI can
+    // tell when no LAN IP could be determined and prompt the user
+    // instead of showing a misleading placeholder.
+    let candidates = candidate_lan_ips();
+    let ip = pick_best_lan_ip(&candidates).unwrap_or_default();
     Json(LanIp { ip })
 }
 
-fn guess_loopback() -> String {
-    "127.0.0.1".to_string()
+#[derive(Serialize)]
+struct LanInterface {
+    name: String,
+    ip: String,
+    /// True when this is our heuristic best-guess. The UI defaults the
+    /// publish-URL to this one but exposes a picker for users with
+    /// multiple interfaces (Wi-Fi + Ethernet, VPN, Internet Sharing,
+    /// etc.) so a wrong default can be corrected without manual typing.
+    preferred: bool,
+}
+
+#[derive(Serialize)]
+struct LanIpsResponse {
+    interfaces: Vec<LanInterface>,
+    /// Convenience: same as the `preferred=true` interface's IP. Empty
+    /// string when no usable interface is available — the UI uses an
+    /// empty value to show "we couldn't detect your LAN IP, type it
+    /// in" rather than ever displaying a wrong default.
+    preferred_ip: String,
+}
+
+async fn api_lan_ips() -> impl IntoResponse {
+    let candidates = candidate_lan_ips();
+    let preferred = pick_best_lan_ip(&candidates).unwrap_or_default();
+    let interfaces = candidates
+        .into_iter()
+        .map(|(name, ip)| {
+            let preferred_match = ip == preferred;
+            LanInterface {
+                name,
+                ip,
+                preferred: preferred_match,
+            }
+        })
+        .collect();
+    Json(LanIpsResponse {
+        interfaces,
+        preferred_ip: preferred,
+    })
+}
+
+/// Enumerate every IPv4 interface that's usable as a LAN listening
+/// address. Excludes loopback and link-local (169.254.x.x). Returns
+/// (interface-name, ip) pairs in the order the OS reports them — the
+/// frontend can show this list as a picker when local_ip_address's
+/// default-route guess picks the wrong interface (Internet Sharing
+/// at 192.168.2.1 is the canonical bad default).
+fn candidate_lan_ips() -> Vec<(String, String)> {
+    use std::net::IpAddr;
+    let raw = match local_ip_address::list_afinet_netifas() {
+        Ok(list) => list,
+        Err(err) => {
+            log::warn!("could not enumerate network interfaces: {err}");
+            return Vec::new();
+        }
+    };
+    raw.into_iter()
+        .filter_map(|(name, ip)| match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+                    None
+                } else {
+                    Some((name, v4.to_string()))
+                }
+            }
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+/// Pick the interface most likely to be the one a user wants to share
+/// with cameras / encoders on the LAN. Heuristic in priority order:
+///   1. The local_ip_address default-route guess, if it's RFC 1918
+///      AND not the Apple Internet Sharing range (192.168.2.0/24).
+///   2. The first RFC 1918 candidate that ISN'T Internet Sharing.
+///   3. Any RFC 1918 candidate (including Internet Sharing — better
+///      than nothing if that's literally what the user has).
+///   4. None — the UI will prompt for manual entry.
+///
+/// Apple's Internet Sharing always uses 192.168.2.0/24 with the host
+/// as 192.168.2.1; if that's the only thing local_ip_address sees,
+/// the user almost certainly has Wi-Fi/Ethernet on a different subnet
+/// and we want to show them THAT instead.
+fn pick_best_lan_ip(candidates: &[(String, String)]) -> Option<String> {
+    fn is_internet_sharing(ip: &str) -> bool {
+        ip.starts_with("192.168.2.")
+    }
+    fn is_rfc1918(ip: &str) -> bool {
+        ip.starts_with("10.")
+            || ip.starts_with("192.168.")
+            || (ip.starts_with("172.")
+                && ip
+                    .split('.')
+                    .nth(1)
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .map(|n| (16..=31).contains(&n))
+                    .unwrap_or(false))
+    }
+
+    // Default-route guess: usually correct on simple setups, but
+    // local_ip_address picks alphabetically/by routing-table order
+    // which can land on Internet Sharing or a virtual interface.
+    let route_guess = local_ip_address::local_ip()
+        .ok()
+        .map(|ip| ip.to_string());
+
+    if let Some(guess) = &route_guess {
+        if is_rfc1918(guess) && !is_internet_sharing(guess) {
+            return Some(guess.clone());
+        }
+    }
+
+    // First non-Internet-Sharing RFC 1918 candidate from the
+    // interface list. Wi-Fi (en0) and Ethernet (en1+) typically come
+    // before Internet Sharing's bridge100 in this list.
+    for (_, ip) in candidates {
+        if is_rfc1918(ip) && !is_internet_sharing(ip) {
+            return Some(ip.clone());
+        }
+    }
+
+    // Fallback: any RFC 1918, including Internet Sharing — better
+    // than nothing. The UI still surfaces the full list so the user
+    // can override.
+    for (_, ip) in candidates {
+        if is_rfc1918(ip) {
+            return Some(ip.clone());
+        }
+    }
+
+    // Last fallback: the route guess even if it's not RFC 1918
+    // (could be a public address, a CGNAT range, etc.).
+    if let Some(guess) = route_guess {
+        if !guess.is_empty() {
+            return Some(guess);
+        }
+    }
+
+    None
 }
 
 #[derive(Serialize)]

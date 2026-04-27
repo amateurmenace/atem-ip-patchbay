@@ -187,54 +187,187 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri build
 
+      - name: Deep codesign every Mach-O in the .app (hardened runtime)
+        # Tauri 2's bundler signs the main binary in Contents/MacOS/
+        # and the dylibs in Contents/Frameworks/ but does NOT touch
+        # arbitrary files placed via bundle.resources. Our FFmpeg
+        # sidecar lands at Contents/Resources/sidecar/ffmpeg
+        # un-signed (Jellyfin's GPL build is signed by Jellyfin, but
+        # by the time the bundler copies it the original signature
+        # may also be missing depending on the tarball + Apple's
+        # notary REQUIRES every Mach-O in the bundle to be signed
+        # by us with hardened runtime).
+        #
+        # alpha.6 came back from Apple's notary with status: Invalid
+        # for exactly this reason. Re-sign every Mach-O in the .app
+        # explicitly with --options runtime + our identity + a
+        # timestamp before submitting. Sign inside-out so the outer
+        # .app's signature reflects the final inner state.
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+
+          echo "===== Pre-sign state of embedded Mach-O binaries ====="
+          while IFS= read -r f; do
+            if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
+              line=$(codesign -dvv "$f" 2>&1 | grep -E "TeamIdentifier=|flags=|Identifier=" | tr '\n' ' ' || true)
+              printf '  %s: %s\n' "${f#$APP/}" "$line"
+            fi
+          done < <(find "$APP" -type f)
+
+          echo "===== Re-signing every Mach-O with hardened runtime ====="
+          while IFS= read -r f; do
+            if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
+              echo "  signing ${f#$APP/}"
+              codesign --force --options runtime --timestamp \
+                --sign "$SIGN_IDENTITY" "$f"
+            fi
+          done < <(find "$APP" -type f)
+
+          echo "===== Re-signing the outer .app bundle ====="
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+
+          echo "===== Final verification (must exit 0) ====="
+          codesign --verify --strict --deep --verbose=4 "$APP" 2>&1 | tail -20
+          codesign -dvvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime"
+
+      - name: Rebuild .dmg from re-signed .app
+        # The .dmg Tauri produced is a snapshot of the .app from
+        # BEFORE our deep codesign pass — so it still contains the
+        # old (notary-rejecting) signatures. Discard it and build a
+        # fresh .dmg from the now-properly-signed .app on disk.
+        # hdiutil + UDZO matches Tauri's .dmg format; the difference
+        # vs Tauri's bundle_dmg.sh is we lose the styled background +
+        # custom layout, but for an alpha that's an acceptable trade.
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          if [ -z "$DMG" ]; then
+            echo "ERROR: no .dmg from cargo tauri build to replace" >&2
+            exit 1
+          fi
+          echo "Replacing $DMG with a fresh build from the re-signed .app"
+
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+
+          rm -f "$DMG"
+          hdiutil create \
+            -volname "ATEM IP Patchbay" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "$DMG"
+          rm -rf "$STAGE"
+
+          codesign --force --sign "$SIGN_IDENTITY" "$DMG"
+          ls -lh "$DMG"
+
       - name: Sanity-check the bundle
         run: |
           ls -lh "src-tauri/target/release/bundle/dmg/"
           ls -lh "src-tauri/target/release/bundle/macos/"
+          echo "===== .app codesign ====="
           codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
-          # Confirm libndi.dylib is bundled and re-signed under our
-          # Developer ID. If this prints nothing, the bundle config
-          # in tauri.conf.json didn't fire.
+          echo "===== libndi.dylib ====="
           ls -lh "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/" 2>&1 || true
-          codesign -dv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/libndi.dylib" 2>&1 | grep -E "Identifier|Authority|TeamId" || true
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/libndi.dylib" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          echo "===== sidecar/ffmpeg ====="
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Resources/sidecar/ffmpeg" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          echo "===== Resources/static/ (UI bundle check) ====="
+          ls -lh "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Resources/static/" 2>&1 | head -10 || true
 
-      - name: Notarize + staple .dmg (if Apple credentials are set)
-        # Don't fail the whole job if Apple's notary service rejects
-        # — most failures are recoverable user-side (expired Program
-        # License Agreement, app-specific password rotated, etc.) and
-        # we still want the signed .dmg uploaded as an artifact so
-        # the user can grab it, fix the issue, and notarize locally
-        # if they want a Gatekeeper-clean download.
-        continue-on-error: true
+      - name: Notarize + staple .dmg
+        # NO continue-on-error: if Apple rejects or stapling fails we
+        # want the workflow to fail loudly rather than upload an
+        # un-notarized .dmg masquerading as a notarized release. That
+        # was the alpha.6 bug — notarytool returned status: Invalid,
+        # the staple step couldn't fetch a non-existent ticket, and
+        # `continue-on-error: true` allowed the unstapled .dmg to ship
+        # to end users who then saw Gatekeeper warnings.
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
         run: |
+          set -euo pipefail
           if [ "$HAS_NOTARY" != "true" ]; then
             echo "Notarization secrets not set — skipping. End users will see Gatekeeper on first launch."
             exit 0
           fi
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
           DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
           if [ -z "$DMG" ]; then
             echo "No .dmg found to notarize — bailing." >&2
             exit 1
           fi
+
           echo "Submitting $DMG to Apple's notary service..."
-          # --wait blocks (typically 1-3 minutes) until the notary
-          # service returns a verdict. Output goes to stdout so the
-          # action log captures any rejection reason.
+          # --wait blocks until the notary returns a verdict. We
+          # capture the JSON output to parse status + submission id
+          # — notarytool returns 0 even on Invalid status, so we MUST
+          # read the response body to know if it actually passed.
+          SUBMIT_OUT=$(mktemp)
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_PASSWORD" \
-            --wait
-          echo "Stapling notarization ticket onto $DMG..."
+            --wait \
+            --output-format json | tee "$SUBMIT_OUT"
+
+          SUBMIT_ID=$(jq -r '.id // empty' "$SUBMIT_OUT" || echo "")
+          SUBMIT_STATUS=$(jq -r '.status // empty' "$SUBMIT_OUT" || echo "")
+
+          echo "Notary submission id: $SUBMIT_ID"
+          echo "Notary verdict: $SUBMIT_STATUS"
+
+          if [ "$SUBMIT_STATUS" != "Accepted" ]; then
+            echo "::error::Notarization rejected (status=$SUBMIT_STATUS, id=$SUBMIT_ID)"
+            if [ -n "$SUBMIT_ID" ]; then
+              echo "===== Detailed log from Apple's notary service ====="
+              # `notarytool log` returns the full per-file rejection
+              # JSON. Most useful field: .issues[] which lists each
+              # binary that failed and why ("not signed with hardened
+              # runtime", "missing entitlement", etc.).
+              xcrun notarytool log "$SUBMIT_ID" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_PASSWORD" \
+                /dev/stdout || true
+              echo "===== End of notary log ====="
+            fi
+            exit 1
+          fi
+
+          # Staple BOTH the .app and the .dmg. The .dmg's staple
+          # covers the first-launch-from-mounted-volume path; the
+          # .app's staple is what protects users who drag the .app
+          # to /Applications and then go offline before first launch.
+          # Apple's CloudKit ticket lookup keys on the codesign hash,
+          # so stapling the on-disk .app — which has the same
+          # codesign hash as the copy inside the .dmg — gets a valid
+          # ticket attached.
+          echo "Stapling $APP..."
+          xcrun stapler staple "$APP"
+          echo "Stapling $DMG..."
           xcrun stapler staple "$DMG"
-          echo "Verifying staple..."
+
+          echo "Verifying staples..."
+          xcrun stapler validate "$APP"
           xcrun stapler validate "$DMG"
-          spctl --assess --verbose=4 --type install "$DMG" || true
+          spctl --assess --verbose=4 --type install "$DMG"
+          spctl --assess --verbose=4 --type exec "$APP"
 
       - uses: actions/upload-artifact@v4
         with:
