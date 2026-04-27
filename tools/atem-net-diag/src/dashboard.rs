@@ -94,6 +94,43 @@ pub enum UnifiStatus {
     Failed { error: String, last_attempt: u64 },
 }
 
+/// State of the gateway WAN-bandwidth poll. Same shape as UnifiStatus
+/// but tracked separately because the WAN data uses a different
+/// endpoint and could be working while client polling is broken (or
+/// vice versa).
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WanStatus {
+    NotConfigured,
+    Connecting,
+    Connected { last_poll_at: u64 },
+    Failed { error: String, last_attempt: u64 },
+}
+
+impl Default for WanStatus {
+    fn default() -> Self {
+        WanStatus::NotConfigured
+    }
+}
+
+/// Snapshot of the gateway's WAN-side throughput + identity. Polled
+/// from the UDM's stat/health endpoint. Fields use **device-perspective**
+/// from the gateway's WAN port: upload = bytes leaving the LAN out to
+/// the public internet (operator's primary concern for live broadcast
+/// upstream), download = bytes coming in from the public internet
+/// (the inbound port-forwarded streams to the ATEM, plus all other
+/// download traffic on the LAN).
+#[derive(Clone, Debug, Serialize)]
+pub struct WanSnapshot {
+    pub upload_kbps: u64,
+    pub download_kbps: u64,
+    pub wan_ip: Option<String>,
+    pub isp_name: Option<String>,
+    pub isp_org: Option<String>,
+    pub wan_latency_ms: Option<u64>,
+    pub wan_status: Option<String>,
+}
+
 impl Default for UnifiStatus {
     fn default() -> Self {
         UnifiStatus::NotConfigured
@@ -146,6 +183,19 @@ pub struct DashboardState {
     /// each flow; falls back to empty until a handshake is observed.
     /// Keyed by FlowKey so the stream card can look up its key.
     pub flow_keys: HashMap<FlowKey, String>,
+
+    /// Latest WAN-side throughput snapshot from the UDM's
+    /// stat/health endpoint. None until first poll completes (or
+    /// when WAN polling isn't configured / failing).
+    pub wan_snapshot: Option<WanSnapshot>,
+    pub wan_status: WanStatus,
+    pub last_wan_poll_at: u64,
+    pub wan_thread_alive: bool,
+    /// 60-second history of (timestamp, kbps) pairs for graphing the
+    /// WAN upload + download rate as sparklines on the dashboard.
+    /// Front of deque is oldest sample.
+    pub wan_upload_history: VecDeque<(u64, u64)>,
+    pub wan_download_history: VecDeque<(u64, u64)>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -172,6 +222,24 @@ pub struct ConfigSnapshot {
     /// itself is intentionally NOT in this struct — ConfigSnapshot
     /// is serialized into the public /api/state response.
     pub unifi_configured: bool,
+
+    /// Operator's WAN upload cap in Mbps (e.g., 20.0 for a 20-up
+    /// fiber plan). Used to render the headroom indicator: "14/20
+    /// Mbps used (70%)". 0 = not configured (no headroom shown).
+    #[serde(default)]
+    pub wan_upload_cap_mbps: f64,
+    /// Operator's WAN download cap in Mbps. Same role as upload but
+    /// usually less critical — most plans are asymmetric and inbound
+    /// streams to the ATEM rarely saturate downstream. 0 = not
+    /// configured.
+    #[serde(default)]
+    pub wan_download_cap_mbps: f64,
+    /// Per-source-IP friendly labels for stream identification. Maps
+    /// "192.168.5.41" or "207.180.22.3" → "Jamie's basement". Persisted
+    /// only in-memory for now; survives the lifetime of the binary.
+    /// Operator edits via the dashboard.
+    #[serde(default)]
+    pub source_labels: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -198,6 +266,12 @@ pub struct StateResponse<'a> {
     pub unifi_clients: &'a [UnifiClientSnapshot],
     pub last_unifi_poll_at: u64,
     pub unifi_thread_alive: bool,
+    pub wan_status: &'a WanStatus,
+    pub wan_snapshot: Option<&'a WanSnapshot>,
+    pub last_wan_poll_at: u64,
+    pub wan_thread_alive: bool,
+    pub wan_upload_kbps_history: Vec<u64>,
+    pub wan_download_kbps_history: Vec<u64>,
 }
 
 #[derive(Serialize)]
@@ -279,6 +353,9 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
             atem: AtemTarget::default(),
             unifi_host,
             unifi_configured,
+            wan_upload_cap_mbps: 0.0,
+            wan_download_cap_mbps: 0.0,
+            source_labels: HashMap::new(),
         },
         ..Default::default()
     }));
@@ -301,10 +378,21 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
     if let Some(creds) = unifi_credentials {
         let unifi_state = state.clone();
         let host = state.lock().unwrap().config.unifi_host.clone();
+        let creds_for_clients = creds.clone();
         std::thread::Builder::new()
             .name("unifi-poll".into())
-            .spawn(move || unifi::poll_loop(host, creds, unifi_state))
+            .spawn(move || unifi::poll_loop(host, creds_for_clients, unifi_state))
             .expect("spawn unifi poll");
+
+        // Separate thread for WAN bandwidth — same UDM, different
+        // endpoint. Kept independent so a slow / failing WAN endpoint
+        // doesn't starve client polling and vice versa.
+        let wan_state = state.clone();
+        let wan_host = state.lock().unwrap().config.unifi_host.clone();
+        std::thread::Builder::new()
+            .name("wan-poll".into())
+            .spawn(move || unifi::wan_poll_loop(wan_host, creds, wan_state))
+            .expect("spawn wan poll");
     }
 
     // Auto-start the flow monitor in UI mode even if --monitor
@@ -514,6 +602,8 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         })
         .collect();
     flows.sort_by(|a, b| b.recent_bytes.cmp(&a.recent_bytes));
+    let wan_upload_kbps_history: Vec<u64> = s.wan_upload_history.iter().map(|(_, kbps)| *kbps).collect();
+    let wan_download_kbps_history: Vec<u64> = s.wan_download_history.iter().map(|(_, kbps)| *kbps).collect();
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -529,6 +619,12 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         unifi_clients: &s.unifi_clients,
         last_unifi_poll_at: s.last_unifi_poll_at,
         unifi_thread_alive: s.unifi_thread_alive,
+        wan_status: &s.wan_status,
+        wan_snapshot: s.wan_snapshot.as_ref(),
+        last_wan_poll_at: s.last_wan_poll_at,
+        wan_thread_alive: s.wan_thread_alive,
+        wan_upload_kbps_history,
+        wan_download_kbps_history,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
@@ -640,6 +736,37 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
+    let wan_up_cap_field = parsed
+        .get("wan_upload_cap_mbps")
+        .and_then(|v| v.as_f64())
+        .filter(|f| *f >= 0.0);
+    let wan_down_cap_field = parsed
+        .get("wan_download_cap_mbps")
+        .and_then(|v| v.as_f64())
+        .filter(|f| *f >= 0.0);
+
+    // Source labels are sent as either:
+    //   - {"source_labels": {"1.2.3.4": "Jamie"}}  (full replacement), or
+    //   - {"source_label_set": {"ip": "1.2.3.4", "label": "Jamie"}}
+    //     to set/remove a single entry (label="" deletes).
+    let labels_replace = parsed
+        .get("source_labels")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        });
+    let label_set: Option<(String, String)> = parsed.get("source_label_set").and_then(|v| {
+        let ip = v.get("ip").and_then(|x| x.as_str())?.trim().to_string();
+        let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if ip.is_empty() {
+            None
+        } else {
+            Some((ip, label))
+        }
+    });
+
     let mut s = state.lock().unwrap();
     let mut probe_target_changed = false;
     if let Some(u) = url_field {
@@ -665,6 +792,22 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
     }
     if let Some(h) = unifi_host_field {
         s.config.unifi_host = h;
+    }
+    if let Some(c) = wan_up_cap_field {
+        s.config.wan_upload_cap_mbps = c;
+    }
+    if let Some(c) = wan_down_cap_field {
+        s.config.wan_download_cap_mbps = c;
+    }
+    if let Some(map) = labels_replace {
+        s.config.source_labels = map;
+    }
+    if let Some((ip, label)) = label_set {
+        if label.is_empty() {
+            s.config.source_labels.remove(&ip);
+        } else {
+            s.config.source_labels.insert(ip, label);
+        }
     }
     if probe_target_changed {
         // Reset per-key stats + probe history when the target /

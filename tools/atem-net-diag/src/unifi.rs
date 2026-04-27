@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use ureq::Agent;
 
-use crate::dashboard::{DashboardState, UnifiClientSnapshot, UnifiStatus};
+use crate::dashboard::{DashboardState, UnifiClientSnapshot, UnifiStatus, WanSnapshot, WanStatus};
 
 /// How often to poll. Faster = tighter bandwidth resolution but
 /// more load on the UDM. 2s is a good live-monitoring balance —
@@ -549,4 +549,136 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ---- WAN gateway monitoring ----------------------------------------------
+//
+// Polls /proxy/network/api/s/default/stat/health and pulls the `subsystem:
+// "wan"` entry, which exposes:
+//   - `tx_bytes-r` / `rx_bytes-r` (bytes/sec, gateway-perspective: tx is
+//     **upload** out of the LAN, rx is **download** into the LAN)
+//   - `wan_ip`, `isp_name`, `isp_organization` (broadcast pre-show context)
+// And `subsystem: "www"` for `latency` (gateway-to-internet ping in ms).
+//
+// Cadence matches the client poll (2s). The same UDM-side ~5-10s refresh
+// caveat applies, but again we use the controller's smoothed `*-r` rates
+// rather than self-derived deltas.
+
+const WAN_HISTORY_LEN: usize = 60;
+
+#[derive(Deserialize)]
+struct HealthEnvelope {
+    data: Vec<HealthSubsystem>,
+}
+
+#[derive(Deserialize)]
+struct HealthSubsystem {
+    #[serde(default)]
+    subsystem: String,
+    #[serde(default, rename = "tx_bytes-r")]
+    tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")]
+    rx_bytes_r: f64,
+    #[serde(default)]
+    wan_ip: Option<String>,
+    #[serde(default)]
+    isp_name: Option<String>,
+    #[serde(default)]
+    isp_organization: Option<String>,
+    #[serde(default)]
+    latency: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
+    let mut client = match UnifiClient::new(host, creds) {
+        Ok(c) => c,
+        Err(e) => {
+            let mut s = state.lock().unwrap();
+            s.wan_status = WanStatus::Failed {
+                error: format!("init: {e}"),
+                last_attempt: now_secs(),
+            };
+            return;
+        }
+    };
+    {
+        let mut s = state.lock().unwrap();
+        s.wan_thread_alive = true;
+        s.wan_status = WanStatus::Connecting;
+    }
+    if let Err(e) = client.login() {
+        let mut s = state.lock().unwrap();
+        s.wan_status = WanStatus::Failed {
+            error: format!("login: {e}"),
+            last_attempt: now_secs(),
+        };
+        s.wan_thread_alive = false;
+        return;
+    }
+    loop {
+        match client.get("/proxy/network/api/s/default/stat/health") {
+            Ok(resp) => match resp.into_json::<HealthEnvelope>() {
+                Ok(env) => {
+                    let wan = env.data.iter().find(|s| s.subsystem == "wan");
+                    let www = env.data.iter().find(|s| s.subsystem == "www");
+                    if let Some(w) = wan {
+                        // Convert bytes/sec → kbps. UDM fields are
+                        // gateway-perspective: tx is upload, rx is
+                        // download. We surface them as such.
+                        let upload_kbps = (w.tx_bytes_r * 8.0 / 1000.0) as u64;
+                        let download_kbps = (w.rx_bytes_r * 8.0 / 1000.0) as u64;
+                        let now = now_secs();
+                        let mut s = state.lock().unwrap();
+                        s.wan_upload_history.push_back((now, upload_kbps));
+                        s.wan_download_history.push_back((now, download_kbps));
+                        while s.wan_upload_history.len() > WAN_HISTORY_LEN {
+                            s.wan_upload_history.pop_front();
+                        }
+                        while s.wan_download_history.len() > WAN_HISTORY_LEN {
+                            s.wan_download_history.pop_front();
+                        }
+                        s.wan_snapshot = Some(WanSnapshot {
+                            upload_kbps,
+                            download_kbps,
+                            wan_ip: w.wan_ip.clone(),
+                            isp_name: w.isp_name.clone(),
+                            isp_org: w.isp_organization.clone(),
+                            wan_latency_ms: www.and_then(|w| w.latency),
+                            wan_status: w.status.clone(),
+                        });
+                        s.wan_status = WanStatus::Connected { last_poll_at: now };
+                        s.last_wan_poll_at = now;
+                    } else {
+                        let mut s = state.lock().unwrap();
+                        s.wan_status = WanStatus::Failed {
+                            error: "no `wan` subsystem in health response".into(),
+                            last_attempt: now_secs(),
+                        };
+                    }
+                    drop(state.lock());
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.wan_status = WanStatus::Failed {
+                        error: format!("health JSON parse: {e}"),
+                        last_attempt: now_secs(),
+                    };
+                    drop(s);
+                    std::thread::sleep(ERROR_BACKOFF);
+                }
+            },
+            Err(e) => {
+                let mut s = state.lock().unwrap();
+                s.wan_status = WanStatus::Failed {
+                    error: e,
+                    last_attempt: now_secs(),
+                };
+                drop(s);
+                std::thread::sleep(ERROR_BACKOFF);
+            }
+        }
+    }
 }
