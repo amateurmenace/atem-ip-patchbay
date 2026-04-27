@@ -353,7 +353,7 @@ public release.
    `build_ffmpeg_cmd_for_ndi` injects `-f avfoundation -i :NAME`
    as input 1 instead of the lavfi anullsrc fallback. Pipe /
    relay video sources still fall back to lavfi for now —
-   deferred (see Session 5 priorities).
+   deferred (see Session 6 priorities, item 5).
 
 6. **NDI dylib bundling** — `tauri.conf.json` ships
    `bundle.macOS.frameworks: ["/usr/local/lib/libndi.dylib"]`;
@@ -449,8 +449,10 @@ public release.
     switched LAN typically can't see traffic between two
     other devices (modern switches don't broadcast unicast).
     The tool needs to run on the SAME machine as the streamer
-    or on the ATEM's machine — see Session 5 priority #1
-    for the rework.
+    or on the ATEM's machine — Session 5 added the UDM polling
+    path that bypasses this entirely (works from any machine
+    that can reach the controller); the LAN visibility hint in
+    the v0.2.0 dashboard surfaces the gotcha to operators.
 
 12. **`tauri-rewrite` merged to `main`** — fast-forwarded.
     `main` now points at the same commit as `tauri-rewrite`
@@ -489,63 +491,217 @@ Live at https://github.com/amateurmenace/atem-ip-patchbay/releases/tag/v0.2.0-al
   to publish. Future releases will be auto-published by
   the pipeline.
 
-### Session 5 priorities (next pickup)
+### Session 5 wins (atem-net-diag v0.2.0, 2026-04-26 PM)
 
-User-stated priorities, in roughly intended order. Most are
-parallelizable.
+Closed two of the original Session 5 priorities (atem-net-diag
+rework + per-key correlation) end-to-end on the codebase. The
+v0.2.0 tarball is built + signed + dropped in iCloud Drive
+(`atem-net-diag-0.2.0-macos-arm64.tar.gz`), but the dev Mac
+this session ran on is on `192.168.1.0/24` and the user's UDM
++ ATEM are on `192.168.20.0/24`, so the live UDM polling path
+is unverified — that's Session 6's first job, on the production-
+LAN Mac.
 
-1. **`atem-net-diag` rework: monitor-first, no-interfere mode.**
-   The user's primary use case is *live broadcast monitoring*
-   — show the operator what's flowing without ever touching
-   the production. The current default behavior runs active
-   probes (FFmpeg handshakes) that:
-   - Send actual SRT handshakes to the receiver
-   - Get rejected if a real stream is already using that key
-     (the user observed this — probes return REJECTED while
-     a healthy stream is in progress)
-   - May contend with the production for the receiver's
-     accept slot
-   This is wrong for live productions. The rework:
-   - **Default mode = passive monitor only**. No active
-     probes unless explicitly enabled.
-   - Three modes selectable in the dashboard: **Live** (pure
-     monitor, no probes), **Standby** (probes run, no active
-     production expected), **Auto** (probes only when no
-     flow has been seen on the configured key/port for
-     N seconds).
-   - **Detect active flows from the capture and pause probes
-     for those keys** — needs key correlation (see #2).
-   - Big visual indicator at the top: "Mode: LIVE — passive
-     only" with a clear toggle.
-   Network architecture caveat that needs documenting in the
-   tool's README + onboarding: a peer Mac on a switched LAN
-   typically CAN'T see unicast traffic between two other
-   devices. The tool must run on:
-   - The same Mac as the streamer (sees egress), OR
-   - The ATEM's machine (if it's a server you can run on),
-     OR
-   - A machine receiving port-mirrored / spanned traffic
-     from the switch
-   The "I'll run it on my laptop next to the ATEM" mental
-   model doesn't work without a managed switch. UI should
-   detect "no traffic ever" + "configured ATEM IP isn't ours"
-   and surface a hint about port mirroring.
+What landed:
 
-2. **Per-key flow correlation in atem-net-diag.** Right now
-   the UI shows flows by `src:port → dst:port`; we don't
-   match flows to specific stream keys. tshark's SRT
-   dissector parses the HSv5 handshake fields but doesn't
-   extract the SID extension that carries the streamid.
-   Either:
-   - Parse the binary HSv5 conclusion ourselves (~50-100
-     lines of SRT wire-format work in Rust),
-   - OR shell out to `tshark -V` and grep for the streamid,
-   - OR snoop the full handshake packet via `tshark -e
-     data.data` and decode the streamid TLV.
-   Per-key correlation lets the dashboard show "stream X
-   on key K is at 6.1 Mbps with RTT 45ms", which is what
-   the operator actually wants during a multi-source
-   production.
+1. **Default mode = LIVE (passive only).** New `DiagMode` enum
+   (`Live` | `Standby`) on `ConfigSnapshot`. The probe loop
+   checks `mode == Standby` before firing FFmpeg handshakes —
+   in Live mode the loop sleeps 2s between checks, no outbound
+   traffic to the ATEM. Fixes the Session 4 finding that
+   active probes were getting REJECTED during real productions
+   AND contending with the receiver's accept slot. Operator
+   opts into Standby explicitly via the dashboard mode banner
+   when they want reachability testing.
+
+2. **UDM (UniFi Network) integration — the headline.** New
+   `unifi.rs` module polls the local controller's per-client
+   bandwidth stats every 2 seconds. Stack:
+   - `ureq` (default-features = false, native-tls + json +
+     cookies) for HTTPS — `native-tls` so we can call
+     `.danger_accept_invalid_certs(true)` against the UDM's
+     self-signed cert without bringing in the rustls dangerous-
+     configuration headache.
+   - Auth: `UDM_API_KEY` env var (preferred — Local Controller
+     API key created via the UDM web UI Settings → Control
+     Plane → Integrations) sent as `X-API-KEY` header. Fallback
+     to `UDM_USERNAME` + `UDM_PASSWORD` cookie-auth login flow
+     for older UniFi OS that doesn't yet have local API keys.
+   - Endpoint: tries legacy `/proxy/network/api/s/default/
+     stat/sta` first (returns rich tx_bytes / rx_bytes counters
+     we delta-derive into kbps), falls back to integration
+     API at `/proxy/network/integration/v1/sites/default/
+     clients` if the API key only authorizes against the
+     integration surface. The integration API is "read-mostly"
+     as of early 2026 and doesn't expose byte counters yet —
+     bandwidth reads 0 in that fallback path.
+   - Credentials NEVER enter `DashboardState` (which serializes
+     to `/api/state` JSON). They live only in the polling
+     thread's local `UnifiClient`. Status (`Connected{
+     last_poll_at }`, `Failed{ error, last_attempt }`, etc.)
+     is what surfaces to the UI.
+   - Self-signed cert handling is opt-out per-host (the
+     trusted UDM at `192.168.20.1`); the trade-off is a LAN
+     MITM could intercept the API key. Acceptable for a
+     diagnostic tool on a trusted LAN.
+
+3. **Per-key flow correlation via SRT HSv5 SID extension
+   parsing.** New `parse_srt_handshake_streamid()` in
+   `main.rs` parses the SRT control packet header (16 bytes),
+   handshake body (48 bytes), and walks extensions looking
+   for type `0x0005` (SID). The SID payload is byte-reversed
+   per 4-byte word per RFC 8723 §3.2.1.1.3 — `decode_srt_sid()`
+   reverses each chunk back and strips trailing nulls.
+   Then `extract_bmd_key()` finds the `u=` field in the
+   resulting `#!::bmd_uuid=...,bmd_name=...,u=KEY` BMD-
+   flavored streamid. tshark capture extended with
+   `-e udp.payload` so we have the raw bytes to parse.
+   Result: stream cards in the dashboard show
+   `key: <BMD KEY>` once the conclusion handshake is captured,
+   making "stream X on key K is at 6.1 Mbps" possible. 10
+   unit tests cover decode + extraction + full synthetic
+   handshake parse.
+
+4. **New dashboard layout.** Full HTML rewrite:
+   - **Mode banner** between header and main grid: large
+     coloured strip showing "Mode: LIVE — passive only" or
+     "Mode: STANDBY — active probes enabled" with a single-
+     click toggle button.
+   - **ATEM target panel** (top-left): IP / MAC / port pre-
+     filled with `192.168.20.189` / `7c:2e:0d:21:ab:fe` /
+     `1935`, plus a UDM-cross-referenced status line ("UDM
+     sees: ONLINE via wired as 192.168.20.189 · last seen
+     2s ago" or "NOT FOUND in UDM client list").
+   - **UDM controller panel** (top-right): host / status pill
+     (Connected/Connecting/Failed/NotConfigured) / last poll.
+     `not_configured` state surfaces inline help with copy-
+     pasteable env-var setup.
+   - **Network clients card** (full width): row per UDM
+     client, ATEM highlighted with an orange ATEM badge.
+     Shows MAC / IP / hostname / tx kbps / rx kbps / wired-
+     vs-wifi. Sorted: ATEM first, then by total bandwidth
+     desc, then alphabetical.
+   - **Live streams (capture)** unchanged from Session 4 but
+     now displays the `key:` line per card when the SID
+     parser populates `flow_keys`.
+   - **Standby-only sections** (probe configuration / active
+     probes / probe timeline) auto-dim with a "Switch to
+     STANDBY mode to enable" gate when in Live mode. Still
+     visible (no surprise content jumps when toggling) but
+     don't draw the eye.
+   - **Process health** card now shows three threads: probe
+     / capture / UDM poll, each with last-active-at.
+   - **LAN visibility hint** at the bottom: surfaces when
+     capture is enabled, no flows ever seen, AND >30s have
+     elapsed. Documents the switched-LAN gotcha (peer Mac
+     can't see unicast between two other devices).
+
+5. **Default ATEM target constants** (`DEFAULT_ATEM_IP`,
+   `DEFAULT_ATEM_MAC`, `DEFAULT_ATEM_PORT`,
+   `DEFAULT_UDM_HOST` in main.rs) baked in so a bare
+   `--ui` launch is immediately useful — no manual IP
+   entry on first run. Override via the dashboard form.
+
+6. **MAC normalization.** New `normalize_mac()` accepts
+   `7C-2E-0D-21-AB-FE` / `7C2E0D21ABFE` / `7c:2e:0d:21:ab:fe`
+   and emits the lowercase-colon form UniFi's stat/sta
+   endpoint uses. ATEM identification matches against the
+   normalized form.
+
+7. **README + start.command rewrites for v0.2.0.** Documents
+   the three data sources (UDM polling = primary, capture =
+   complement, active probe = Standby-only opt-in), env-var
+   setup, switched-LAN topology notes, and what to look for
+   in each mode. start.command interactively prompts for
+   `UDM_API_KEY` if not in env, exports it to the binary,
+   never writes to disk.
+
+8. **`atem-net-diag` v0.2.0 release.** `cargo build --release`
+   + Hardened-runtime codesign with Developer ID Application
+   `6M536MV7GT` + tarball at
+   `tools/atem-net-diag/dist/atem-net-diag-0.2.0-macos-arm64.tar.gz`,
+   copied to iCloud Drive root for AirDrop to peer Macs.
+   Stripped binary is ~1.5 MB; tarball is ~816 KB.
+
+### Open issues from Session 5
+
+- **Live UDM polling untested.** This Mac (`192.168.1.78` /
+  `.172`) isn't on the production LAN. Pings to the UDM at
+  `192.168.20.1` and the ATEM at `192.168.20.189` time out.
+  The polling thread reports `connecting` and stays there
+  (the first request is hanging at TCP connect, would
+  eventually error after the 5s HTTP_TIMEOUT). Session 6
+  has to validate live on the production-LAN Mac. If the
+  endpoint paths or response field names don't match what
+  the UDM actually returns, iterate in `tools/atem-net-diag/
+  src/unifi.rs` (the legacy `RawClient` struct or the
+  `IntegrationClient` struct, or add `#[serde(rename =
+  "...")]` aliases). The integration vs legacy fallback
+  ordering may also need to flip if the API key only works
+  with the new integration surface.
+
+- **Per-key correlation untested live.** Synthetic-packet
+  unit tests pass but no real BMD encoder has been captured
+  end-to-end yet. The byte-swap-per-word decoding in
+  `decode_srt_sid` is per the SRT spec but real implementations
+  occasionally diverge — Session 6 should sanity-check
+  against an actual iPhone Blackmagic Camera SRT handshake
+  or a stream from the Tauri app.
+
+- **Auto mode deferred.** The original Session 5 spec called
+  for three modes (Live / Standby / Auto). Session 5 shipped
+  Live + Standby; Auto (probes resume after N seconds of
+  no-flow on the configured key) requires per-key
+  correlation to be live + reliable first, then can be a
+  small follow-up.
+
+- **API keys in conversation history.** Two UDM API keys
+  were shared during Session 5 (one Site Manager that's the
+  wrong type, one Local Controller that we used for the
+  failed local smoke test). Both should be revoked by the
+  user; treat anything in conversation history as compromised
+  (including the second one even though it was for testing
+  only). Future sessions should set the key as an env var
+  in the user's own shell and have Claude inherit it via
+  the launcher, never paste it into the conversation.
+
+### Session 6 priorities (next pickup)
+
+User-stated priorities, in roughly intended order. The first
+one HAS to happen on the production-LAN Mac (anywhere with line
+of sight to `192.168.20.1`); the others can happen on any dev
+machine.
+
+1. **Live UDM + per-key validation on the production-LAN Mac.**
+   The Session 5 v0.2.0 atem-net-diag tarball is at
+   `~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`
+   (sync to whichever Mac is on `192.168.20.x`). Run with
+   `UDM_API_KEY=...` set, hit `/api/state`, and verify:
+   - `unifi_status.state == "connected"` (not stuck at
+     `connecting` or returning `failed`).
+   - `unifi_clients` has the expected number of devices on
+     the LAN, including the ATEM at `is_atem: true`.
+   - Per-client `tx_kbps` / `rx_kbps` look reasonable
+     (idle clients ≈ 0, active clients non-zero).
+   - During a real stream from the parent app, the Live
+     streams card shows the flow AND the SID parser pulls
+     out the BMD `u=KEY` (rendered on the card as `key:
+     <KEY>`).
+   If UDM polling fails, the most likely fixes are in
+   `tools/atem-net-diag/src/unifi.rs`: endpoint path
+   (legacy vs integration), response field names (snake_case
+   vs camelCase, alias via `#[serde(rename = "...")]`), or
+   integration-vs-legacy fallback ordering. Iterate, push
+   to a `udm-live-fixes` branch, drop a fresh tarball.
+
+2. **Auto mode in atem-net-diag** (deferred from Session 5
+   spec, blocked on #1 above being reliable). Third diag
+   mode where probes run only after N seconds of no observed
+   flow on the configured key/port — combines the safety of
+   Live with the proactive-testing benefit of Standby.
+   Needs per-key correlation to be live + reliable so we
+   can correctly detect "is flow X actually flowing right
+   now?" before deciding to probe.
 
 3. **Multi-source mode in the main app.** Goal: a single
    user pushes 2-4 different sources to 2-4 different ATEM
@@ -672,8 +828,11 @@ Key implementation gotchas:
   HSv5 ACKD packets and exposes `srt.bw`, `srt.rate`,
   `srt.rtt`, `srt.rttvar`, `srt.bufavail` as `-e` field
   outputs. The streamid extension (carries the user's
-  stream key) is NOT extracted — Session 5 priority #2
-  needs to fix this for per-key correlation.
+  stream key) is NOT extracted by tshark's dissector —
+  Session 5 fixed this by adding `-e udp.payload` to the
+  capture and parsing the SRT HSv5 conclusion handshake
+  ourselves in `parse_srt_handshake_streamid` (main.rs).
+  See "Session 5 wins" item #3 for the wire-format details.
 
 ### v0.2.0 release tags
 
@@ -1060,14 +1219,19 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 5 priorities"** under the v0.2.0 direction
+See **"Session 6 priorities"** under the v0.2.0 direction
 section above for the full list. Quick summary:
 
-1. **atem-net-diag rework** — default to monitor-only, add
-   Live/Standby/Auto modes, document switched-LAN visibility
-   gotchas, optional UDM Pro / UniFi API integration.
-2. **Per-key flow correlation** in atem-net-diag — parse SRT
-   HSv5 SID extension to map flows to stream keys.
+1. **Live UDM/per-key validation** on the production-LAN Mac
+   — run the Session 5 v0.2.0 atem-net-diag tarball
+   (`~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`),
+   verify UDM polling returns connected clients with the
+   ATEM highlighted, verify SID parser extracts the BMD
+   `u=KEY` from a real handshake. Iterate `unifi.rs` if
+   endpoint paths/field names need adjustment.
+2. **Auto mode** in atem-net-diag (third diag mode — probes
+   only after N seconds of no flow on the configured key).
+   Blocked on #1 being reliable.
 3. **Multi-source mode** in main app — both
    `--instance-name`-via-multiple-launches AND in-app 2x2
    multi-view + per-input config picker.

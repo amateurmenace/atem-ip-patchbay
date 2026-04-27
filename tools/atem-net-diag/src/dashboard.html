@@ -9,6 +9,7 @@
       --bg: #0e0f12;
       --panel: #16181f;
       --panel-2: #1d2030;
+      --panel-3: #232636;
       --line: #2a2d36;
       --text: #e6e6ea;
       --muted: #9aa1ad;
@@ -30,6 +31,7 @@
     h1, h2 { margin: 0; font-weight: 700; }
     h1 { font-size: 18px; letter-spacing: 0.04em; }
     h2 { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+
     header {
       padding: 14px 22px;
       border-bottom: 1px solid var(--line);
@@ -38,11 +40,59 @@
     }
     header .pill {
       font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
-      padding: 3px 9px; border-radius: 11px; background: rgba(78,167,255,0.18); color: var(--signal);
+      padding: 3px 9px; border-radius: 11px;
     }
+    header .pill.live { background: rgba(70,201,134,0.18); color: var(--good); }
+    header .pill.standby { background: rgba(243,196,75,0.20); color: var(--warn); }
     header .target { color: var(--muted); font-size: 12px; }
     header .target code { color: var(--text); }
     header .uptime { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+    /* Mode banner — the prominent "are we touching the network?"
+       indicator. Live = no outbound traffic (default).
+       Standby = active probes enabled, contend for receiver slots. */
+    .mode-banner {
+      padding: 14px 22px;
+      display: flex; align-items: center; gap: 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .mode-banner.live {
+      background: linear-gradient(90deg, rgba(70,201,134,0.10), rgba(70,201,134,0.02));
+      border-left: 4px solid var(--good);
+    }
+    .mode-banner.standby {
+      background: linear-gradient(90deg, rgba(243,196,75,0.14), rgba(243,196,75,0.04));
+      border-left: 4px solid var(--warn);
+    }
+    .mode-banner .label {
+      font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+      font-weight: 700;
+    }
+    .mode-banner.live .label { color: var(--good); }
+    .mode-banner.standby .label { color: var(--warn); }
+    .mode-banner .desc { color: var(--text); }
+    .mode-banner .desc .muted { color: var(--muted); }
+    .mode-banner button {
+      margin-left: auto;
+      padding: 7px 16px; border-radius: 6px; cursor: pointer;
+      font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+      border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    }
+    .mode-banner button:hover { background: var(--panel-3); }
+    .mode-banner.live button {
+      border-color: rgba(243,196,75,0.45);
+      background: rgba(243,196,75,0.08);
+      color: var(--warn);
+    }
+    .mode-banner.live button:hover { background: rgba(243,196,75,0.18); }
+    .mode-banner.standby button {
+      border-color: rgba(70,201,134,0.45);
+      background: rgba(70,201,134,0.10);
+      color: var(--good);
+    }
+    .mode-banner.standby button:hover { background: rgba(70,201,134,0.20); }
+
     main {
       padding: 18px 22px; display: grid; gap: 16px;
       grid-template-columns: 1fr 1fr;
@@ -58,32 +108,155 @@
     .card .empty {
       color: var(--muted); font-size: 12px; padding: 12px 0;
     }
-    .keys {
+
+    /* Standby-only sections collapse to a thin "muted" strip when
+       Live mode is active. The operator can still see they exist
+       (no surprise content jumps when modes flip) but they don't
+       draw the eye. */
+    .standby-only.hidden-by-mode { opacity: 0.42; }
+    .standby-only.hidden-by-mode .standby-gate {
+      display: block; padding: 8px 0; text-align: center; color: var(--muted);
+      font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase;
+    }
+    .standby-only:not(.hidden-by-mode) .standby-gate { display: none; }
+    .standby-only.hidden-by-mode > *:not(h2):not(.standby-gate) { display: none; }
+
+    /* ATEM target + UDM controller summary panels — paired side-by-side. */
+    .summary-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 10px;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px 18px;
+      font-size: 12px;
     }
-    .key-card {
-      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-      padding: 11px 13px;
-      display: flex; flex-direction: column; gap: 4px;
+    .summary-grid .label {
+      color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase;
+      font-size: 9.5px; font-weight: 700;
     }
-    .key-card .name { font-weight: 700; color: var(--text); font-size: 13px; word-break: break-all; }
-    .key-card .meta { color: var(--muted); font-size: 11px; }
-    .key-card.connected { border-color: rgba(70,201,134,0.55); box-shadow: 0 0 0 1px rgba(70,201,134,0.15); }
-    .key-card.rejected { border-color: rgba(227,92,92,0.55); box-shadow: 0 0 0 1px rgba(227,92,92,0.15); }
-    .key-card.timeout { border-color: rgba(243,196,75,0.55); box-shadow: 0 0 0 1px rgba(243,196,75,0.15); }
+    .summary-grid .value {
+      color: var(--text); font-family: "SF Mono", Menlo, monospace;
+      font-size: 12px; word-break: break-all;
+    }
+    .summary-grid .value.right { text-align: right; }
+    .summary-grid .value .badge {
+      vertical-align: middle;
+    }
+
+    /* Network-clients grid — one row per UDM client, ATEM highlighted. */
+    .clients-grid {
+      display: grid; gap: 6px;
+    }
+    .client-row {
+      display: grid;
+      grid-template-columns: 130px 130px 1fr 90px 90px 70px;
+      gap: 10px; align-items: center;
+      padding: 8px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      font-size: 12px;
+    }
+    .client-row.is-atem {
+      border-color: rgba(255,138,56,0.55);
+      box-shadow: 0 0 0 1px rgba(255,138,56,0.15);
+      background: linear-gradient(90deg, rgba(255,138,56,0.06), var(--panel-2) 60%);
+    }
+    .client-row .mac {
+      font-family: "SF Mono", Menlo, monospace; color: var(--muted);
+      font-size: 11px;
+    }
+    .client-row .ip {
+      font-family: "SF Mono", Menlo, monospace; color: var(--text);
+      font-size: 12px;
+    }
+    .client-row .name {
+      color: var(--text); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .client-row .name .role {
+      display: inline-block; margin-left: 6px;
+      font-size: 9.5px; letter-spacing: 0.10em; text-transform: uppercase;
+      padding: 1px 6px; border-radius: 3px;
+      background: rgba(255,138,56,0.15); color: var(--accent);
+    }
+    .client-row .bw {
+      font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+      text-align: right; color: var(--text);
+    }
+    .client-row .bw.zero { color: var(--muted-2); }
+    .client-row .bw .unit {
+      color: var(--muted); margin-left: 2px; font-size: 10px;
+    }
+    .client-row .uplink {
+      font-size: 10px; color: var(--muted); text-align: right;
+      letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .clients-head {
+      display: grid;
+      grid-template-columns: 130px 130px 1fr 90px 90px 70px;
+      gap: 10px; align-items: center;
+      padding: 0 12px 6px;
+      color: var(--muted-2); font-size: 9.5px;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      font-weight: 600;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 8px;
+    }
+    .clients-head .right { text-align: right; }
+    @media (max-width: 800px) {
+      .client-row, .clients-head {
+        grid-template-columns: 1fr 80px 80px;
+      }
+      .client-row .mac, .client-row .ip, .client-row .uplink,
+      .clients-head > *:nth-child(1), .clients-head > *:nth-child(2),
+      .clients-head > *:nth-child(6) { display: none; }
+    }
+
+    /* UDM status pill + connection bits. */
+    .unifi-status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 4px;
+      font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .unifi-status-pill.connected { background: rgba(70,201,134,0.18); color: var(--good); }
+    .unifi-status-pill.connecting { background: rgba(78,167,255,0.18); color: var(--signal); }
+    .unifi-status-pill.failed { background: rgba(227,92,92,0.18); color: var(--bad); }
+    .unifi-status-pill.not_configured { background: rgba(154,161,173,0.18); color: var(--muted); }
+    .unifi-error {
+      margin-top: 8px; padding: 8px 10px;
+      background: rgba(227,92,92,0.06);
+      border: 1px solid rgba(227,92,92,0.30);
+      border-radius: 5px;
+      color: var(--bad);
+      font-family: "SF Mono", Menlo, monospace;
+      font-size: 11px; word-break: break-word;
+    }
+    .unifi-help {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border: 1px dashed var(--line);
+      border-radius: 5px;
+      font-size: 11px; color: var(--muted);
+      line-height: 1.55;
+    }
+    .unifi-help code {
+      background: rgba(78,167,255,0.10); color: var(--text);
+      padding: 1px 5px; border-radius: 3px;
+    }
+
     .badge {
       display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10.5px;
       font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
     }
-    .badge.connected { background: rgba(70,201,134,0.18); color: var(--good); }
-    .badge.rejected { background: rgba(227,92,92,0.18); color: var(--bad); }
-    .badge.timeout { background: rgba(243,196,75,0.18); color: var(--warn); }
+    .badge.connected, .badge.online { background: rgba(70,201,134,0.18); color: var(--good); }
+    .badge.rejected, .badge.offline { background: rgba(227,92,92,0.18); color: var(--bad); }
+    .badge.timeout, .badge.unknown { background: rgba(243,196,75,0.18); color: var(--warn); }
     .badge.idle { background: rgba(154,161,173,0.18); color: var(--muted); }
 
+    /* Configure card. */
     .config-form {
-      display: grid; grid-template-columns: 2fr 1fr 2fr 1fr auto; gap: 8px; align-items: end;
+      display: grid; grid-template-columns: 2fr 1fr 1fr 2fr 1fr auto; gap: 8px; align-items: end;
     }
     .config-form label {
       display: flex; flex-direction: column; gap: 4px;
@@ -109,19 +282,34 @@
     .config-status.ok { color: var(--good); }
     @media (max-width: 800px) { .config-form { grid-template-columns: 1fr; } }
 
+    /* Per-key probe cards (Standby mode only). */
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .key-card {
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 11px 13px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .key-card .name { font-weight: 700; color: var(--text); font-size: 13px; word-break: break-all; }
+    .key-card .meta { color: var(--muted); font-size: 11px; }
+    .key-card.connected { border-color: rgba(70,201,134,0.55); box-shadow: 0 0 0 1px rgba(70,201,134,0.15); }
+    .key-card.rejected { border-color: rgba(227,92,92,0.55); box-shadow: 0 0 0 1px rgba(227,92,92,0.15); }
+    .key-card.timeout { border-color: rgba(243,196,75,0.55); box-shadow: 0 0 0 1px rgba(243,196,75,0.15); }
+
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { text-align: left; padding: 6px 8px; }
     th {
       color: var(--muted-2); font-weight: 600; text-transform: uppercase; font-size: 10px;
       letter-spacing: 0.14em; border-bottom: 1px solid var(--line);
     }
-    tr.row-recent { background: rgba(78,167,255,0.04); }
     td.mono { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-size: 11.5px; }
     td.right { text-align: right; }
     td .small { color: var(--muted); font-size: 11px; }
 
-    /* Live-stream cards — the headline feature. One card per
-       observed flow on the monitored interface. */
+    /* Live-stream cards — per-flow from tshark. */
     .stream-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
@@ -155,6 +343,12 @@
       word-break: break-all; flex: 1; min-width: 0;
     }
     .stream-route .arrow { color: var(--muted); margin: 0 4px; }
+    .stream-key {
+      font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+      color: var(--accent); margin-top: 2px;
+      padding: 2px 6px; background: rgba(255,138,56,0.10);
+      border-radius: 3px; display: inline-block; word-break: break-all;
+    }
     .stream-bitrate {
       font-size: 28px; font-weight: 800; line-height: 1.1;
       color: var(--text); letter-spacing: -0.01em;
@@ -195,42 +389,144 @@
       padding: 10px 22px; border-top: 1px solid var(--line);
       color: var(--muted-2); font-size: 11px;
     }
+
+    /* LAN visibility hint — surfaced when tshark sees no traffic
+       AND the configured ATEM IP isn't on this machine. Most
+       common cause: peer Mac on a switched LAN that doesn't
+       broadcast the unicast traffic. */
+    .lan-hint {
+      grid-column: 1 / -1;
+      padding: 12px 16px;
+      background: rgba(243,196,75,0.06);
+      border: 1px solid rgba(243,196,75,0.30);
+      border-radius: 7px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .lan-hint strong { color: var(--warn); }
+    .lan-hint code {
+      background: rgba(78,167,255,0.10);
+      padding: 1px 5px; border-radius: 3px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>atem-net-diag</h1>
-    <span class="pill">live</span>
+    <span class="pill live" id="mode-pill">live</span>
     <span class="target" id="target">loading…</span>
     <span class="uptime" id="uptime"></span>
   </header>
 
+  <div class="mode-banner live" id="mode-banner">
+    <span class="label" id="mode-banner-label">Mode: LIVE</span>
+    <span class="desc" id="mode-banner-desc">
+      Passive monitoring only. <span class="muted">No outbound traffic to the ATEM. UDM polling + tshark capture only.</span>
+    </span>
+    <button id="mode-toggle">Switch to Standby</button>
+  </div>
+
   <main>
+    <!-- ATEM target + UDM controller — always visible, drives the rest. -->
+    <section class="card">
+      <h2>ATEM target</h2>
+      <div class="summary-grid" id="atem-summary">
+        <div class="label">IP</div>
+        <div class="label">MAC</div>
+        <div class="label right">Port</div>
+
+        <div class="value" id="atem-ip">—</div>
+        <div class="value" id="atem-mac">—</div>
+        <div class="value right" id="atem-port">—</div>
+
+        <div class="label">UDM sees</div>
+        <div></div>
+        <div></div>
+        <div class="value" id="atem-udm-state" style="grid-column: 1 / 4;">checking…</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>UDM controller</h2>
+      <div class="summary-grid">
+        <div class="label">Host</div>
+        <div class="label">Status</div>
+        <div class="label right">Last poll</div>
+
+        <div class="value" id="udm-host">—</div>
+        <div class="value"><span class="unifi-status-pill not_configured" id="udm-status">…</span></div>
+        <div class="value right" id="udm-last-poll">—</div>
+      </div>
+      <div class="unifi-error" id="udm-error" hidden></div>
+      <div class="unifi-help" id="udm-help" hidden>
+        UDM credentials not configured. Set <code>UDM_API_KEY=...</code> in your shell
+        before launching this tool. Create a key in the UDM web UI under
+        <strong>Settings → Control Plane → Integrations → Create API Key</strong>.
+        Falls back to <code>UDM_USERNAME</code> + <code>UDM_PASSWORD</code> for older
+        UniFi OS versions.
+      </div>
+    </section>
+
+    <!-- Network clients (UDM-driven). The ATEM is highlighted. -->
     <section class="card full">
-      <h2>Configure probe target</h2>
+      <h2>Network clients <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="clients-summary"></span></h2>
+      <div class="clients-head">
+        <div>MAC</div>
+        <div>IP</div>
+        <div>Hostname / Name</div>
+        <div class="right">TX</div>
+        <div class="right">RX</div>
+        <div class="right">Uplink</div>
+      </div>
+      <div class="clients-grid" id="clients-grid"></div>
+      <div class="empty" id="clients-empty">
+        Waiting for the first UDM poll. If this stays empty, check the UDM
+        connection panel for errors.
+      </div>
+    </section>
+
+    <!-- Live streams (tshark) — local capture, complements UDM data with
+         per-flow info (src:port → dst:port, SRT control stats, stream key). -->
+    <section class="card full">
+      <h2>Live streams (capture) <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="flows-summary"></span></h2>
+      <div class="stream-grid" id="stream-grid"></div>
+      <div class="empty" id="flows-empty">
+        No traffic on the monitored ports yet. (Capture only sees flows that
+        physically traverse this machine — UDM data above is independent.)
+      </div>
+    </section>
+
+    <!-- Active probes — only meaningful in Standby mode. Hidden / dimmed in Live. -->
+    <section class="card full standby-only" id="config-card">
+      <h2>Standby probe configuration</h2>
+      <div class="standby-gate">Switch to STANDBY mode to enable active probes</div>
       <form class="config-form" id="config-form" autocomplete="off">
         <label>Host / IP
-          <input id="cfg-host" type="text" placeholder="192.168.1.50" />
+          <input id="cfg-host" type="text" />
         </label>
         <label>Port
-          <input id="cfg-port" type="number" min="1" max="65535" placeholder="1935" value="1935" />
+          <input id="cfg-port" type="number" min="1" max="65535" value="1935" />
+        </label>
+        <label>Interval (s)
+          <input id="cfg-interval" type="number" min="1" max="600" value="5" />
         </label>
         <label>Stream key
           <input id="cfg-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" />
         </label>
-        <label>Interval (s)
-          <input id="cfg-interval" type="number" min="1" max="600" placeholder="5" value="5" />
-        </label>
+        <label style="opacity: 0;">.</label>
         <button id="cfg-apply" type="submit">Apply</button>
       </form>
       <div class="config-status" id="config-status"></div>
     </section>
 
-    <section class="card">
+    <section class="card standby-only" id="probes-card">
       <h2>Active probes <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="probes-summary"></span></h2>
+      <div class="standby-gate">Switch to STANDBY mode to enable active probes</div>
       <div class="keys" id="keys"></div>
       <div class="empty" id="probes-empty" hidden>
-        No probes running. Start the tool with <code>--key KEY</code> (or no key for a bare URL probe) to populate this panel.
+        No probes running. Add a stream key in the configuration above and click Apply.
       </div>
     </section>
 
@@ -239,8 +535,9 @@
       <div id="health"></div>
     </section>
 
-    <section class="card full">
+    <section class="card full standby-only" id="timeline-card">
       <h2>Recent probe timeline (newest right)</h2>
+      <div class="standby-gate">Switch to STANDBY mode to enable active probes</div>
       <div class="timeline" id="timeline"></div>
       <table style="margin-top: 12px;" id="probe-table" hidden>
         <thead>
@@ -251,16 +548,19 @@
       <div class="empty" id="timeline-empty" hidden>(no probes recorded yet)</div>
     </section>
 
-    <section class="card full">
-      <h2>Live streams <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="flows-summary"></span></h2>
-      <div class="stream-grid" id="stream-grid"></div>
-      <div class="empty" id="flows-empty">
-        No traffic on the monitored ports yet. Make sure your encoder is pointed
-        at this network's ATEM, then watch streams populate here as they
-        connect. The capture interface and ports are configurable via CLI
-        flags (<code>--monitor IFACE</code>, <code>--port N</code>).
-      </div>
-    </section>
+    <!-- LAN visibility hint — only when capture sees no traffic + ATEM
+         is not local. Surfaces the switched-LAN gotcha. -->
+    <div class="lan-hint" id="lan-hint" hidden>
+      <strong>No capture traffic seen.</strong>
+      A peer machine on a switched LAN typically <strong>can't see</strong> unicast
+      traffic between two other devices — modern Ethernet switches don't broadcast
+      unicast. For full per-flow visibility, run this tool on:
+      (a) the streamer's machine (sees egress), or
+      (b) the ATEM's local machine if you have shell access, or
+      (c) a port-mirrored / SPAN switch port.
+      The <strong>UDM polling above is independent of capture</strong> and works
+      from any machine that can reach the controller.
+    </div>
   </main>
 
   <footer>
@@ -270,6 +570,8 @@
 
   <script>
     const $ = (s) => document.querySelector(s);
+    const $$ = (s) => Array.from(document.querySelectorAll(s));
+
     function fmtBytes(b) {
       if (b == null) return '—';
       if (b < 1024) return b + ' B';
@@ -296,18 +598,142 @@
       const m = Math.floor((s % 3600) / 60);
       return h + 'h ' + m + 'm';
     }
+    function fmtKbps(kbps) {
+      if (kbps == null || kbps === 0) return { value: '0', unit: 'kbps', zero: true };
+      if (kbps >= 1000) return { value: (kbps / 1000).toFixed(2), unit: 'Mbps', zero: false };
+      return { value: String(kbps), unit: 'kbps', zero: false };
+    }
+
+    function renderModeBanner(mode) {
+      const banner = $('#mode-banner');
+      const label = $('#mode-banner-label');
+      const desc = $('#mode-banner-desc');
+      const btn = $('#mode-toggle');
+      const pill = $('#mode-pill');
+      const isLive = mode === 'live';
+      banner.classList.toggle('live', isLive);
+      banner.classList.toggle('standby', !isLive);
+      pill.classList.toggle('live', isLive);
+      pill.classList.toggle('standby', !isLive);
+      pill.textContent = isLive ? 'live' : 'standby';
+      label.textContent = isLive ? 'Mode: LIVE' : 'Mode: STANDBY';
+      if (isLive) {
+        desc.innerHTML = 'Passive monitoring only. <span class="muted">No outbound traffic to the ATEM. UDM polling + tshark capture only.</span>';
+      } else {
+        desc.innerHTML = 'Active probes enabled. <span class="muted">FFmpeg handshake against the configured target every N seconds — may contend with a live production for the receiver slot.</span>';
+      }
+      btn.textContent = isLive ? 'Switch to Standby' : 'Switch to Live';
+
+      // Standby-only sections: dim in Live, restore in Standby.
+      $$('.standby-only').forEach((el) => el.classList.toggle('hidden-by-mode', isLive));
+    }
+
+    function renderAtem(state) {
+      const atem = state.config && state.config.atem ? state.config.atem : {};
+      $('#atem-ip').textContent = atem.ip || '—';
+      $('#atem-mac').textContent = atem.mac || '—';
+      $('#atem-port').textContent = atem.port != null ? String(atem.port) : '—';
+
+      // Cross-reference with UDM client list to confirm online status.
+      const clients = state.unifi_clients || [];
+      const atemClient = clients.find((c) => c.is_atem);
+      const udmState = $('#atem-udm-state');
+      if (state.unifi_status && state.unifi_status.state === 'connected') {
+        if (atemClient) {
+          const ageS = atemClient.last_seen ? (state.now - atemClient.last_seen) : null;
+          const lastSeen = ageS != null ? ` · last seen ${fmtAgo(ageS)} ago` : '';
+          const uplink = atemClient.is_wired ? 'wired' : 'wifi';
+          udmState.innerHTML = `<span class="badge online">ONLINE</span> via ${uplink} as <code>${atemClient.ip || '?'}</code>${lastSeen}`;
+        } else {
+          udmState.innerHTML = `<span class="badge offline">NOT FOUND</span> in UDM client list — check the MAC, or the ATEM may be offline.`;
+        }
+      } else if (state.unifi_status && state.unifi_status.state === 'not_configured') {
+        udmState.innerHTML = '<span class="badge unknown">UNKNOWN</span> UDM not configured';
+      } else {
+        udmState.innerHTML = '<span class="badge unknown">UNKNOWN</span> UDM not yet polled';
+      }
+    }
+
+    function renderUnifi(state) {
+      const cfg = state.config || {};
+      $('#udm-host').textContent = cfg.unifi_host || '—';
+      const status = state.unifi_status || { state: 'not_configured' };
+      const pill = $('#udm-status');
+      pill.className = `unifi-status-pill ${status.state}`;
+      pill.textContent = status.state === 'connected' ? 'CONNECTED'
+                       : status.state === 'connecting' ? 'CONNECTING'
+                       : status.state === 'failed' ? 'FAILED'
+                       : 'NOT CONFIGURED';
+      const lastPoll = state.last_unifi_poll_at;
+      $('#udm-last-poll').textContent = lastPoll ? `${fmtAgo(state.now - lastPoll)} ago` : '—';
+
+      const errEl = $('#udm-error');
+      if (status.state === 'failed') {
+        errEl.textContent = status.error || 'unknown error';
+        errEl.hidden = false;
+      } else {
+        errEl.hidden = true;
+      }
+
+      $('#udm-help').hidden = status.state !== 'not_configured';
+    }
+
+    function renderClients(state) {
+      const clients = state.unifi_clients || [];
+      const grid = $('#clients-grid');
+      const summary = $('#clients-summary');
+      const empty = $('#clients-empty');
+      if (clients.length === 0) {
+        grid.innerHTML = '';
+        empty.hidden = false;
+        summary.textContent = '';
+        return;
+      }
+      empty.hidden = true;
+      // Sort: ATEM first, then by current tx_kbps + rx_kbps desc, then name.
+      const sorted = clients.slice().sort((a, b) => {
+        if (a.is_atem !== b.is_atem) return a.is_atem ? -1 : 1;
+        const aBw = (a.tx_kbps || 0) + (a.rx_kbps || 0);
+        const bBw = (b.tx_kbps || 0) + (b.rx_kbps || 0);
+        if (aBw !== bBw) return bBw - aBw;
+        const aName = (a.name || a.hostname || a.mac || '').toLowerCase();
+        const bName = (b.name || b.hostname || b.mac || '').toLowerCase();
+        return aName.localeCompare(bName);
+      });
+      grid.innerHTML = sorted.map(renderClientRow).join('');
+      const onlineCount = clients.filter((c) => state.now - (c.last_seen || 0) < 300).length;
+      const txTotal = clients.reduce((acc, c) => acc + (c.tx_kbps || 0), 0);
+      summary.textContent = `${clients.length} known · ${onlineCount} online · ${(txTotal / 1000).toFixed(1)} Mbps total egress`;
+    }
+
+    function renderClientRow(c) {
+      const tx = fmtKbps(c.tx_kbps || 0);
+      const rx = fmtKbps(c.rx_kbps || 0);
+      const name = c.name || c.hostname || (c.oui ? `(${c.oui})` : '');
+      const role = c.is_atem ? '<span class="role">ATEM</span>' : '';
+      const uplink = c.is_wired ? 'wired' : 'wifi';
+      return `
+        <div class="client-row ${c.is_atem ? 'is-atem' : ''}">
+          <div class="mac">${c.mac}</div>
+          <div class="ip">${c.ip || '—'}</div>
+          <div class="name">${name || '—'} ${role}</div>
+          <div class="bw ${tx.zero ? 'zero' : ''}">${tx.value}<span class="unit">${tx.unit}</span></div>
+          <div class="bw ${rx.zero ? 'zero' : ''}">${rx.value}<span class="unit">${rx.unit}</span></div>
+          <div class="uplink">${uplink}</div>
+        </div>`;
+    }
 
     function renderState(s) {
       const cfg = s.config || {};
-      const target = cfg.url && cfg.url !== 'monitor://'
-        ? `<code>${cfg.url}</code>`
-        : '<em>(monitor only)</em>';
-      const keysSeg = (cfg.keys && cfg.keys.length)
-        ? ` &middot; ${cfg.keys.length} key(s)` : '';
-      const monSeg = cfg.monitor_iface
-        ? ` &middot; monitor <code>${cfg.monitor_iface}</code>` : '';
-      $('#target').innerHTML = `target: ${target}${keysSeg}${monSeg}`;
+      const target = cfg.url ? `<code>${cfg.url}</code>` : '<em>(no target)</em>';
+      const monSeg = cfg.monitor_iface ? ` &middot; capture <code>${cfg.monitor_iface}</code>` : '';
+      $('#target').innerHTML = `target: ${target}${monSeg}`;
       $('#uptime').textContent = 'uptime ' + fmtUptime(s.now - s.started_at);
+
+      renderModeBanner(cfg.mode || 'live');
+      renderAtem(s);
+      renderUnifi(s);
+      renderClients(s);
 
       // Active probe per-key cards
       const keysEl = $('#keys');
@@ -337,13 +763,15 @@
         ? `${items.length} key${items.length === 1 ? '' : 's'} tracked`
         : '';
 
-      // Process health
+      // Process health — adds UDM thread state.
       const probeStatus = s.probe_thread_alive ? 'alive' : 'idle';
       const monStatus = s.monitor_thread_alive ? 'alive' : 'off';
+      const udmStatus = s.unifi_thread_alive ? 'alive' : 'off';
       const lastProbeAgo = s.last_probe_at ? (s.now - s.last_probe_at) : null;
       const lastFlowAgo = s.last_flow_at ? (s.now - s.last_flow_at) : null;
+      const lastUdmAgo = s.last_unifi_poll_at ? (s.now - s.last_unifi_poll_at) : null;
       $('#health').innerHTML = `
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
           <div>
             <span class="health ${s.probe_thread_alive ? 'alive' : 'dead'}"></span>
             <strong>Active probe</strong>
@@ -352,9 +780,15 @@
           </div>
           <div>
             <span class="health ${cfg.monitor_iface && s.monitor_thread_alive ? 'alive' : 'dead'}"></span>
-            <strong>Flow monitor</strong>
+            <strong>Capture</strong>
             <span style="color:var(--muted);"> &middot; ${cfg.monitor_iface ? monStatus : 'not enabled'}</span>
             <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last packet: ${fmtAgo(lastFlowAgo)} ago</div>
+          </div>
+          <div>
+            <span class="health ${s.unifi_thread_alive ? 'alive' : 'dead'}"></span>
+            <strong>UDM poll</strong>
+            <span style="color:var(--muted);"> &middot; ${udmStatus}</span>
+            <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last: ${fmtAgo(lastUdmAgo)} ago</div>
           </div>
         </div>`;
 
@@ -382,19 +816,19 @@
             </tr>`).join('');
       }
 
-      // Live streams — per-flow cards
+      // Live streams — per-flow cards from tshark capture.
       const flows = s.flows || [];
       const flowEmpty = $('#flows-empty');
       const grid = $('#stream-grid');
       const flowSummary = $('#flows-summary');
       if (!cfg.monitor_iface) {
         flowEmpty.hidden = false;
-        flowEmpty.innerHTML = `Monitor not running. Make sure tshark is installed (<code>brew install --cask wireshark</code>) and capture permissions are set (Wireshark installer's "Install ChmodBPF" option).`;
+        flowEmpty.innerHTML = `Capture not running. Install tshark (<code>brew install --cask wireshark</code> + ChmodBPF) for per-flow visibility. The UDM client list above works without capture.`;
         grid.innerHTML = '';
         flowSummary.textContent = '';
       } else if (flows.length === 0) {
         flowEmpty.hidden = false;
-        flowEmpty.innerHTML = `Listening on <code>${cfg.monitor_iface}</code> for ports <code>${(cfg.monitor_ports.length ? cfg.monitor_ports : [1935, 9710, 9977, 1936]).join(', ')}</code> — no traffic yet. Streams will appear as cards here as they connect.`;
+        flowEmpty.innerHTML = `Listening on <code>${cfg.monitor_iface}</code> for ports <code>${(cfg.monitor_ports.length ? cfg.monitor_ports : [1935, 9710, 9977, 1936]).join(', ')}</code> — no traffic yet.`;
         grid.innerHTML = '';
         flowSummary.textContent = '';
       } else {
@@ -413,25 +847,32 @@
         if (summary.idle) parts.push(`${summary.idle} idle`);
         flowSummary.textContent = parts.join(' · ');
         grid.innerHTML = flows.slice(0, 12).map(renderStreamCard).join('');
-        // Draw the bitrate sparklines after DOM insertion.
         flows.slice(0, 12).forEach((f, i) => {
           const canvas = grid.querySelector(`#spark-${i}`);
           if (canvas) drawSparkline(canvas, f.bitrate_samples || []);
         });
+      }
+
+      // LAN-visibility hint: show when capture is enabled, no flows seen
+      // ever, and the configured ATEM target IP isn't a local IP. Heuristic
+      // — we don't know "is this a local IP" from the JS side without
+      // server help, so just trigger on capture+no-flows.
+      const lanHint = $('#lan-hint');
+      const captureEverSeen = s.last_flow_at > 0;
+      if (cfg.monitor_iface && !captureEverSeen && (s.now - s.started_at) > 30) {
+        lanHint.hidden = false;
+      } else {
+        lanHint.hidden = true;
       }
     }
 
     function renderStreamCard(f, i) {
       const proto = f.protocol || (f.is_udp ? 'UDP' : 'TCP');
       const isSrt = f.is_udp && (f.last_srt_rtt_ms != null || f.protocol === 'SRT');
-      // Current bitrate: prefer SRT receiver-reported rate (truth from the
-      // wire) when available, else last sample from the locally-measured
-      // bitrate ring buffer.
       let bitrateKbps = 0;
       if (f.last_srt_rate_kbps && f.last_srt_rate_kbps > 0) {
         bitrateKbps = f.last_srt_rate_kbps;
       } else if (f.bitrate_samples && f.bitrate_samples.length > 0) {
-        // Last sample is bytes/second; convert to kbps.
         bitrateKbps = Math.round(f.bitrate_samples[f.bitrate_samples.length - 1] * 8 / 1000);
       }
       const bitrateDisplay = bitrateKbps >= 1000
@@ -449,23 +890,18 @@
       stats.push({ label: 'Total', value: fmtBytes(f.total_bytes) });
       stats.push({ label: 'Duration', value: fmtDuration(f.duration_secs) });
       stats.push({ label: 'Packets', value: f.total_packets.toLocaleString() });
-      const lastSeenStr = fmtAgo(f.idle_secs);
-      stats.push({ label: 'Last pkt', value: lastSeenStr });
+      stats.push({ label: 'Last pkt', value: fmtAgo(f.idle_secs) });
 
       const health = f.health || 'unknown';
       const healthLabel = {
-        streaming: 'STREAMING',
-        stalling: 'STALLING',
-        handshake: 'HANDSHAKE',
-        idle: 'IDLE',
-        unknown: '—',
+        streaming: 'STREAMING', stalling: 'STALLING',
+        handshake: 'HANDSHAKE', idle: 'IDLE', unknown: '—',
       }[health] || health.toUpperCase();
       const healthClass = {
-        streaming: 'connected',
-        stalling: 'timeout',
-        handshake: 'idle',
-        idle: 'idle',
+        streaming: 'connected', stalling: 'timeout',
+        handshake: 'idle', idle: 'idle',
       }[health] || 'idle';
+      const keyHtml = f.stream_key ? `<div class="stream-key">key: ${f.stream_key}</div>` : '';
 
       return `
         <div class="stream-card ${health}">
@@ -478,6 +914,7 @@
             <span class="arrow">→</span>
             <span>${f.dst_ip}:${f.dst_port}</span>
           </div>
+          ${keyHtml}
           <div class="stream-bitrate">
             ${bitrateDisplay.value}<span class="unit">${bitrateDisplay.unit}</span>
           </div>
@@ -514,22 +951,18 @@
       samples.forEach((v, i) => {
         const x = i * stepX;
         const y = h - (v / max) * (h - 2) - 1;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
-      // Fill under the line
       ctx.lineTo((samples.length - 1) * stepX, h);
       ctx.lineTo(0, h);
       ctx.closePath();
       ctx.fillStyle = 'rgba(70,201,134,0.18)';
       ctx.fill();
-      // Stroke the line on top
       ctx.beginPath();
       samples.forEach((v, i) => {
         const x = i * stepX;
         const y = h - (v / max) * (h - 2) - 1;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.strokeStyle = '#46c986';
       ctx.lineWidth = 1.5;
@@ -553,44 +986,41 @@
     let lastSyncedInterval = null;
     function maybePopulateConfigForm(snap) {
       const cfg = snap.config || {};
-      // Only populate fields the user isn't actively editing — and
-      // only when the backend's value changes (otherwise we'd
-      // clobber the user's typing every poll).
       if (cfg.url !== lastSyncedUrl) {
         lastSyncedUrl = cfg.url;
         const m = (cfg.url || '').match(/^srt:\/\/([^:?\/]+)(?::(\d+))?/);
         if (m) {
-          if (document.activeElement !== document.getElementById('cfg-host')) {
-            document.getElementById('cfg-host').value = m[1];
+          if (document.activeElement !== $('#cfg-host')) {
+            $('#cfg-host').value = m[1];
           }
-          if (document.activeElement !== document.getElementById('cfg-port')) {
-            document.getElementById('cfg-port').value = m[2] || 1935;
+          if (document.activeElement !== $('#cfg-port')) {
+            $('#cfg-port').value = m[2] || 1935;
           }
         }
       }
       if (JSON.stringify(cfg.keys || []) !== JSON.stringify(lastSyncedKeys)) {
         lastSyncedKeys = (cfg.keys || []).slice();
-        if (document.activeElement !== document.getElementById('cfg-key')) {
-          document.getElementById('cfg-key').value = (cfg.keys || []).join(', ');
+        if (document.activeElement !== $('#cfg-key')) {
+          $('#cfg-key').value = (cfg.keys || []).join(', ');
         }
       }
       if (cfg.interval_secs !== lastSyncedInterval) {
         lastSyncedInterval = cfg.interval_secs;
-        if (document.activeElement !== document.getElementById('cfg-interval')) {
-          document.getElementById('cfg-interval').value = cfg.interval_secs || 5;
+        if (document.activeElement !== $('#cfg-interval')) {
+          $('#cfg-interval').value = cfg.interval_secs || 5;
         }
       }
     }
 
-    document.getElementById('config-form').addEventListener('submit', async (e) => {
+    $('#config-form').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const status = document.getElementById('config-status');
-      const btn = document.getElementById('cfg-apply');
-      const host = document.getElementById('cfg-host').value.trim();
-      const port = parseInt(document.getElementById('cfg-port').value, 10) || 1935;
-      const keyRaw = document.getElementById('cfg-key').value.trim();
+      const status = $('#config-status');
+      const btn = $('#cfg-apply');
+      const host = $('#cfg-host').value.trim();
+      const port = parseInt($('#cfg-port').value, 10) || 1935;
+      const keyRaw = $('#cfg-key').value.trim();
       const keys = keyRaw ? keyRaw.split(/[,\s]+/).filter(Boolean) : [];
-      const interval = parseInt(document.getElementById('cfg-interval').value, 10) || 5;
+      const interval = parseInt($('#cfg-interval').value, 10) || 5;
       if (!host) {
         status.className = 'config-status error';
         status.textContent = 'Host is required.';
@@ -610,13 +1040,34 @@
         } else {
           status.className = 'config-status ok';
           status.textContent = `Probing ${url} with ${keys.length} key${keys.length === 1 ? '' : 's'} every ${interval}s.`;
-          tick();  // refresh the dashboard immediately
+          tick();
         }
       } catch (err) {
         status.className = 'config-status error';
         status.textContent = err.message;
       } finally {
         btn.disabled = false;
+      }
+    });
+
+    // Mode toggle: single-click flip between Live and Standby.
+    $('#mode-toggle').addEventListener('click', async () => {
+      const banner = $('#mode-banner');
+      const newMode = banner.classList.contains('live') ? 'standby' : 'live';
+      try {
+        const r = await fetch('/api/config', {
+          method: 'POST',
+          body: JSON.stringify({ mode: newMode }),
+          headers: { 'content-type': 'application/json' },
+        });
+        const j = await r.json();
+        if (j.error) {
+          alert('Failed to switch mode: ' + j.error);
+        } else {
+          tick();
+        }
+      } catch (e) {
+        alert('Failed to switch mode: ' + e.message);
       }
     });
 

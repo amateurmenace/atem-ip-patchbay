@@ -11,7 +11,7 @@
 //! (probe(), parse_tshark_line()) without disturbing them.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,13 +19,107 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tiny_http::{Header, Response, Server};
 
+use crate::unifi;
 use crate::{
-    build_bmd_srt_url, find_tshark, parse_tshark_line, probe as probe_url, tshark_field_args,
-    FlowKey, FlowStats, ProbeOutcome, Stats,
+    build_bmd_srt_url, extract_bmd_key, find_tshark, parse_tshark_line, probe as probe_url,
+    tshark_field_args, FlowKey, FlowStats, ProbeOutcome, Stats, DEFAULT_ATEM_IP, DEFAULT_ATEM_MAC,
+    DEFAULT_ATEM_PORT, DEFAULT_UDM_HOST,
 };
 
 const KEEP_LAST_PROBES: usize = 250;
 const FLOW_STALE_SECS: u64 = 60;
+
+/// Diag mode controls whether the active-probe loop fires. Live is
+/// the default — pure passive monitoring (UDM polling + optional
+/// tshark) with zero outbound traffic to the ATEM. Standby enables
+/// the FFmpeg handshake probe for explicit reachability testing
+/// when no production is in progress; the operator must opt in.
+///
+/// The split exists because active probes consume a connection slot
+/// at the receiver and can be REJECTED (or contend with) a
+/// production stream that's already using the configured key. The
+/// previous default behavior (always probe) was wrong for live use.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagMode {
+    Live,
+    Standby,
+}
+
+impl Default for DiagMode {
+    fn default() -> Self {
+        DiagMode::Live
+    }
+}
+
+impl DiagMode {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "live" => Some(DiagMode::Live),
+            "standby" => Some(DiagMode::Standby),
+            _ => None,
+        }
+    }
+}
+
+/// The ATEM (or BMD streaming bridge) we're correlating UDM client
+/// data against. MAC is the primary identifier — UniFi's stat/sta
+/// keys clients by MAC, so a MAC match survives DHCP renewals. IP
+/// is used for tshark flow filtering and as the user-visible label.
+#[derive(Clone, Debug, Serialize)]
+pub struct AtemTarget {
+    pub ip: String,
+    pub mac: Option<String>,
+    pub port: u16,
+}
+
+impl Default for AtemTarget {
+    fn default() -> Self {
+        Self {
+            ip: DEFAULT_ATEM_IP.to_string(),
+            mac: Some(DEFAULT_ATEM_MAC.to_string()),
+            port: DEFAULT_ATEM_PORT,
+        }
+    }
+}
+
+/// State of the UDM connection. Surfaced to the dashboard so the
+/// operator sees at a glance whether UDM polling is healthy.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UnifiStatus {
+    NotConfigured,
+    Connecting,
+    Connected { last_poll_at: u64 },
+    Failed { error: String, last_attempt: u64 },
+}
+
+impl Default for UnifiStatus {
+    fn default() -> Self {
+        UnifiStatus::NotConfigured
+    }
+}
+
+/// Per-client snapshot from the UDM's stat/sta endpoint, augmented
+/// with delta-derived bandwidth (kbps over the last poll cycle).
+/// One entry per client the UDM currently knows about; we don't
+/// filter to the ATEM only because the operator wants to see
+/// *which* clients are talking to the ATEM right now.
+#[derive(Clone, Debug, Serialize)]
+pub struct UnifiClientSnapshot {
+    pub mac: String,
+    pub ip: Option<String>,
+    pub hostname: Option<String>,
+    pub name: Option<String>,
+    pub oui: Option<String>,
+    pub last_seen: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub tx_kbps: u64,
+    pub rx_kbps: u64,
+    pub is_atem: bool,
+    pub is_wired: bool,
+}
 
 #[derive(Default)]
 pub struct DashboardState {
@@ -41,6 +135,17 @@ pub struct DashboardState {
     pub last_flow_at: u64,
     pub probe_thread_alive: bool,
     pub monitor_thread_alive: bool,
+    /// Per-client snapshots from the most recent UDM poll. Empty
+    /// when UDM isn't configured or the first poll hasn't completed.
+    pub unifi_clients: Vec<UnifiClientSnapshot>,
+    pub unifi_status: UnifiStatus,
+    pub last_unifi_poll_at: u64,
+    pub unifi_thread_alive: bool,
+    /// Per-flow → stream-key mapping derived from the SRT HSv5
+    /// handshake's SID extension. Captures across the lifetime of
+    /// each flow; falls back to empty until a handshake is observed.
+    /// Keyed by FlowKey so the stream card can look up its key.
+    pub flow_keys: HashMap<FlowKey, String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -50,6 +155,23 @@ pub struct ConfigSnapshot {
     pub interval_secs: u64,
     pub monitor_iface: Option<String>,
     pub monitor_ports: Vec<u16>,
+    /// Diag mode — Live (no probes) by default. The operator opts
+    /// into Standby explicitly when they want to verify reachability
+    /// against a destination not currently in production.
+    pub mode: DiagMode,
+    /// ATEM identification — used to highlight the ATEM in the
+    /// network-clients list (UDM source) and to filter tshark flow
+    /// monitoring (when on the streamer's machine). MAC is the
+    /// stable identity; IP changes when DHCP rotates leases.
+    pub atem: AtemTarget,
+    /// UDM controller URL (e.g. https://192.168.20.1). Pre-filled
+    /// from DEFAULT_UDM_HOST; the operator can override via the
+    /// dashboard form.
+    pub unifi_host: String,
+    /// True when an API key is configured (env or form). The key
+    /// itself is intentionally NOT in this struct — ConfigSnapshot
+    /// is serialized into the public /api/state response.
+    pub unifi_configured: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -72,6 +194,10 @@ pub struct StateResponse<'a> {
     pub last_flow_at: u64,
     pub probe_thread_alive: bool,
     pub monitor_thread_alive: bool,
+    pub unifi_status: &'a UnifiStatus,
+    pub unifi_clients: &'a [UnifiClientSnapshot],
+    pub last_unifi_poll_at: u64,
+    pub unifi_thread_alive: bool,
 }
 
 #[derive(Serialize)]
@@ -116,6 +242,12 @@ pub struct FlowSnapshot {
     /// Health classification — driven by the data points above.
     /// "streaming" / "stalling" / "idle" / "handshake" / "unknown".
     pub health: String,
+    /// Stream key extracted from the SRT HSv5 conclusion handshake's
+    /// SID extension. For BMD-flavored streamids, this is just the
+    /// `u=` field (the operator-visible key). For non-BMD streamids,
+    /// it's the full SID string. None until a handshake is observed
+    /// for this flow.
+    pub stream_key: Option<String>,
 }
 
 /// Run the dashboard. Spawns probe + (optional) monitor threads,
@@ -123,6 +255,18 @@ pub struct FlowSnapshot {
 /// SIGINT / Ctrl-C kills the process — no graceful shutdown
 /// machinery (the OS handles it).
 pub fn run(cli: &crate::Cli, port: u16) -> ! {
+    // Read UDM creds from env at startup. The API key (or
+    // username/password) never enters DashboardState — that struct
+    // is serialized to /api/state and visible to anyone who hits
+    // the dashboard URL on this machine. Credentials live only in
+    // the UniFi polling thread's local state.
+    let unifi_host = std::env::var("UDM_HOST")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_UDM_HOST.to_string());
+    let unifi_credentials = unifi::read_credentials_from_env();
+    let unifi_configured = unifi_credentials.is_some();
+
     let state = Arc::new(Mutex::new(DashboardState {
         started_at: now_secs(),
         config: ConfigSnapshot {
@@ -131,19 +275,37 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
             interval_secs: cli.interval.as_secs(),
             monitor_iface: cli.monitor_iface.clone(),
             monitor_ports: cli.monitor_ports.clone(),
+            mode: DiagMode::Live,
+            atem: AtemTarget::default(),
+            unifi_host,
+            unifi_configured,
         },
         ..Default::default()
     }));
 
-    // Always start the probe loop in UI mode. Even if the user
-    // launched with no key (or url is "monitor://"), they may set
-    // one through the dashboard's config form, and we want the loop
-    // ready to pick up that change without a process restart.
+    // Always start the probe loop in UI mode. The mode-gate
+    // inside the loop suppresses actual probes until the operator
+    // switches to Standby; in Live mode the thread sleeps idle.
+    // Spawning unconditionally means a mode flip takes effect on
+    // the next loop iteration with no thread-spawn delay.
     let probe_state = state.clone();
     std::thread::Builder::new()
         .name("probe-loop".into())
         .spawn(move || probe_loop(probe_state))
         .expect("spawn probe loop");
+
+    // UDM polling thread — only spawn if creds are configured.
+    // No creds means the dashboard reports "UDM: not configured"
+    // and the operator can still use the tool with active probes
+    // (Standby mode) and tshark monitoring as data sources.
+    if let Some(creds) = unifi_credentials {
+        let unifi_state = state.clone();
+        let host = state.lock().unwrap().config.unifi_host.clone();
+        std::thread::Builder::new()
+            .name("unifi-poll".into())
+            .spawn(move || unifi::poll_loop(host, creds, unifi_state))
+            .expect("spawn unifi poll");
+    }
 
     // Auto-start the flow monitor in UI mode even if --monitor
     // wasn't explicitly passed. The dashboard's value proposition
@@ -347,6 +509,7 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
                 last_srt_buf_pkts,
                 last_srt_ack_idle_secs: ack_idle,
                 health,
+                stream_key: s.flow_keys.get(k).cloned(),
             })
         })
         .collect();
@@ -362,6 +525,10 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         last_flow_at: s.last_flow_at,
         probe_thread_alive: s.probe_thread_alive,
         monitor_thread_alive: s.monitor_thread_alive,
+        unifi_status: &s.unifi_status,
+        unifi_clients: &s.unifi_clients,
+        last_unifi_poll_at: s.last_unifi_poll_at,
+        unifi_thread_alive: s.unifi_thread_alive,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
@@ -371,18 +538,21 @@ fn probe_loop(state: Arc<Mutex<DashboardState>>) {
     loop {
         // Snapshot the config under the lock so we don't hold it
         // through the FFmpeg shell-out (multi-second blocking call).
-        let (url, keys, interval) = {
+        let (url, keys, interval, mode) = {
             let s = state.lock().unwrap();
             (
                 s.config.url.clone(),
                 s.config.keys.clone(),
                 Duration::from_secs(s.config.interval_secs.max(1)),
+                s.config.mode,
             )
         };
-        // No URL configured yet (UI mode launched bare) — skip this
-        // cycle and try again. The dashboard's config form sets the
-        // URL when the user submits it.
-        if url.is_empty() || url == "monitor://" {
+        // Active probes only fire in Standby mode. The default Live
+        // mode is pure passive monitoring (UDM polling + tshark) so
+        // the tool can run alongside an in-progress production
+        // without sending any handshakes that could be REJECTED by
+        // the receiver or contend with the production for the slot.
+        if mode != DiagMode::Standby || url.is_empty() {
             std::thread::sleep(Duration::from_secs(2));
             continue;
         }
@@ -400,19 +570,33 @@ fn probe_loop(state: Arc<Mutex<DashboardState>>) {
 }
 
 /// Parse a JSON config update from the dashboard form and apply it
-/// to the shared state. Per-key Stats / probe history are reset
-/// when the URL or keys change so the dashboard's success-rate /
-/// latency numbers reflect only the new configuration. If the user
-/// just tweaks the interval, history is preserved.
+/// to the shared state. All fields are optional — missing fields
+/// preserve the existing value. Per-key Stats / probe history are
+/// reset when the probe target (url or keys) changes so the
+/// dashboard's success-rate / latency numbers reflect only the new
+/// configuration. Tweaking interval, mode, atem, or unifi_host
+/// preserves probe history.
 fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("invalid JSON: {e}"))?;
-    let url = parsed
+
+    let url_field = parsed
         .get("url")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let keys: Vec<String> = parsed
+        .map(|s| s.trim().to_string());
+    if let Some(u) = &url_field {
+        if !u.is_empty()
+            && !(u.starts_with("srt://")
+                || u.starts_with("rtmp://")
+                || u.starts_with("rtmps://"))
+        {
+            return Err(format!(
+                "URL must start with srt://, rtmp://, or rtmps:// (got {u:?})"
+            ));
+        }
+    }
+
+    let keys_field: Option<Vec<String>> = parsed
         .get("keys")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -421,29 +605,68 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
-        })
-        .unwrap_or_default();
-    let interval = parsed
+        });
+
+    let interval_field = parsed
         .get("interval_secs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if !url.is_empty()
-        && !(url.starts_with("srt://")
-            || url.starts_with("rtmp://")
-            || url.starts_with("rtmps://"))
-    {
-        return Err(format!(
-            "URL must start with srt://, rtmp://, or rtmps:// (got {url:?})"
-        ));
-    }
+        .filter(|&i| i > 0);
+
+    let mode_field = parsed
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .and_then(DiagMode::from_str);
+
+    let atem_field = parsed.get("atem").map(|v| AtemTarget {
+        ip: v
+            .get("ip")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
+        mac: v
+            .get("mac")
+            .and_then(|x| x.as_str())
+            .map(|s| normalize_mac(s))
+            .filter(|s| !s.is_empty()),
+        port: v
+            .get("port")
+            .and_then(|x| x.as_u64())
+            .and_then(|p| u16::try_from(p).ok())
+            .unwrap_or(DEFAULT_ATEM_PORT),
+    });
+
+    let unifi_host_field = parsed
+        .get("unifi_host")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
     let mut s = state.lock().unwrap();
-    let cfg_changed = s.config.url != url || s.config.keys != keys;
-    s.config.url = url;
-    s.config.keys = keys;
-    if interval > 0 {
-        s.config.interval_secs = interval;
+    let mut probe_target_changed = false;
+    if let Some(u) = url_field {
+        if s.config.url != u {
+            probe_target_changed = true;
+        }
+        s.config.url = u;
     }
-    if cfg_changed {
+    if let Some(k) = keys_field {
+        if s.config.keys != k {
+            probe_target_changed = true;
+        }
+        s.config.keys = k;
+    }
+    if let Some(i) = interval_field {
+        s.config.interval_secs = i;
+    }
+    if let Some(m) = mode_field {
+        s.config.mode = m;
+    }
+    if let Some(a) = atem_field {
+        s.config.atem = a;
+    }
+    if let Some(h) = unifi_host_field {
+        s.config.unifi_host = h;
+    }
+    if probe_target_changed {
         // Reset per-key stats + probe history when the target /
         // keys change. Otherwise the dashboard mixes data from
         // different probe targets into the same cards.
@@ -452,6 +675,30 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         s.last_probe_at = 0;
     }
     Ok(())
+}
+
+/// Normalize a MAC address to lowercase colon-separated format —
+/// "7C-2E-0D-21-AB-FE" / "7C2E0D21ABFE" / "7c:2e:0d:21:ab:fe" all
+/// become "7c:2e:0d:21:ab:fe". UniFi keys clients in lowercase
+/// colons; matching against any other capitalization or separator
+/// silently fails.
+fn normalize_mac(input: &str) -> String {
+    let hex: String = input
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if hex.len() != 12 {
+        return input.trim().to_ascii_lowercase();
+    }
+    let mut out = String::with_capacity(17);
+    for (i, c) in hex.chars().enumerate() {
+        if i > 0 && i % 2 == 0 {
+            out.push(':');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn json_escape(s: &str) -> String {
@@ -529,11 +776,21 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Some(packet) = parse_tshark_line(&line) {
             let mut s = state.lock().unwrap();
-            let key = packet.flow_key();
-            let stats = s.flows.entry(key).or_default();
+            let flow_key = packet.flow_key();
+            let stats = s.flows.entry(flow_key.clone()).or_default();
             stats.record(packet.bytes);
             if let Some(ack) = packet.srt {
                 stats.record_srt_ack(ack);
+            }
+            // Stream-key extraction from the SRT HSv5 conclusion
+            // handshake. Happens once per connection (handshake is
+            // a single packet at session setup), so we cache in
+            // flow_keys keyed by the flow tuple. For BMD-flavored
+            // streamids we strip down to the operator-visible
+            // `u=` field; for other senders we keep the full SID.
+            if let Some(streamid) = packet.stream_id {
+                let display_key = extract_bmd_key(&streamid).unwrap_or(streamid);
+                s.flow_keys.insert(flow_key, display_key);
             }
             s.last_flow_at = now_secs();
         }
