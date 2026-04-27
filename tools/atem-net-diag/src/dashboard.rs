@@ -10,7 +10,7 @@
 //! so it gets its own surface that reuses the existing helpers
 //! (probe(), parse_tshark_line()) without disturbing them.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -94,6 +94,112 @@ pub enum UnifiStatus {
     Failed { error: String, last_attempt: u64 },
 }
 
+/// State of the gateway WAN-bandwidth poll. Same shape as UnifiStatus
+/// but tracked separately because the WAN data uses a different
+/// endpoint and could be working while client polling is broken (or
+/// vice versa).
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WanStatus {
+    NotConfigured,
+    Connecting,
+    Connected { last_poll_at: u64 },
+    Failed { error: String, last_attempt: u64 },
+}
+
+impl Default for WanStatus {
+    fn default() -> Self {
+        WanStatus::NotConfigured
+    }
+}
+
+/// Snapshot of the gateway's WAN-side throughput + identity. Polled
+/// from the UDM's stat/health endpoint. Fields use **device-perspective**
+/// from the gateway's WAN port: upload = bytes leaving the LAN out to
+/// the public internet (operator's primary concern for live broadcast
+/// upstream), download = bytes coming in from the public internet
+/// (the inbound port-forwarded streams to the ATEM, plus all other
+/// download traffic on the LAN).
+#[derive(Clone, Debug, Serialize)]
+pub struct WanSnapshot {
+    pub upload_kbps: u64,
+    pub download_kbps: u64,
+    pub wan_ip: Option<String>,
+    pub isp_name: Option<String>,
+    pub isp_org: Option<String>,
+    pub wan_latency_ms: Option<u64>,
+    pub wan_status: Option<String>,
+    pub gw_cpu_pct: Option<f64>,
+    pub gw_mem_pct: Option<f64>,
+    pub gw_uptime_secs: Option<u64>,
+}
+
+/// Status of the slower-cadence "system" poll (switches, alarms).
+/// Separate from UnifiStatus so a slow / failing system endpoint
+/// doesn't make the client poll look broken.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SystemStatus {
+    NotConfigured,
+    Connecting,
+    Connected { last_poll_at: u64 },
+    Failed { error: String, last_attempt: u64 },
+}
+
+impl Default for SystemStatus {
+    fn default() -> Self { SystemStatus::NotConfigured }
+}
+
+/// Snapshot of one UniFi switch (USW). Surfaces per-port real-time
+/// utilization, errors, and link state — operator can spot a
+/// saturated port, errors creeping up on the ATEM port, or an SFP
+/// running hot before it fails. Only USW devices populate; UAPs
+/// and the UDM itself are excluded since their "ports" are wireless
+/// or routed and have different surface.
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchSnapshot {
+    pub mac: String,
+    pub name: String,
+    pub model: String,
+    pub cpu_pct: Option<f64>,
+    pub mem_pct: Option<f64>,
+    pub uptime_secs: Option<u64>,
+    pub ports: Vec<SwitchPortSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchPortSnapshot {
+    pub port_idx: u32,
+    pub name: String,
+    pub media: Option<String>,
+    pub speed_mbps: u32,
+    pub up: bool,
+    pub tx_kbps: u64,
+    pub rx_kbps: u64,
+    pub tx_errors: u64,
+    pub rx_errors: u64,
+    pub tx_dropped: u64,
+    pub rx_dropped: u64,
+    pub link_down_count: u64,
+    pub connected_mac: Option<String>,
+    pub connected_ip: Option<String>,
+    pub is_atem_port: bool,
+    pub sfp_temp_c: Option<f64>,
+    pub sfp_tx_dbm: Option<f64>,
+    pub sfp_rx_dbm: Option<f64>,
+}
+
+/// Active alarm reported by the UDM. Empty list = healthy. Surfaces
+/// security warnings, link-down events, AP-adoption issues, etc.
+#[derive(Clone, Debug, Serialize)]
+pub struct AlarmSnapshot {
+    pub key: String,
+    pub msg: String,
+    pub subsystem: String,
+    pub time: u64,
+    pub severity: Option<String>,
+}
+
 impl Default for UnifiStatus {
     fn default() -> Self {
         UnifiStatus::NotConfigured
@@ -146,6 +252,34 @@ pub struct DashboardState {
     /// each flow; falls back to empty until a handshake is observed.
     /// Keyed by FlowKey so the stream card can look up its key.
     pub flow_keys: HashMap<FlowKey, String>,
+
+    /// Latest WAN-side throughput snapshot from the UDM's
+    /// stat/health endpoint. None until first poll completes (or
+    /// when WAN polling isn't configured / failing).
+    pub wan_snapshot: Option<WanSnapshot>,
+    pub wan_status: WanStatus,
+    pub last_wan_poll_at: u64,
+    pub wan_thread_alive: bool,
+    /// 60-second history of (timestamp, kbps) pairs for graphing the
+    /// WAN upload + download rate as sparklines on the dashboard.
+    /// Front of deque is oldest sample.
+    pub wan_upload_history: VecDeque<(u64, u64)>,
+    pub wan_download_history: VecDeque<(u64, u64)>,
+
+    /// Switch + alarm data from the slower-cadence system poll.
+    pub switches: Vec<SwitchSnapshot>,
+    pub alarms: Vec<AlarmSnapshot>,
+    pub system_status: SystemStatus,
+    pub last_system_poll_at: u64,
+    pub system_thread_alive: bool,
+
+    /// Reverse-DNS cache + work queue. The poller adds source IPs
+    /// (from observed flows) to `rdns_pending`; a background worker
+    /// resolves them and writes the result here. Cache value is
+    /// `Some(hostname)` on success, `None` after a failed lookup
+    /// (so we don't retry forever for IPs without PTR records).
+    pub rdns_cache: HashMap<String, Option<String>>,
+    pub rdns_pending: HashSet<String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -172,6 +306,24 @@ pub struct ConfigSnapshot {
     /// itself is intentionally NOT in this struct — ConfigSnapshot
     /// is serialized into the public /api/state response.
     pub unifi_configured: bool,
+
+    /// Operator's WAN upload cap in Mbps (e.g., 20.0 for a 20-up
+    /// fiber plan). Used to render the headroom indicator: "14/20
+    /// Mbps used (70%)". 0 = not configured (no headroom shown).
+    #[serde(default)]
+    pub wan_upload_cap_mbps: f64,
+    /// Operator's WAN download cap in Mbps. Same role as upload but
+    /// usually less critical — most plans are asymmetric and inbound
+    /// streams to the ATEM rarely saturate downstream. 0 = not
+    /// configured.
+    #[serde(default)]
+    pub wan_download_cap_mbps: f64,
+    /// Per-source-IP friendly labels for stream identification. Maps
+    /// "192.168.5.41" or "207.180.22.3" → "Jamie's basement". Persisted
+    /// only in-memory for now; survives the lifetime of the binary.
+    /// Operator edits via the dashboard.
+    #[serde(default)]
+    pub source_labels: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -198,6 +350,18 @@ pub struct StateResponse<'a> {
     pub unifi_clients: &'a [UnifiClientSnapshot],
     pub last_unifi_poll_at: u64,
     pub unifi_thread_alive: bool,
+    pub wan_status: &'a WanStatus,
+    pub wan_snapshot: Option<&'a WanSnapshot>,
+    pub last_wan_poll_at: u64,
+    pub wan_thread_alive: bool,
+    pub wan_upload_kbps_history: Vec<u64>,
+    pub wan_download_kbps_history: Vec<u64>,
+    pub switches: &'a [SwitchSnapshot],
+    pub alarms: &'a [AlarmSnapshot],
+    pub system_status: &'a SystemStatus,
+    pub last_system_poll_at: u64,
+    pub system_thread_alive: bool,
+    pub rdns_cache: HashMap<String, Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -279,6 +443,9 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
             atem: AtemTarget::default(),
             unifi_host,
             unifi_configured,
+            wan_upload_cap_mbps: 0.0,
+            wan_download_cap_mbps: 0.0,
+            source_labels: HashMap::new(),
         },
         ..Default::default()
     }));
@@ -301,10 +468,38 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
     if let Some(creds) = unifi_credentials {
         let unifi_state = state.clone();
         let host = state.lock().unwrap().config.unifi_host.clone();
+        let creds_for_clients = creds.clone();
         std::thread::Builder::new()
             .name("unifi-poll".into())
-            .spawn(move || unifi::poll_loop(host, creds, unifi_state))
+            .spawn(move || unifi::poll_loop(host, creds_for_clients, unifi_state))
             .expect("spawn unifi poll");
+
+        // Separate thread for WAN bandwidth — same UDM, different
+        // endpoint. Kept independent so a slow / failing WAN endpoint
+        // doesn't starve client polling and vice versa.
+        let wan_state = state.clone();
+        let wan_host = state.lock().unwrap().config.unifi_host.clone();
+        let wan_creds = creds.clone();
+        std::thread::Builder::new()
+            .name("wan-poll".into())
+            .spawn(move || unifi::wan_poll_loop(wan_host, wan_creds, wan_state))
+            .expect("spawn wan poll");
+
+        // System poll: switches + alarms (slower cadence: 5s).
+        let sys_state = state.clone();
+        let sys_host = state.lock().unwrap().config.unifi_host.clone();
+        std::thread::Builder::new()
+            .name("system-poll".into())
+            .spawn(move || unifi::system_poll_loop(sys_host, creds, sys_state))
+            .expect("spawn system poll");
+
+        // Reverse-DNS resolver thread: pulls source IPs out of the
+        // pending queue, runs `host` to look them up, caches results.
+        let rdns_state = state.clone();
+        std::thread::Builder::new()
+            .name("rdns-worker".into())
+            .spawn(move || unifi::rdns_worker_loop(rdns_state))
+            .expect("spawn rdns worker");
     }
 
     // Auto-start the flow monitor in UI mode even if --monitor
@@ -514,6 +709,9 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         })
         .collect();
     flows.sort_by(|a, b| b.recent_bytes.cmp(&a.recent_bytes));
+    let wan_upload_kbps_history: Vec<u64> = s.wan_upload_history.iter().map(|(_, kbps)| *kbps).collect();
+    let wan_download_kbps_history: Vec<u64> = s.wan_download_history.iter().map(|(_, kbps)| *kbps).collect();
+    let rdns_cache = s.rdns_cache.clone();
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -529,6 +727,18 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         unifi_clients: &s.unifi_clients,
         last_unifi_poll_at: s.last_unifi_poll_at,
         unifi_thread_alive: s.unifi_thread_alive,
+        wan_status: &s.wan_status,
+        wan_snapshot: s.wan_snapshot.as_ref(),
+        last_wan_poll_at: s.last_wan_poll_at,
+        wan_thread_alive: s.wan_thread_alive,
+        wan_upload_kbps_history,
+        wan_download_kbps_history,
+        switches: &s.switches,
+        alarms: &s.alarms,
+        system_status: &s.system_status,
+        last_system_poll_at: s.last_system_poll_at,
+        system_thread_alive: s.system_thread_alive,
+        rdns_cache,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
@@ -640,6 +850,37 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
+    let wan_up_cap_field = parsed
+        .get("wan_upload_cap_mbps")
+        .and_then(|v| v.as_f64())
+        .filter(|f| *f >= 0.0);
+    let wan_down_cap_field = parsed
+        .get("wan_download_cap_mbps")
+        .and_then(|v| v.as_f64())
+        .filter(|f| *f >= 0.0);
+
+    // Source labels are sent as either:
+    //   - {"source_labels": {"1.2.3.4": "Jamie"}}  (full replacement), or
+    //   - {"source_label_set": {"ip": "1.2.3.4", "label": "Jamie"}}
+    //     to set/remove a single entry (label="" deletes).
+    let labels_replace = parsed
+        .get("source_labels")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        });
+    let label_set: Option<(String, String)> = parsed.get("source_label_set").and_then(|v| {
+        let ip = v.get("ip").and_then(|x| x.as_str())?.trim().to_string();
+        let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if ip.is_empty() {
+            None
+        } else {
+            Some((ip, label))
+        }
+    });
+
     let mut s = state.lock().unwrap();
     let mut probe_target_changed = false;
     if let Some(u) = url_field {
@@ -665,6 +906,22 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
     }
     if let Some(h) = unifi_host_field {
         s.config.unifi_host = h;
+    }
+    if let Some(c) = wan_up_cap_field {
+        s.config.wan_upload_cap_mbps = c;
+    }
+    if let Some(c) = wan_down_cap_field {
+        s.config.wan_download_cap_mbps = c;
+    }
+    if let Some(map) = labels_replace {
+        s.config.source_labels = map;
+    }
+    if let Some((ip, label)) = label_set {
+        if label.is_empty() {
+            s.config.source_labels.remove(&ip);
+        } else {
+            s.config.source_labels.insert(ip, label);
+        }
     }
     if probe_target_changed {
         // Reset per-key stats + probe history when the target /
@@ -777,6 +1034,17 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
         if let Some(packet) = parse_tshark_line(&line) {
             let mut s = state.lock().unwrap();
             let flow_key = packet.flow_key();
+            // Enqueue the flow's source IP for reverse DNS resolution
+            // if we haven't seen it before. Skip RFC1918 / loopback
+            // since reverse DNS for those rarely produces useful
+            // names and we don't want to spam the resolver.
+            let src = flow_key.src_ip.clone();
+            if !is_private_or_loopback(&src)
+                && !s.rdns_cache.contains_key(&src)
+                && !s.rdns_pending.contains(&src)
+            {
+                s.rdns_pending.insert(src);
+            }
             let stats = s.flows.entry(flow_key.clone()).or_default();
             stats.record(packet.bytes);
             if let Some(ack) = packet.srt {
@@ -803,6 +1071,22 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Heuristic: skip reverse-DNS lookups for IPs that almost never have
+/// useful PTR records (RFC1918 LAN ranges, loopback, link-local). The
+/// public-internet sources we DO want to resolve get queued normally.
+pub fn is_private_or_loopback(ip: &str) -> bool {
+    let octets: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();
+    if octets.len() != 4 { return true; } // IPv6 or malformed — skip for now
+    let (a, b) = (octets[0], octets[1]);
+    a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || a == 127
+        || a == 0
+        || (a == 169 && b == 254)
+        || a >= 224 // multicast / reserved
 }
 
 fn html_header() -> Header {

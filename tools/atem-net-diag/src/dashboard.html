@@ -410,6 +410,401 @@
       padding: 1px 5px; border-radius: 3px;
       font-family: "SF Mono", Menlo, monospace;
     }
+
+    /* Pre-show health banner — green/yellow/red based on
+       aggregated subsystem state. Sits at the very top so the
+       operator can scan it before showtime without reading
+       individual cards. */
+    .preshow-banner {
+      grid-column: 1 / -1;
+      padding: 10px 14px;
+      border-radius: 7px;
+      margin: 0 16px 12px;
+      display: flex; align-items: center; gap: 14px;
+      font-size: 13px;
+      border: 1px solid transparent;
+    }
+    .preshow-banner.ok    { background: rgba(70,201,134,0.08); border-color: rgba(70,201,134,0.25); }
+    .preshow-banner.warn  { background: rgba(243,196,75,0.08); border-color: rgba(243,196,75,0.30); }
+    .preshow-banner.fail  { background: rgba(255,109,98,0.08); border-color: rgba(255,109,98,0.30); }
+    .preshow-label {
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 12px;
+    }
+    .preshow-banner.ok .preshow-label   { color: var(--good); }
+    .preshow-banner.warn .preshow-label { color: var(--warn); }
+    .preshow-banner.fail .preshow-label { color: var(--bad); }
+    .preshow-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+    .preshow-pill {
+      font-size: 11px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+    }
+    .preshow-pill.ok   { color: var(--good); border-color: rgba(70,201,134,0.30); }
+    .preshow-pill.warn { color: var(--warn); border-color: rgba(243,196,75,0.30); }
+    .preshow-pill.fail { color: var(--bad);  border-color: rgba(255,109,98,0.30); }
+
+    /* WAN bandwidth card. Two big sparklines (up + down) with
+       headroom percentage when the operator has set a cap. */
+    .wan-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.2fr;
+      gap: 18px;
+      margin-top: 8px;
+    }
+    @media (max-width: 900px) {
+      .wan-grid { grid-template-columns: 1fr; }
+    }
+    .wan-stat {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .wan-label {
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .wan-value {
+      font-size: 26px;
+      font-family: "SF Mono", Menlo, monospace;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .wan-value .unit {
+      font-size: 12px;
+      margin-left: 4px;
+      color: var(--muted);
+      font-weight: 400;
+    }
+    .wan-spark {
+      width: 100%; height: 36px;
+      display: block;
+      margin: 4px 0 2px;
+    }
+    .wan-headroom {
+      font-size: 12px;
+      font-family: "SF Mono", Menlo, monospace;
+      color: var(--muted);
+    }
+    .wan-headroom.warn { color: var(--warn); font-weight: 500; }
+    .wan-headroom.fail { color: var(--bad);  font-weight: 600; }
+    .wan-meta {
+      display: flex; flex-direction: column; gap: 6px;
+      font-size: 12px; color: var(--muted);
+    }
+    .wan-meta strong {
+      color: var(--text); font-weight: 500;
+      display: inline-block; min-width: 70px;
+    }
+    .wan-meta code {
+      background: rgba(78,167,255,0.10);
+      padding: 1px 5px; border-radius: 3px;
+      font-family: "SF Mono", Menlo, monospace;
+      color: var(--text);
+    }
+    .wan-cap-form {
+      display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px;
+      margin-top: 6px;
+    }
+    .wan-cap-form label {
+      display: flex; flex-direction: column;
+      font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted-2);
+      gap: 2px;
+    }
+    .wan-cap-form input {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 5px 7px; font-size: 12px; color: var(--text);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .wan-cap-form input:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .wan-cap-form button {
+      align-self: end;
+      background: var(--accent); color: #0a0e16;
+      border: none; border-radius: 4px;
+      padding: 6px 10px; font-size: 11px; font-weight: 600;
+      cursor: pointer;
+    }
+    .wan-cap-form button:hover { filter: brightness(1.08); }
+
+    /* Per-source label editing on the stream cards. */
+    .stream-label {
+      font-size: 13px; font-weight: 600;
+      color: var(--text);
+      margin: 2px 0;
+      cursor: pointer;
+      border-bottom: 1px dotted rgba(255,255,255,0.15);
+      display: inline-block;
+    }
+    .stream-label:hover { color: var(--accent); }
+    .stream-label.unlabeled { color: var(--muted-2); font-weight: 400; font-style: italic; }
+    .stream-label-edit input {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      padding: 3px 6px; font-size: 12px; color: var(--text);
+      font-family: -apple-system, system-ui, sans-serif;
+      width: 100%; max-width: 280px;
+    }
+
+    /* Quality alert badges on stream cards. */
+    .stream-alerts { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    .stream-alert {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 2px 7px; border-radius: 999px;
+      background: rgba(243,196,75,0.10);
+      color: var(--warn);
+      border: 1px solid rgba(243,196,75,0.30);
+    }
+    .stream-alert.fail {
+      background: rgba(255,109,98,0.12);
+      color: var(--bad);
+      border-color: rgba(255,109,98,0.35);
+    }
+
+    /* Inline forms on cards (ATEM target, capture iface). */
+    .atem-target-form, .iface-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) auto;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .atem-target-form label, .iface-form label {
+      display: flex; flex-direction: column;
+      font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted-2);
+      gap: 3px;
+    }
+    .atem-target-form input, .iface-form input {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 6px 8px; font-size: 12px; color: var(--text);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .atem-target-form input:focus, .iface-form input:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .atem-target-form button, .iface-form button {
+      align-self: end;
+      background: var(--accent); color: #0a0e16;
+      border: none; border-radius: 4px;
+      padding: 7px 12px; font-size: 11px; font-weight: 600;
+      cursor: pointer;
+    }
+    .atem-target-form button:hover, .iface-form button:hover { filter: brightness(1.08); }
+    .muted-inline { color: var(--muted-2); font-weight: 400; }
+
+    /* Stream-keys list + add row. */
+    .keys-list {
+      display: flex; flex-direction: column; gap: 4px;
+      margin-bottom: 8px;
+    }
+    .key-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px; align-items: center;
+      padding: 5px 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 4px;
+      font-family: "SF Mono", Menlo, monospace;
+      font-size: 12px;
+    }
+    .key-row .remove {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 14px;
+      padding: 2px 6px;
+    }
+    .key-row .remove:hover { color: var(--bad); }
+    .keys-list .empty {
+      font-size: 11px; color: var(--muted-2); font-style: italic;
+      padding: 4px 0;
+    }
+    .key-add-form {
+      display: grid; grid-template-columns: 1fr auto; gap: 8px;
+    }
+    .key-add-form input {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 6px 8px; font-size: 12px; color: var(--text);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .key-add-form input:focus { outline: none; border-color: var(--accent); }
+    .key-add-form button {
+      background: rgba(78,167,255,0.15);
+      color: var(--accent);
+      border: 1px solid rgba(78,167,255,0.30);
+      border-radius: 4px; padding: 6px 12px;
+      font-size: 11px; font-weight: 500; cursor: pointer;
+    }
+    .key-add-form button:hover { background: rgba(78,167,255,0.25); }
+
+    /* Collapsible cards. Click the h2 → toggle the body. The
+       summary span next to the title shows essential info in the
+       collapsed state so the operator doesn't have to expand to
+       see what's there. */
+    .card.collapsible h2 {
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card.collapsible h2:hover { color: var(--accent); }
+    .card.collapsible h2 .card-summary {
+      flex: 1;
+      text-transform: none;
+      letter-spacing: normal;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 400;
+      font-family: "SF Mono", Menlo, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .card.collapsible h2 .chevron {
+      font-size: 11px;
+      color: var(--muted-2);
+      transition: transform 0.15s ease;
+    }
+    .card.collapsible.expanded h2 .chevron { transform: rotate(180deg); }
+    .card.collapsible .card-body { display: none; }
+    .card.collapsible.expanded .card-body { display: block; }
+
+    /* Show-more button at the bottom of the clients list. */
+    .clients-show-more {
+      margin: 8px auto 0;
+      display: block;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 6px 14px;
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .clients-show-more:hover {
+      color: var(--text);
+      border-color: rgba(78,167,255,0.30);
+    }
+
+    /* Active alarms banner — red, only rendered when alarms array
+       has entries. Sits below the pre-show banner. */
+    .alarms-banner {
+      grid-column: 1 / -1;
+      margin: 0 16px 12px;
+      padding: 10px 14px;
+      background: rgba(255,109,98,0.10);
+      border: 1px solid rgba(255,109,98,0.35);
+      border-radius: 7px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .alarms-banner-head {
+      font-size: 12px; font-weight: 600;
+      color: var(--bad);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .alarm-row {
+      font-size: 12px; color: var(--text);
+      display: grid;
+      grid-template-columns: 100px 1fr 80px;
+      gap: 8px;
+    }
+    .alarm-row .alarm-time { color: var(--muted); font-family: "SF Mono", Menlo, monospace; }
+    .alarm-row .alarm-subsystem { color: var(--muted-2); text-align: right; font-size: 11px; }
+
+    /* Switch port utilization card. */
+    .switches-grid {
+      display: flex; flex-direction: column; gap: 16px;
+      margin-top: 8px;
+    }
+    .switch-block {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .switch-block-head {
+      display: flex; align-items: baseline; gap: 12px;
+      margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .switch-block-head .name {
+      font-weight: 600; color: var(--text);
+      font-size: 13px;
+    }
+    .switch-block-head .model {
+      color: var(--muted-2); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .switch-block-head .stats {
+      margin-left: auto;
+      color: var(--muted); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .ports-table {
+      display: grid;
+      grid-template-columns: 50px 1fr 70px 75px 75px 70px 1fr;
+      gap: 4px 10px;
+      font-size: 11px;
+      align-items: baseline;
+    }
+    .ports-table .ports-head {
+      color: var(--muted-2);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      font-size: 10px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      margin-bottom: 4px;
+    }
+    .port-row {
+      display: contents;
+    }
+    .port-row > span {
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .port-row.atem > span { background: rgba(247,166,93,0.08); color: var(--text); }
+    .port-row.atem .port-name::before {
+      content: '◉ ';
+      color: #f7a65d;
+    }
+    .port-row.down > span { color: var(--muted-2); }
+    .port-row.has-errors > span { color: var(--bad); }
+    .port-bw { text-align: right; color: var(--accent); }
+    .port-bw.zero { color: var(--muted-2); }
+    .port-meta { color: var(--muted); font-size: 10px; }
+
+    /* Reverse DNS hint on flow cards. */
+    .stream-rdns {
+      color: var(--muted-2);
+      font-size: 10px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+
+    /* Gateway stats row in process health. */
+    .gw-stats {
+      grid-column: 1 / -1;
+      margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      font-size: 11px; color: var(--muted);
+      display: flex; gap: 14px; flex-wrap: wrap;
+    }
+    .gw-stats strong { color: var(--text); font-weight: 500; }
   </style>
 </head>
 <body>
@@ -420,6 +815,21 @@
     <span class="uptime" id="uptime"></span>
   </header>
 
+  <!-- Pre-show health: aggregates UDM, ATEM, WAN, capture into one
+       at-a-glance "ready?" indicator. Color: green=all good,
+       yellow=at least one warn, red=at least one fail. -->
+  <div class="preshow-banner ok" id="preshow-banner">
+    <span class="preshow-label" id="preshow-label">checking pre-show…</span>
+    <span class="preshow-pills" id="preshow-pills"></span>
+  </div>
+
+  <!-- Active alarms — red banner, hidden when zero alarms. Polled
+       from the UDM's /list/alarm endpoint every 5s. -->
+  <div class="alarms-banner" id="alarms-banner" hidden>
+    <div class="alarms-banner-head" id="alarms-banner-head">0 active alarms</div>
+    <div id="alarms-list"></div>
+  </div>
+
   <div class="mode-banner live" id="mode-banner">
     <span class="label" id="mode-banner-label">Mode: LIVE</span>
     <span class="desc" id="mode-banner-desc">
@@ -429,22 +839,109 @@
   </div>
 
   <main>
-    <!-- ATEM target + UDM controller — always visible, drives the rest. -->
-    <section class="card">
-      <h2>ATEM target</h2>
-      <div class="summary-grid" id="atem-summary">
-        <div class="label">IP</div>
-        <div class="label">MAC</div>
-        <div class="label right">Port</div>
+    <!-- ATEM target + Capture interface — both small config cards,
+         collapsed by default to keep the WAN + clients views above
+         the fold. Click the title to expand. -->
+    <section class="card collapsible" id="atem-card" data-collapse-key="atem-target">
+      <h2>
+        ATEM target
+        <span class="card-summary" id="atem-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <form class="atem-target-form" id="atem-target-form" autocomplete="off">
+          <label>IP
+            <input id="atem-ip-input" type="text" placeholder="192.168.20.189" />
+          </label>
+          <label>MAC <span class="muted-inline">(for UDM lookup)</span>
+            <input id="atem-mac-input" type="text" placeholder="7c:2e:0d:21:ab:fe" />
+          </label>
+          <label>Port
+            <input id="atem-port-input" type="number" min="1" max="65535" placeholder="1935" />
+          </label>
+          <button id="atem-target-apply" type="submit">Save target</button>
+        </form>
+        <div class="config-status" id="atem-target-status"></div>
+        <div class="summary-grid" id="atem-summary" style="margin-top: 6px;">
+          <div class="label">UDM sees</div>
+          <div></div>
+          <div></div>
+          <div class="value" id="atem-udm-state" style="grid-column: 1 / 4;">checking…</div>
+        </div>
+      </div>
+    </section>
 
-        <div class="value" id="atem-ip">—</div>
-        <div class="value" id="atem-mac">—</div>
-        <div class="value right" id="atem-port">—</div>
+    <section class="card collapsible" id="iface-card" data-collapse-key="capture-iface">
+      <h2>
+        Capture interface
+        <span class="card-summary" id="iface-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <form class="iface-form" id="iface-form" autocomplete="off">
+          <label>Interface
+            <input id="iface-input" type="text" placeholder="en0" />
+          </label>
+          <button id="iface-apply" type="submit">Save</button>
+        </form>
+        <div class="config-status" id="iface-status"></div>
+        <div class="muted-inline" id="iface-hint" style="margin-top: 6px; font-size: 11px;">
+          tshark monitors this interface for SRT/RTMP traffic. On a switched LAN
+          a peer machine usually can't see ATEM unicast — choose the streamer's
+          interface, or set up port mirroring. Restart the tool to apply changes.
+        </div>
+      </div>
+    </section>
 
-        <div class="label">UDM sees</div>
-        <div></div>
-        <div></div>
-        <div class="value" id="atem-udm-state" style="grid-column: 1 / 4;">checking…</div>
+    <!-- WAN bandwidth at the gateway. Polled from the UDM's
+         stat/health endpoint. Upload is the operator's primary
+         concern (where outbound streams compete with everything
+         else). Headroom % vs the configured upload cap shows when
+         the ceiling is approaching. -->
+    <section class="card full" id="wan-card">
+      <h2>WAN bandwidth <span style="text-transform:none;letter-spacing:normal;color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;" id="wan-status-summary">checking…</span></h2>
+      <div class="wan-grid">
+        <div class="wan-stat">
+          <div class="wan-label">Upload</div>
+          <div class="wan-value" id="wan-up-value">—<span class="unit">Mbps</span></div>
+          <canvas id="wan-up-spark" class="wan-spark" width="280" height="36"></canvas>
+          <div class="wan-headroom" id="wan-up-headroom"></div>
+        </div>
+        <div class="wan-stat">
+          <div class="wan-label">Download</div>
+          <div class="wan-value" id="wan-down-value">—<span class="unit">Mbps</span></div>
+          <canvas id="wan-down-spark" class="wan-spark" width="280" height="36"></canvas>
+          <div class="wan-headroom" id="wan-down-headroom"></div>
+        </div>
+        <div class="wan-meta">
+          <div><strong>WAN IP</strong> <code id="wan-ip">—</code></div>
+          <div><strong>ISP</strong> <span id="wan-isp">—</span></div>
+          <div><strong>Latency</strong> <span id="wan-latency">—</span></div>
+          <form class="wan-cap-form" id="wan-cap-form" autocomplete="off">
+            <label>Upload cap (Mbps)
+              <input id="wan-up-cap-input" type="number" min="0" step="0.5" placeholder="20" />
+            </label>
+            <label>Download cap (Mbps)
+              <input id="wan-down-cap-input" type="number" min="0" step="0.5" placeholder="100" />
+            </label>
+            <button type="submit">Save caps</button>
+          </form>
+          <div class="config-status" id="wan-cap-status"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Switches: per-USW port utilization, errors, ATEM-port spotlight.
+         Collapsible because it can be a wall of ports on a busy network. -->
+    <section class="card full collapsible" id="switches-card" data-collapse-key="switches">
+      <h2>
+        Switches &amp; ports
+        <span class="card-summary" id="switches-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <div class="switches-grid" id="switches-grid"></div>
+        <div class="empty" id="switches-empty">No switches reported by the UDM yet.</div>
       </div>
     </section>
 
@@ -503,22 +1000,27 @@
       <h2>Standby probe configuration</h2>
       <div class="standby-gate">Switch to STANDBY mode to enable active probes</div>
       <form class="config-form" id="config-form" autocomplete="off">
-        <label>Host / IP
-          <input id="cfg-host" type="text" />
-        </label>
-        <label>Port
-          <input id="cfg-port" type="number" min="1" max="65535" value="1935" />
-        </label>
-        <label>Interval (s)
+        <label>Probe interval (s)
           <input id="cfg-interval" type="number" min="1" max="600" value="5" />
         </label>
-        <label>Stream key
-          <input id="cfg-key" type="text" placeholder="aaaa-bbbb-cccc-dddd" />
-        </label>
         <label style="opacity: 0;">.</label>
-        <button id="cfg-apply" type="submit">Apply</button>
+        <button id="cfg-apply" type="submit">Save interval</button>
       </form>
       <div class="config-status" id="config-status"></div>
+
+      <h3 style="margin-top: 16px; margin-bottom: 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);">
+        Stream keys to probe <span class="muted-inline" id="keys-summary"></span>
+      </h3>
+      <div class="muted-inline" style="font-size: 11px; margin-bottom: 8px;">
+        Each key fires its own SRT handshake against the ATEM target above. An empty list
+        probes with no streamid (some receivers reject without a key — that's expected).
+      </div>
+      <div id="keys-list" class="keys-list"></div>
+      <form class="key-add-form" id="key-add-form" autocomplete="off">
+        <input id="key-add-input" type="text" placeholder="add a stream key — e.g. aaaa-bbbb-cccc-dddd" />
+        <button id="key-add-btn" type="submit">Add key</button>
+      </form>
+      <div class="config-status" id="keys-status"></div>
     </section>
 
     <section class="card standby-only" id="probes-card">
@@ -630,9 +1132,17 @@
 
     function renderAtem(state) {
       const atem = state.config && state.config.atem ? state.config.atem : {};
-      $('#atem-ip').textContent = atem.ip || '—';
-      $('#atem-mac').textContent = atem.mac || '—';
-      $('#atem-port').textContent = atem.port != null ? String(atem.port) : '—';
+      // Update editable inputs only when the user isn't typing in them.
+      const ipIn = $('#atem-ip-input'), macIn = $('#atem-mac-input'), portIn = $('#atem-port-input');
+      if (ipIn && document.activeElement !== ipIn) ipIn.value = atem.ip || '';
+      if (macIn && document.activeElement !== macIn) macIn.value = atem.mac || '';
+      if (portIn && document.activeElement !== portIn) portIn.value = atem.port != null ? String(atem.port) : '';
+
+      // Collapsed-state summary so the operator sees the key info
+      // without expanding the card.
+      const parts = [atem.ip || '?', `port ${atem.port != null ? atem.port : '?'}`];
+      if (atem.mac) parts.push(atem.mac);
+      updateCardSummary('atem-card', parts.join(' · '));
 
       // Cross-reference with UDM client list to confirm online status.
       const clients = state.unifi_clients || [];
@@ -678,6 +1188,276 @@
       $('#udm-help').hidden = status.state !== 'not_configured';
     }
 
+    // WAN bandwidth card — renders the upload + download Mbps,
+    // sparklines from the 60s history, and a headroom % vs the
+    // operator-configured cap.
+    function renderWan(state) {
+      const cfg = state.config || {};
+      const wan = state.wan_snapshot;
+      const status = state.wan_status || { state: 'not_configured' };
+      const summary = $('#wan-status-summary');
+      summary.textContent = status.state === 'connected'
+        ? `live · poll ${state.last_wan_poll_at ? fmtAgo(state.now - state.last_wan_poll_at) + ' ago' : '—'}`
+        : status.state === 'failed' ? `error: ${(status.error || 'unknown').slice(0, 80)}`
+        : status.state === 'connecting' ? 'connecting…'
+        : 'not configured';
+      const upMbps = wan ? wan.upload_kbps / 1000 : 0;
+      const downMbps = wan ? wan.download_kbps / 1000 : 0;
+      $('#wan-up-value').innerHTML = (wan ? upMbps.toFixed(2) : '—') + '<span class="unit">Mbps</span>';
+      $('#wan-down-value').innerHTML = (wan ? downMbps.toFixed(2) : '—') + '<span class="unit">Mbps</span>';
+      $('#wan-ip').textContent = wan && wan.wan_ip ? wan.wan_ip : '—';
+      const isp = wan ? [wan.isp_name, wan.isp_org].filter(Boolean).join(' · ') : '';
+      $('#wan-isp').textContent = isp || '—';
+      $('#wan-latency').textContent = wan && wan.wan_latency_ms != null ? `${wan.wan_latency_ms} ms` : '—';
+
+      const upHist = state.wan_upload_kbps_history || [];
+      const downHist = state.wan_download_kbps_history || [];
+      drawSparkline($('#wan-up-spark'), upHist);
+      drawSparkline($('#wan-down-spark'), downHist);
+
+      // Headroom indicators. Yellow at 70%, red at 90%.
+      const upCap = cfg.wan_upload_cap_mbps || 0;
+      const downCap = cfg.wan_download_cap_mbps || 0;
+      const upHeadroom = $('#wan-up-headroom');
+      const downHeadroom = $('#wan-down-headroom');
+      if (upCap > 0 && wan) {
+        const pct = (upMbps / upCap) * 100;
+        upHeadroom.textContent = `${upMbps.toFixed(2)} / ${upCap.toFixed(1)} Mbps · ${pct.toFixed(0)}% used`;
+        upHeadroom.className = 'wan-headroom' + (pct >= 90 ? ' fail' : pct >= 70 ? ' warn' : '');
+      } else {
+        upHeadroom.textContent = upCap === 0 ? 'set an upload cap → headroom shown here' : '';
+        upHeadroom.className = 'wan-headroom';
+      }
+      if (downCap > 0 && wan) {
+        const pct = (downMbps / downCap) * 100;
+        downHeadroom.textContent = `${downMbps.toFixed(2)} / ${downCap.toFixed(1)} Mbps · ${pct.toFixed(0)}% used`;
+        downHeadroom.className = 'wan-headroom' + (pct >= 90 ? ' fail' : pct >= 70 ? ' warn' : '');
+      } else {
+        downHeadroom.textContent = downCap === 0 ? '' : '';
+        downHeadroom.className = 'wan-headroom';
+      }
+
+      // Sync inputs only when not focused.
+      const upCapIn = $('#wan-up-cap-input'), downCapIn = $('#wan-down-cap-input');
+      if (upCapIn && document.activeElement !== upCapIn) {
+        upCapIn.value = upCap > 0 ? upCap.toString() : '';
+      }
+      if (downCapIn && document.activeElement !== downCapIn) {
+        downCapIn.value = downCap > 0 ? downCap.toString() : '';
+      }
+    }
+
+    // Pre-show health banner — aggregator of UDM, ATEM, WAN, and
+    // capture state into a single green/yellow/red indicator.
+    // Scan-able at a glance before showtime.
+    function renderPreshow(state) {
+      const cfg = state.config || {};
+      const banner = $('#preshow-banner');
+      const label = $('#preshow-label');
+      const pillsEl = $('#preshow-pills');
+
+      const checks = [];
+
+      const udm = state.unifi_status || {};
+      if (udm.state === 'connected') checks.push({ k: 'UDM', s: 'ok', t: 'UDM ✓' });
+      else if (udm.state === 'connecting') checks.push({ k: 'UDM', s: 'warn', t: 'UDM connecting' });
+      else if (udm.state === 'failed') checks.push({ k: 'UDM', s: 'fail', t: 'UDM error' });
+      else checks.push({ k: 'UDM', s: 'warn', t: 'UDM not set' });
+
+      const atemClient = (state.unifi_clients || []).find((c) => c.is_atem);
+      if (atemClient && (state.now - (atemClient.last_seen || 0)) < 600) {
+        checks.push({ k: 'ATEM', s: 'ok', t: 'ATEM online' });
+      } else if (udm.state === 'connected') {
+        checks.push({ k: 'ATEM', s: 'fail', t: 'ATEM not in UDM list' });
+      } else {
+        checks.push({ k: 'ATEM', s: 'warn', t: 'ATEM unknown' });
+      }
+
+      const wan = state.wan_status || {};
+      const wanSnap = state.wan_snapshot;
+      if (wan.state === 'connected' && wanSnap) {
+        const upMbps = wanSnap.upload_kbps / 1000;
+        const cap = cfg.wan_upload_cap_mbps || 0;
+        if (cap > 0 && upMbps / cap >= 0.9) {
+          checks.push({ k: 'WAN', s: 'fail', t: `WAN ${upMbps.toFixed(1)}/${cap} Mbps up` });
+        } else if (cap > 0 && upMbps / cap >= 0.7) {
+          checks.push({ k: 'WAN', s: 'warn', t: `WAN ${upMbps.toFixed(1)}/${cap} Mbps up` });
+        } else {
+          checks.push({ k: 'WAN', s: 'ok', t: `WAN ✓` + (wanSnap.wan_ip ? ` (${wanSnap.wan_ip})` : '') });
+        }
+      } else if (wan.state === 'failed') {
+        checks.push({ k: 'WAN', s: 'fail', t: 'WAN error' });
+      } else {
+        checks.push({ k: 'WAN', s: 'warn', t: 'WAN unknown' });
+      }
+
+      const flows = state.flows || [];
+      const captureEverSeen = state.last_flow_at > 0;
+      if (cfg.monitor_iface && captureEverSeen) {
+        const streaming = flows.filter((f) => f.health === 'streaming').length;
+        if (streaming > 0) checks.push({ k: 'CAP', s: 'ok', t: `${streaming} flow${streaming === 1 ? '' : 's'} streaming` });
+        else checks.push({ k: 'CAP', s: 'warn', t: 'capture idle' });
+      } else if (cfg.monitor_iface) {
+        checks.push({ k: 'CAP', s: 'warn', t: `capture (${cfg.monitor_iface}) — no flows yet` });
+      } else {
+        checks.push({ k: 'CAP', s: 'warn', t: 'capture off' });
+      }
+
+      const worst = checks.reduce((acc, c) => {
+        if (c.s === 'fail') return 'fail';
+        if (c.s === 'warn' && acc !== 'fail') return 'warn';
+        return acc;
+      }, 'ok');
+      banner.className = 'preshow-banner ' + worst;
+      label.textContent = worst === 'ok' ? 'Pre-show: READY'
+                       : worst === 'warn' ? 'Pre-show: CHECK'
+                       : 'Pre-show: NOT READY';
+      pillsEl.innerHTML = checks.map((c) => `<span class="preshow-pill ${c.s}">${c.t}</span>`).join('');
+    }
+
+    // Collapse state for the small config cards. Persists in
+    // localStorage so the operator's preference survives reloads.
+    function initCollapsibles() {
+      $$('.card.collapsible').forEach((card) => {
+        const key = 'collapse:' + (card.dataset.collapseKey || card.id);
+        // Default = collapsed. The user explicitly asked for this:
+        // ATEM target + Capture interface should not waste rows
+        // above the WAN + clients views unless the operator opens them.
+        const stored = localStorage.getItem(key);
+        if (stored === 'expanded') card.classList.add('expanded');
+        const h2 = card.querySelector('h2');
+        if (!h2) return;
+        h2.addEventListener('click', () => {
+          card.classList.toggle('expanded');
+          const now = card.classList.contains('expanded') ? 'expanded' : 'collapsed';
+          localStorage.setItem(key, now);
+        });
+      });
+    }
+
+    // Update the inline summary text shown next to a collapsible
+    // card title (so the operator can see key info without
+    // expanding). Called from each card's render path.
+    function updateCardSummary(cardId, text) {
+      const el = document.getElementById(cardId + '-summary');
+      if (el) el.textContent = text || '—';
+    }
+
+    // Network clients display cap: long lists push everything below
+    // far down the page. Show 25 by default, "Show all N" expands.
+    let __clientsShowAll = false;
+    const CLIENTS_DEFAULT_LIMIT = 25;
+
+    // Active alarms banner. Hidden when alarms array is empty;
+    // shown red with a list of pending alarms when not.
+    function renderAlarms(state) {
+      const banner = $('#alarms-banner');
+      const head = $('#alarms-banner-head');
+      const list = $('#alarms-list');
+      const alarms = state.alarms || [];
+      if (alarms.length === 0) {
+        banner.hidden = true;
+        return;
+      }
+      banner.hidden = false;
+      head.textContent = `${alarms.length} active alarm${alarms.length === 1 ? '' : 's'}`;
+      list.innerHTML = alarms.slice(0, 8).map((a) => `
+        <div class="alarm-row">
+          <span class="alarm-time">${a.time ? fmtTime(a.time) : '—'}</span>
+          <span>${a.msg || '(no message)'}</span>
+          <span class="alarm-subsystem">${a.subsystem || ''}</span>
+        </div>
+      `).join('');
+    }
+
+    // Switch port utilization. One block per USW, with a port table
+    // showing real-time tx/rx kbps, errors, link state. The ATEM's
+    // port is highlighted with an orange dot.
+    function renderSwitches(state) {
+      const switches = (state.switches || []).slice();
+      const grid = $('#switches-grid');
+      const empty = $('#switches-empty');
+      if (switches.length === 0) {
+        grid.innerHTML = '';
+        empty.hidden = false;
+        updateCardSummary('switches-card', '—');
+        return;
+      }
+      empty.hidden = true;
+      // Sort: switch hosting the ATEM first, then by active-port
+      // count desc (busy switches before idle PDUs), then alphabetical.
+      // Pinning the ATEM's switch to the top means the operator's
+      // primary signal is visible the moment they expand the card.
+      switches.sort((a, b) => {
+        const aAtem = (a.ports || []).some((p) => p.is_atem_port);
+        const bAtem = (b.ports || []).some((p) => p.is_atem_port);
+        if (aAtem !== bAtem) return aAtem ? -1 : 1;
+        const aActive = (a.ports || []).filter((p) => (p.tx_kbps || 0) + (p.rx_kbps || 0) > 0).length;
+        const bActive = (b.ports || []).filter((p) => (p.tx_kbps || 0) + (p.rx_kbps || 0) > 0).length;
+        if (aActive !== bActive) return bActive - aActive;
+        return (a.name || '').localeCompare(b.name || '');
+      });
+      const totalPorts = switches.reduce((acc, sw) => acc + sw.ports.length, 0);
+      const errPorts = switches.reduce((acc, sw) => acc + sw.ports.filter((p) => p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped > 0).length, 0);
+      const atemPort = switches.flatMap((sw) => sw.ports.filter((p) => p.is_atem_port).map((p) => `${sw.name} ${p.name}`)).join(', ');
+      const sumParts = [`${switches.length} switch${switches.length === 1 ? '' : 'es'}`, `${totalPorts} active ports`];
+      if (errPorts > 0) sumParts.push(`${errPorts} with errors`);
+      if (atemPort) sumParts.push(`ATEM on ${atemPort}`);
+      updateCardSummary('switches-card', sumParts.join(' · '));
+
+      grid.innerHTML = switches.map((sw) => {
+        const cpu = sw.cpu_pct != null ? `${sw.cpu_pct.toFixed(1)}% CPU` : '';
+        const mem = sw.mem_pct != null ? `${sw.mem_pct.toFixed(1)}% mem` : '';
+        const up = sw.uptime_secs != null ? `up ${fmtUptime(sw.uptime_secs)}` : '';
+        const stats = [cpu, mem, up].filter(Boolean).join(' · ');
+        const portRows = sw.ports.map((p) => {
+          const errs = p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped;
+          const cls = ['port-row'];
+          if (p.is_atem_port) cls.push('atem');
+          if (!p.up) cls.push('down');
+          if (errs > 0) cls.push('has-errors');
+          const txDisp = fmtKbps(p.tx_kbps);
+          const rxDisp = fmtKbps(p.rx_kbps);
+          const meta = [];
+          if (!p.up) meta.push('LINK DOWN');
+          else if (p.speed_mbps) meta.push(p.speed_mbps >= 1000 ? `${p.speed_mbps/1000}G` : `${p.speed_mbps}M`);
+          if (p.media) meta.push(p.media);
+          if (errs > 0) meta.push(`${errs} err/drop`);
+          if (p.link_down_count > 0) meta.push(`${p.link_down_count} flap${p.link_down_count === 1 ? '' : 's'}`);
+          if (p.sfp_temp_c != null) meta.push(`${p.sfp_temp_c.toFixed(0)}°C`);
+          const conn = [p.connected_ip, p.connected_mac].filter(Boolean).join(' · ');
+          return `
+            <div class="${cls.join(' ')}">
+              <span>${p.port_idx}</span>
+              <span class="port-name">${p.name}</span>
+              <span class="port-bw ${txDisp.zero ? 'zero' : ''}">${txDisp.value}<span class="unit"> ${txDisp.unit}</span></span>
+              <span class="port-bw ${rxDisp.zero ? 'zero' : ''}">${rxDisp.value}<span class="unit"> ${rxDisp.unit}</span></span>
+              <span class="port-meta">${meta.join(' · ')}</span>
+              <span class="port-meta">${conn}</span>
+              <span></span>
+            </div>`;
+        }).join('');
+        return `
+          <div class="switch-block">
+            <div class="switch-block-head">
+              <span class="name">${sw.name}</span>
+              <span class="model">${sw.model}</span>
+              <span class="stats">${stats}</span>
+            </div>
+            <div class="ports-table">
+              <span class="ports-head">Port</span>
+              <span class="ports-head">Name</span>
+              <span class="ports-head">TX</span>
+              <span class="ports-head">RX</span>
+              <span class="ports-head">Link</span>
+              <span class="ports-head">Connected to</span>
+              <span class="ports-head"></span>
+              ${portRows}
+            </div>
+          </div>`;
+      }).join('');
+    }
+
     function renderClients(state) {
       const clients = state.unifi_clients || [];
       const grid = $('#clients-grid');
@@ -700,8 +1480,31 @@
         const bName = (b.name || b.hostname || b.mac || '').toLowerCase();
         return aName.localeCompare(bName);
       });
-      grid.innerHTML = sorted.map(renderClientRow).join('');
-      const onlineCount = clients.filter((c) => state.now - (c.last_seen || 0) < 300).length;
+      // Apply default cap so the WAN + Live streams cards stay near
+      // the fold. Also exclude long-stale entries from the cap (any
+      // client not seen in 5 minutes is probably not interesting and
+      // shouldn't push the active ones out of the visible window).
+      const fresh = sorted.filter((c) => state.now - (c.last_seen || 0) < 300);
+      const stale = sorted.filter((c) => state.now - (c.last_seen || 0) >= 300);
+      const visible = __clientsShowAll
+        ? sorted
+        : (fresh.length >= CLIENTS_DEFAULT_LIMIT ? fresh.slice(0, CLIENTS_DEFAULT_LIMIT) : fresh.concat(stale.slice(0, CLIENTS_DEFAULT_LIMIT - fresh.length)));
+      let html = visible.map(renderClientRow).join('');
+      const hidden = sorted.length - visible.length;
+      if (hidden > 0 && !__clientsShowAll) {
+        html += `<button class="clients-show-more" id="clients-show-more">Show all ${sorted.length} clients (+${hidden} hidden)</button>`;
+      } else if (__clientsShowAll && sorted.length > CLIENTS_DEFAULT_LIMIT) {
+        html += `<button class="clients-show-more" id="clients-show-more">Collapse to ${CLIENTS_DEFAULT_LIMIT}</button>`;
+      }
+      grid.innerHTML = html;
+      const showMoreBtn = document.getElementById('clients-show-more');
+      if (showMoreBtn) {
+        showMoreBtn.addEventListener('click', () => {
+          __clientsShowAll = !__clientsShowAll;
+          renderClients(state);
+        });
+      }
+      const onlineCount = fresh.length;
       const txTotal = clients.reduce((acc, c) => acc + (c.tx_kbps || 0), 0);
       summary.textContent = `${clients.length} known · ${onlineCount} online · ${(txTotal / 1000).toFixed(1)} Mbps total egress`;
     }
@@ -724,16 +1527,31 @@
     }
 
     function renderState(s) {
+      __currentState = s;
       const cfg = s.config || {};
       const target = cfg.url ? `<code>${cfg.url}</code>` : '<em>(no target)</em>';
       const monSeg = cfg.monitor_iface ? ` &middot; capture <code>${cfg.monitor_iface}</code>` : '';
       $('#target').innerHTML = `target: ${target}${monSeg}`;
       $('#uptime').textContent = 'uptime ' + fmtUptime(s.now - s.started_at);
 
+      // Sync the capture-interface input only when not focused.
+      const ifaceIn = $('#iface-input');
+      if (ifaceIn && document.activeElement !== ifaceIn) {
+        ifaceIn.value = cfg.monitor_iface || '';
+      }
+      // Capture interface card summary.
+      const flowCount = (s.flows || []).length;
+      updateCardSummary('iface-card', `${cfg.monitor_iface || '(none)'} · ${flowCount} flow${flowCount === 1 ? '' : 's'}`);
+
       renderModeBanner(cfg.mode || 'live');
+      renderPreshow(s);
+      renderAlarms(s);
+      renderWan(s);
+      renderSwitches(s);
       renderAtem(s);
       renderUnifi(s);
       renderClients(s);
+      renderKeysList(s);
 
       // Active probe per-key cards
       const keysEl = $('#keys');
@@ -770,6 +1588,16 @@
       const lastProbeAgo = s.last_probe_at ? (s.now - s.last_probe_at) : null;
       const lastFlowAgo = s.last_flow_at ? (s.now - s.last_flow_at) : null;
       const lastUdmAgo = s.last_unifi_poll_at ? (s.now - s.last_unifi_poll_at) : null;
+      const wan = s.wan_snapshot;
+      const gwLine = wan && (wan.gw_cpu_pct != null || wan.gw_mem_pct != null || wan.gw_uptime_secs != null)
+        ? `<div class="gw-stats">
+            <span><strong>UDM gateway</strong></span>
+            ${wan.gw_cpu_pct != null ? `<span><strong>CPU</strong> ${wan.gw_cpu_pct.toFixed(1)}%</span>` : ''}
+            ${wan.gw_mem_pct != null ? `<span><strong>mem</strong> ${wan.gw_mem_pct.toFixed(1)}%</span>` : ''}
+            ${wan.gw_uptime_secs != null ? `<span><strong>up</strong> ${fmtUptime(wan.gw_uptime_secs)}</span>` : ''}
+            ${s.system_status && s.system_status.state ? `<span><strong>system poll</strong> ${s.system_status.state}${s.last_system_poll_at ? ' · ' + fmtAgo(s.now - s.last_system_poll_at) + ' ago' : ''}</span>` : ''}
+          </div>`
+        : '';
       $('#health').innerHTML = `
         <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
           <div>
@@ -790,6 +1618,7 @@
             <span style="color:var(--muted);"> &middot; ${udmStatus}</span>
             <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last: ${fmtAgo(lastUdmAgo)} ago</div>
           </div>
+          ${gwLine}
         </div>`;
 
       // Probe timeline + table
@@ -866,6 +1695,47 @@
       }
     }
 
+    // Quality-alert thresholds. These are conservative defaults
+    // tuned for live-broadcast SRT: a healthy stream will never
+    // trip them, a failing stream will visibly turn yellow/red.
+    function computeStreamAlerts(f) {
+      const alerts = [];
+      // Bitrate dropout: if we have at least 8 samples and the last
+      // 3 average under 25% of the prior 5's average, flag it.
+      const samples = f.bitrate_samples || [];
+      if (samples.length >= 8) {
+        const recent = samples.slice(-3);
+        const prior = samples.slice(-8, -3);
+        const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+        const priorAvg = prior.reduce((a, b) => a + b, 0) / prior.length;
+        if (priorAvg > 0 && recentAvg < priorAvg * 0.25) {
+          alerts.push({ s: 'fail', t: 'bitrate dropped' });
+        } else if (priorAvg > 0 && recentAvg < priorAvg * 0.5) {
+          alerts.push({ s: 'warn', t: 'bitrate down' });
+        }
+      }
+      // Idle-but-was-active: stream paused but flow not stale yet.
+      if (f.idle_secs > 3 && f.idle_secs < 60 && f.total_packets > 100) {
+        alerts.push({ s: 'fail', t: 'no packets ' + Math.round(f.idle_secs) + 's' });
+      }
+      // RTT spike: SRT round-trip jumped above broadcast-acceptable
+      // (>200ms is noticeable, >500ms is broken).
+      if (f.last_srt_rtt_ms != null) {
+        if (f.last_srt_rtt_ms > 500) alerts.push({ s: 'fail', t: `RTT ${f.last_srt_rtt_ms}ms` });
+        else if (f.last_srt_rtt_ms > 200) alerts.push({ s: 'warn', t: `RTT ${f.last_srt_rtt_ms}ms` });
+      }
+      // Stalling per existing health classifier — promote to alert.
+      if (f.health === 'stalling') alerts.push({ s: 'fail', t: 'stalling' });
+      return alerts;
+    }
+
+    function getSourceLabel(state, srcIp) {
+      const labels = (state.config && state.config.source_labels) || {};
+      return labels[srcIp] || '';
+    }
+
+    let __currentState = null; // cached for label-edit-on-click
+
     function renderStreamCard(f, i) {
       const proto = f.protocol || (f.is_udp ? 'UDP' : 'TCP');
       const isSrt = f.is_udp && (f.last_srt_rtt_ms != null || f.protocol === 'SRT');
@@ -903,18 +1773,40 @@
       }[health] || 'idle';
       const keyHtml = f.stream_key ? `<div class="stream-key">key: ${f.stream_key}</div>` : '';
 
+      // User-set label for this source. Click → edit. Persisted via /api/config.
+      const label = __currentState ? getSourceLabel(__currentState, f.src_ip) : '';
+      const labelHtml = label
+        ? `<div class="stream-label" data-src-ip="${f.src_ip}">${label}</div>`
+        : `<div class="stream-label unlabeled" data-src-ip="${f.src_ip}">name this source…</div>`;
+
+      const alerts = computeStreamAlerts(f);
+      const alertsHtml = alerts.length
+        ? `<div class="stream-alerts">${alerts.map(a => `<span class="stream-alert ${a.s}">${a.t}</span>`).join('')}</div>`
+        : '';
+
+      // Reverse DNS for the source IP — populated by the rdns
+      // worker thread. Resolves only for public IPs (RFC1918 are
+      // skipped server-side). Empty string if pending or no PTR.
+      const rdns = (__currentState && __currentState.rdns_cache) ? __currentState.rdns_cache[f.src_ip] : undefined;
+      const rdnsLine = rdns
+        ? `<div class="stream-rdns">${rdns}</div>`
+        : (rdns === null ? '<div class="stream-rdns" style="opacity:0.5">no PTR record</div>' : '');
+
       return `
         <div class="stream-card ${health}">
           <div class="stream-head">
             <span class="badge ${healthClass}">${healthLabel}</span>
             <span class="badge idle">${proto}${isSrt && proto !== 'SRT' ? ' / SRT' : ''}</span>
           </div>
+          ${labelHtml}
           <div class="stream-route">
             <span>${f.src_ip}:${f.src_port}</span>
             <span class="arrow">→</span>
             <span>${f.dst_ip}:${f.dst_port}</span>
           </div>
+          ${rdnsLine}
           ${keyHtml}
+          ${alertsHtml}
           <div class="stream-bitrate">
             ${bitrateDisplay.value}<span class="unit">${bitrateDisplay.unit}</span>
           </div>
@@ -978,76 +1870,173 @@
       return h + 'h ' + m + 'm';
     }
 
-    // Config form: pre-fills from current state, posts updates to
-    // /api/config. The probe loop in the Rust side picks up the new
-    // url/keys/interval on its next iteration, no restart needed.
-    let lastSyncedUrl = null;
-    let lastSyncedKeys = null;
-    let lastSyncedInterval = null;
-    function maybePopulateConfigForm(snap) {
-      const cfg = snap.config || {};
-      if (cfg.url !== lastSyncedUrl) {
-        lastSyncedUrl = cfg.url;
-        const m = (cfg.url || '').match(/^srt:\/\/([^:?\/]+)(?::(\d+))?/);
-        if (m) {
-          if (document.activeElement !== $('#cfg-host')) {
-            $('#cfg-host').value = m[1];
-          }
-          if (document.activeElement !== $('#cfg-port')) {
-            $('#cfg-port').value = m[2] || 1935;
-          }
-        }
+    // Generic config-update helper. Posts a JSON body to /api/config,
+    // shows status in the named status div, and refreshes state on
+    // success.
+    async function postConfig(body, statusEl, btnEl, successMsg) {
+      if (btnEl) btnEl.disabled = true;
+      if (statusEl) {
+        statusEl.className = 'config-status';
+        statusEl.textContent = 'Saving…';
       }
-      if (JSON.stringify(cfg.keys || []) !== JSON.stringify(lastSyncedKeys)) {
-        lastSyncedKeys = (cfg.keys || []).slice();
-        if (document.activeElement !== $('#cfg-key')) {
-          $('#cfg-key').value = (cfg.keys || []).join(', ');
+      try {
+        const r = await fetch('/api/config', {
+          method: 'POST',
+          body: JSON.stringify(body),
+          headers: { 'content-type': 'application/json' },
+        });
+        const j = await r.json();
+        if (j.error) {
+          if (statusEl) {
+            statusEl.className = 'config-status error';
+            statusEl.textContent = j.error;
+          }
+          return false;
         }
-      }
-      if (cfg.interval_secs !== lastSyncedInterval) {
-        lastSyncedInterval = cfg.interval_secs;
-        if (document.activeElement !== $('#cfg-interval')) {
-          $('#cfg-interval').value = cfg.interval_secs || 5;
+        if (statusEl) {
+          statusEl.className = 'config-status ok';
+          statusEl.textContent = successMsg || 'Saved.';
         }
+        await tick();
+        return true;
+      } catch (err) {
+        if (statusEl) {
+          statusEl.className = 'config-status error';
+          statusEl.textContent = err.message;
+        }
+        return false;
+      } finally {
+        if (btnEl) btnEl.disabled = false;
       }
     }
 
-    $('#config-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const status = $('#config-status');
-      const btn = $('#cfg-apply');
-      const host = $('#cfg-host').value.trim();
-      const port = parseInt($('#cfg-port').value, 10) || 1935;
-      const keyRaw = $('#cfg-key').value.trim();
-      const keys = keyRaw ? keyRaw.split(/[,\s]+/).filter(Boolean) : [];
-      const interval = parseInt($('#cfg-interval').value, 10) || 5;
-      if (!host) {
-        status.className = 'config-status error';
-        status.textContent = 'Host is required.';
+    // Render the editable list of stream keys. Each row has a
+    // remove (×) button. The add-new form below is wired via its
+    // own submit handler.
+    function renderKeysList(state) {
+      const keys = (state.config && state.config.keys) || [];
+      const listEl = $('#keys-list');
+      const summary = $('#keys-summary');
+      summary.textContent = keys.length === 0 ? '(none)'
+        : `${keys.length} key${keys.length === 1 ? '' : 's'}`;
+      if (keys.length === 0) {
+        listEl.innerHTML = '<div class="empty">No stream keys configured. Add one below — even outside Standby mode they work as labels for expected sources.</div>';
         return;
       }
-      const url = `srt://${host}:${port}`;
-      const body = JSON.stringify({ url, keys, interval_secs: interval });
-      btn.disabled = true;
-      status.className = 'config-status';
-      status.textContent = 'Applying…';
-      try {
-        const r = await fetch('/api/config', { method: 'POST', body, headers: { 'content-type': 'application/json' } });
-        const j = await r.json();
-        if (j.error) {
-          status.className = 'config-status error';
-          status.textContent = j.error;
+      listEl.innerHTML = keys.map((k, i) => `
+        <div class="key-row">
+          <span class="mono">${k}</span>
+          <button type="button" class="remove" data-idx="${i}" title="remove">✕</button>
+        </div>
+      `).join('');
+    }
+
+    // Click ✕ on a key row → drop it from the list and POST.
+    $('#keys-list').addEventListener('click', async (e) => {
+      const btn = e.target.closest('button.remove');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.idx, 10);
+      const cur = (__currentState && __currentState.config && __currentState.config.keys) || [];
+      const next = cur.slice();
+      next.splice(idx, 1);
+      await postConfig({ keys: next }, $('#keys-status'), null, `Removed key. ${next.length} remaining.`);
+    });
+
+    // Add-key form: append to the existing keys list, POST, clear input.
+    $('#key-add-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = $('#key-add-input');
+      const k = input.value.trim();
+      if (!k) return;
+      const cur = (__currentState && __currentState.config && __currentState.config.keys) || [];
+      if (cur.includes(k)) {
+        $('#keys-status').className = 'config-status error';
+        $('#keys-status').textContent = `Key "${k}" already in list.`;
+        return;
+      }
+      const next = cur.concat([k]);
+      const ok = await postConfig({ keys: next }, $('#keys-status'), null, `Added "${k}". Total: ${next.length}.`);
+      if (ok) input.value = '';
+    });
+
+    // Probe interval form (separate from keys now).
+    $('#config-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const interval = parseInt($('#cfg-interval').value, 10) || 5;
+      await postConfig({ interval_secs: interval }, $('#config-status'), $('#cfg-apply'),
+        `Probe interval set to ${interval}s.`);
+    });
+
+    // ATEM target form: IP, MAC, port — editable inline.
+    $('#atem-target-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ip = $('#atem-ip-input').value.trim();
+      const mac = $('#atem-mac-input').value.trim();
+      const portRaw = $('#atem-port-input').value.trim();
+      const port = portRaw ? parseInt(portRaw, 10) : 1935;
+      if (!ip) {
+        $('#atem-target-status').className = 'config-status error';
+        $('#atem-target-status').textContent = 'IP is required.';
+        return;
+      }
+      const atem = { ip, port };
+      if (mac) atem.mac = mac;
+      // Also update the SRT probe URL so a future Standby flip targets the same host.
+      const url = `srt://${ip}:${port}`;
+      await postConfig({ atem, url }, $('#atem-target-status'), $('#atem-target-apply'),
+        `Target set: ${ip}:${port}${mac ? ' / ' + mac : ''}`);
+    });
+
+    // Capture interface form.
+    $('#iface-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const iface = $('#iface-input').value.trim();
+      // monitor_iface change requires a re-spawn of the tshark process, which
+      // the binary doesn't currently do — surface that limitation honestly.
+      $('#iface-status').className = 'config-status';
+      $('#iface-status').textContent = iface
+        ? `Interface "${iface}" noted. Restart the tool to take effect (capture thread does not hot-reload).`
+        : 'Cleared.';
+    });
+
+    // WAN bandwidth caps form.
+    $('#wan-cap-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const upRaw = $('#wan-up-cap-input').value.trim();
+      const downRaw = $('#wan-down-cap-input').value.trim();
+      const body = {};
+      body.wan_upload_cap_mbps = upRaw ? parseFloat(upRaw) : 0;
+      body.wan_download_cap_mbps = downRaw ? parseFloat(downRaw) : 0;
+      await postConfig(body, $('#wan-cap-status'), null,
+        `Caps saved: up ${body.wan_upload_cap_mbps || '∞'} Mbps · down ${body.wan_download_cap_mbps || '∞'} Mbps`);
+    });
+
+    // Click a stream label → swap to an edit input. Save on blur or Enter.
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('.stream-label');
+      if (!el || el.classList.contains('editing')) return;
+      const ip = el.dataset.srcIp;
+      const current = el.classList.contains('unlabeled') ? '' : el.textContent;
+      const wrap = document.createElement('span');
+      wrap.className = 'stream-label-edit';
+      wrap.innerHTML = `<input type="text" value="${current.replace(/"/g, '&quot;')}" placeholder="name this source (e.g. Jamie's basement)" />`;
+      el.replaceWith(wrap);
+      const inp = wrap.querySelector('input');
+      inp.focus();
+      inp.select();
+      const commit = async (save) => {
+        if (save) {
+          const label = inp.value.trim();
+          await postConfig({ source_label_set: { ip, label } }, null, null);
         } else {
-          status.className = 'config-status ok';
-          status.textContent = `Probing ${url} with ${keys.length} key${keys.length === 1 ? '' : 's'} every ${interval}s.`;
           tick();
         }
-      } catch (err) {
-        status.className = 'config-status error';
-        status.textContent = err.message;
-      } finally {
-        btn.disabled = false;
-      }
+      };
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(true); }
+        else if (ev.key === 'Escape') { commit(false); }
+      });
+      inp.addEventListener('blur', () => commit(true));
     });
 
     // Mode toggle: single-click flip between Live and Standby.
@@ -1077,11 +2066,11 @@
         if (!r.ok) return;
         const s = await r.json();
         renderState(s);
-        maybePopulateConfigForm(s);
       } catch (e) {
         console.error('tick:', e);
       }
     }
+    initCollapsibles();
     tick();
     setInterval(tick, 1000);
   </script>
