@@ -1374,7 +1374,7 @@
     // showing real-time tx/rx kbps, errors, link state. The ATEM's
     // port is highlighted with an orange dot.
     function renderSwitches(state) {
-      const switches = state.switches || [];
+      const switches = (state.switches || []).slice();
       const grid = $('#switches-grid');
       const empty = $('#switches-empty');
       if (switches.length === 0) {
@@ -1384,6 +1384,19 @@
         return;
       }
       empty.hidden = true;
+      // Sort: switch hosting the ATEM first, then by active-port
+      // count desc (busy switches before idle PDUs), then alphabetical.
+      // Pinning the ATEM's switch to the top means the operator's
+      // primary signal is visible the moment they expand the card.
+      switches.sort((a, b) => {
+        const aAtem = (a.ports || []).some((p) => p.is_atem_port);
+        const bAtem = (b.ports || []).some((p) => p.is_atem_port);
+        if (aAtem !== bAtem) return aAtem ? -1 : 1;
+        const aActive = (a.ports || []).filter((p) => (p.tx_kbps || 0) + (p.rx_kbps || 0) > 0).length;
+        const bActive = (b.ports || []).filter((p) => (p.tx_kbps || 0) + (p.rx_kbps || 0) > 0).length;
+        if (aActive !== bActive) return bActive - aActive;
+        return (a.name || '').localeCompare(b.name || '');
+      });
       const totalPorts = switches.reduce((acc, sw) => acc + sw.ports.length, 0);
       const errPorts = switches.reduce((acc, sw) => acc + sw.ports.filter((p) => p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped > 0).length, 0);
       const atemPort = switches.flatMap((sw) => sw.ports.filter((p) => p.is_atem_port).map((p) => `${sw.name} ${p.name}`)).join(', ');
