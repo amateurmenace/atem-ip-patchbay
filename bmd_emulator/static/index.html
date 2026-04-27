@@ -126,10 +126,31 @@
         </div>
       </div>
 
+      <!-- Top-of-monitor banner that flips on whenever a relay
+           receiver (RTMP/SRT listener) is running. The banner mirrors
+           the wizard's status so the user has unmistakable feedback
+           even when the wizard is collapsed at the bottom of the
+           right column. Hidden by default; shown by JS when
+           source_id == rtmp_listen|srt_listen AND status indicates
+           an active receiver. -->
+      <div id="receiver-banner" class="receiver-banner" hidden>
+        <div class="receiver-banner-dot" aria-hidden="true"></div>
+        <div class="receiver-banner-body">
+          <strong id="receiver-banner-title">Receiver running</strong>
+          <span id="receiver-banner-subtitle">Listening for an encoder…</span>
+          <code id="receiver-banner-url"></code>
+        </div>
+        <button id="receiver-banner-stop" type="button" class="receiver-banner-stop">Stop Receiver</button>
+      </div>
+
       <div class="controls-row">
         <button id="btn-start" class="primary big">▶ Start Stream</button>
         <button id="btn-preview" class="big" title="Pre-stream preview (NDI only today)">▶ Preview</button>
         <button id="btn-stop" class="big">■ Stop</button>
+        <button id="btn-receive-jump" class="big btn-receive" type="button"
+                title="Jump to the SRT / RTMP receive-stream section and open it">
+          ↓ Receive a Stream
+        </button>
       </div>
 
       <div id="error" class="error" hidden></div>
@@ -550,12 +571,17 @@
               <span class="rw-step">2</span>
               <div class="rw-step-content">
                 <span class="rw-step-label">Copy this URL into your camera, drone, or encoder app</span>
+                <div class="rw-ip-row" id="rw-ip-row">
+                  <label for="rw-ip-pick" class="rw-ip-label">This machine's LAN IP:</label>
+                  <select id="rw-ip-pick" class="rw-ip-pick" hidden></select>
+                  <input id="rw-ip-manual" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" inputmode="decimal" />
+                  <span id="rw-ip-status" class="rw-ip-status" aria-live="polite"></span>
+                </div>
                 <div class="rw-url-row">
                   <input id="rw-publish-url" type="text" readonly />
                   <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
                 </div>
-                <p class="rw-hint">
-                  Replace <code>0.0.0.0</code> with this machine's LAN IP if your encoder isn't on the same machine.
+                <p class="rw-hint" id="rw-ip-hint">
                   Default port is 9710 for SRT, 1935 for RTMP — change them in the panel below if needed.
                 </p>
               </div>
@@ -569,6 +595,7 @@
                   <option value="">— pick your encoder app —</option>
                   <option value="obs">OBS Studio</option>
                   <option value="larix">Larix Broadcaster (iPhone/Android)</option>
+                  <option value="dji-osmo-pocket3">DJI Osmo Pocket 3</option>
                   <option value="dji">DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</option>
                   <option value="ffmpeg">FFmpeg command line</option>
                   <option value="iphone-bm">Blackmagic Camera app (iPhone)</option>
@@ -581,7 +608,11 @@
               <span class="rw-step">4</span>
               <div class="rw-step-content">
                 <span class="rw-step-label">Start the receiver — wait for your encoder to connect, then it'll re-stream to your ATEM destination above</span>
-                <button id="rw-start-receiver" type="button" class="primary">Start Receiver</button>
+                <div class="rw-start-row">
+                  <button id="rw-start-receiver" type="button" class="primary">Start Receiver</button>
+                  <button id="rw-stop-receiver" type="button" class="btn-secondary" hidden>Stop Receiver</button>
+                </div>
+                <div id="rw-status" class="rw-status" hidden aria-live="polite"></div>
               </div>
             </div>
           </div>
@@ -889,6 +920,16 @@
           for the same output quality, freeing headroom for NDI receive, mux, and SRT
           pacing. On Windows, the equivalent would be h264_qsv / nvenc / amf — defer to
           a follow-up.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Does this support OMT (Open Media Transport)?</summary>
+          <p><strong>OMT support coming soon.</strong> OMT is the open, royalty-free
+          alternative to NDI from the Open Media Transport project — same use case
+          (low-latency uncompressed-ish video over IP on a LAN), no per-seat licensing,
+          and an MIT-licensed reference implementation. It's a natural fit alongside
+          our direct NDI ingest path; we'll add it as another source kind once the
+          Rust crate stabilizes. If you have a strong use case, drop a note via the
+          Email link below — early-feedback senders get tested against first.</p>
         </details>
       </div>
     </div>

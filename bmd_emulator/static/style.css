@@ -374,13 +374,40 @@ body.is-streaming .preview-frame {
 
 .controls-row {
   display: grid;
-  /* Start (primary CTA) | Preview | Stop. Start gets the most width
-     so it stays visually dominant; Preview is secondary; Stop is the
-     narrowest since it's typically a single click after streaming
-     has been verified. */
-  grid-template-columns: 2fr 1.4fr 1fr;
+  /* Start (primary CTA) | Preview | Stop | Receive jump. Start gets
+     the most width so it stays visually dominant; Preview is
+     secondary; Stop is narrow (single click after verifying); the
+     Receive jump button gets a generous slot because the label is
+     long and it's the secondary CTA we want users to discover. */
+  grid-template-columns: 1.7fr 1.2fr 0.85fr 1.5fr;
   gap: 10px;
 }
+@media (max-width: 720px) {
+  /* On narrow widths the four-column row gets cramped. Wrap to a
+     2x2 grid so each button keeps a usable hit target. */
+  .controls-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* "Receive a Stream" navigation button. Styled with the same green
+   accent the receive-stream wizard + receiver banner use, so all
+   three "this is the receive flow" surfaces visually cohere. NOT a
+   primary action color (blue) — that's reserved for Start Stream —
+   but distinct enough from the neutral Stop to be discoverable. */
+button.btn-receive {
+  background: linear-gradient(180deg, #2a9d5c 0%, #1f7544 100%);
+  border-color: #1f7544;
+  color: #f0fff5;
+  font-weight: 600;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  position: relative;
+}
+button.btn-receive:hover {
+  filter: brightness(1.08);
+  border-color: #50c878;
+}
+button.btn-receive:active { filter: brightness(0.92); }
 
 /* Preview button when the backend reports preview.active=true.
    Yellow to read as "running but not committed" — distinct from the
@@ -1419,21 +1446,52 @@ pre {
 .receive-wizard {
   margin: 14px 0 0;
   background: var(--panel-2, #1d2030);
+  /* Thicker green-accent left border + outline so the wizard reads
+     as a distinct, important alternate workflow without the whole
+     panel screaming for attention. */
   border: 1px solid var(--line, #2a2d36);
+  border-left: 4px solid #50c878;
   border-radius: 9px;
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.18) inset;
   transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .receive-wizard:not([open]) {
-  /* Closed state used to be a bright green CTA — that read as a
-     primary action ahead of Start Stream and dominated the source
-     panel. Now it sits in the same neutral panel-2 the open state
-     uses; the "SRT / RTMP SERVER:" pill on the left provides the
-     visual anchor for what this control is. */
-  background: var(--panel-2, #1d2030);
-  border-color: var(--line, #2a2d36);
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.12) 0%,
+    rgba(80, 200, 120, 0.04) 30%,
+    var(--panel-2, #1d2030) 100%);
+  border-color: rgba(80, 200, 120, 0.35);
+  border-left-color: #50c878;
 }
 .receive-wizard:not([open]):hover {
-  border-color: var(--accent, #5a8aff);
+  border-color: rgba(80, 200, 120, 0.6);
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.35) inset,
+              0 4px 18px rgba(80, 200, 120, 0.15);
+}
+/* Active state — when the receiver is actually running, the wizard
+   summary glows so the user has a second visual confirmation matching
+   the top-of-page banner. */
+.receive-wizard.is-running {
+  border-color: rgba(80, 200, 120, 0.7);
+  border-left-color: #50c878;
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.45) inset,
+              0 0 22px rgba(80, 200, 120, 0.25);
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.18) 0%,
+    rgba(80, 200, 120, 0.06) 60%,
+    var(--panel-2, #1d2030) 100%);
+}
+.receive-wizard.is-running summary::after {
+  content: "● LIVE";
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(80, 200, 120, 0.25);
+  color: #cdf2d8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  animation: receiver-banner-pulse 2.2s ease-in-out infinite;
 }
 .receive-wizard summary {
   cursor: pointer;
@@ -1544,8 +1602,221 @@ pre {
 }
 .rw-app-body ol { margin: 0; padding-left: 20px; }
 .rw-app-body li { margin-bottom: 5px; }
-.rw-start button {
-  margin-top: 4px;
+/* Top-of-monitor banner that announces an active RTMP/SRT receiver.
+   Sits between the preview frame and the main Start/Stop controls so
+   it's literally the first thing the user sees when looking at the
+   monitor area. Color and pulse mirror the wizard's "LIVE" badge to
+   reinforce that the two indicators are about the same thing. */
+.receiver-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+  padding: 11px 14px;
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.22) 0%,
+    rgba(80, 200, 120, 0.08) 80%);
+  border: 1px solid rgba(80, 200, 120, 0.55);
+  border-left: 4px solid #50c878;
+  border-radius: 8px;
+  color: #e2f7e7;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.receiver-banner.is-waiting {
+  background: linear-gradient(90deg,
+    rgba(255, 200, 80, 0.22) 0%,
+    rgba(255, 200, 80, 0.06) 80%);
+  border-color: rgba(255, 200, 80, 0.55);
+  border-left-color: #ffc452;
+  color: #ffeac4;
+}
+.receiver-banner.is-error {
+  background: linear-gradient(90deg,
+    rgba(220, 80, 80, 0.22) 0%,
+    rgba(220, 80, 80, 0.05) 80%);
+  border-color: rgba(220, 80, 80, 0.55);
+  border-left-color: #dc5050;
+  color: #ffd7d7;
+}
+.receiver-banner-dot {
+  flex: 0 0 auto;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: #50c878;
+  box-shadow: 0 0 0 0 rgba(80, 200, 120, 0.55);
+  /* Default = solid-receiving = faster green pulse. Slowed down +
+     larger radius for the banner version vs the inline wizard pulse
+     so it reads as the "primary" indicator at the top of the page. */
+  animation: receiver-banner-pulse-live 1.1s ease-in-out infinite;
+}
+.receiver-banner.is-waiting .receiver-banner-dot {
+  background: #ffc452;
+  box-shadow: 0 0 0 0 rgba(255, 200, 80, 0.55);
+  /* Slower, smaller pulse to convey "ready, but idle" — distinct from
+     the active "frames flowing" rhythm. */
+  animation: receiver-banner-pulse-waiting 1.7s ease-in-out infinite;
+}
+.receiver-banner.is-error .receiver-banner-dot {
+  background: #dc5050;
+  animation: none;
+}
+@keyframes receiver-banner-pulse-live {
+  0%   { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0.65); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 14px rgba(80, 200, 120, 0);    transform: scale(1.12); }
+  100% { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0);    transform: scale(1); }
+}
+@keyframes receiver-banner-pulse-waiting {
+  0%   { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0.55); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 11px rgba(255, 200, 80, 0);    transform: scale(1.05); }
+  100% { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0);    transform: scale(1); }
+}
+/* Generic alias kept for the wizard summary's ::after "● LIVE" badge
+   so it can pulse with the same timing as the banner. */
+@keyframes receiver-banner-pulse {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 1; }
+}
+.receiver-banner-body {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.receiver-banner-body strong {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.receiver-banner-body span {
+  font-size: 11.5px;
+  opacity: 0.92;
+}
+.receiver-banner-body code {
+  margin-top: 2px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 2px 6px; border-radius: 3px;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: #b6e1c1;
+  align-self: flex-start;
+  word-break: break-all;
+  max-width: 100%;
+}
+.receiver-banner-stop {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.receiver-banner-stop:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.rw-start-row {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;
+}
+.rw-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  background: rgba(127, 200, 255, 0.08);
+  border: 1px solid rgba(127, 200, 255, 0.35);
+  color: #d6eaff;
+}
+.rw-status.is-listening {
+  background: rgba(80, 200, 120, 0.12);
+  border-color: rgba(80, 200, 120, 0.45);
+  color: #cdf2d8;
+}
+.rw-status.is-error {
+  background: rgba(220, 80, 80, 0.14);
+  border-color: rgba(220, 80, 80, 0.5);
+  color: #ffd7d7;
+}
+.rw-status.is-pending {
+  background: rgba(255, 200, 80, 0.10);
+  border-color: rgba(255, 200, 80, 0.4);
+  color: #ffeac4;
+}
+.rw-status code {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 1px 6px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.rw-status .rw-status-title {
+  font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* Animated dot inside rw-status. Two states:
+   - rw-pulse-waiting (yellow, slow pulse): listener bound, no encoder
+     pushing yet. Conveys "I'm here, just waiting for you to connect."
+   - rw-pulse-live (green, faster pulse): encoder connected, frames
+     are actively flowing. Conveys "everything is working, leave it
+     alone." */
+.rw-pulse {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.rw-pulse-waiting {
+  background: #ffc452;
+  box-shadow: 0 0 0 0 rgba(255, 200, 80, 0.55);
+  animation: rw-pulse-waiting 1.6s ease-in-out infinite;
+}
+.rw-pulse-live {
+  background: #50c878;
+  box-shadow: 0 0 0 0 rgba(80, 200, 120, 0.55);
+  animation: rw-pulse-live 1.1s ease-in-out infinite;
+}
+@keyframes rw-pulse-waiting {
+  0%   { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0.55); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 9px  rgba(255, 200, 80, 0);    transform: scale(1.04); }
+  100% { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0);    transform: scale(1); }
+}
+@keyframes rw-pulse-live {
+  0%   { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0.65); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 11px rgba(80, 200, 120, 0);    transform: scale(1.10); }
+  100% { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0);    transform: scale(1); }
+}
+.rw-ip-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rw-ip-label {
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+  white-space: nowrap;
+}
+.rw-ip-pick, .rw-ip-row input#rw-ip-manual {
+  padding: 6px 9px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--text, #e6e6ea);
+  font-family: monospace;
+  font-size: 12px;
+  min-width: 160px;
+}
+.rw-ip-row input#rw-ip-manual.needs-input {
+  border-color: rgba(255, 200, 80, 0.6);
+  background: rgba(255, 200, 80, 0.08);
+}
+.rw-ip-status {
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+}
+.rw-ip-status.is-warning {
+  color: #ffc452;
 }
 
 /* ============= USER GUIDE (Phase 8b) ===================== */

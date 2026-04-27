@@ -34,7 +34,19 @@ const els = {
   startBtn:       $('#btn-start'),
   previewBtn:     $('#btn-preview'),
   stopBtn:        $('#btn-stop'),
+  receiveJumpBtn: $('#btn-receive-jump'),
   error:          $('#error'),
+
+  // Receiver-active banner near the player. Shows when an SRT/RTMP
+  // listener is running so the user has highly-visible feedback even
+  // when the receive-stream wizard is collapsed at the bottom of the
+  // page. JS toggles its hidden flag + classes from updateReceiverUi().
+  receiverBanner:        $('#receiver-banner'),
+  receiverBannerTitle:   $('#receiver-banner-title'),
+  receiverBannerSubtitle:$('#receiver-banner-subtitle'),
+  receiverBannerUrl:     $('#receiver-banner-url'),
+  receiverBannerStop:    $('#receiver-banner-stop'),
+  receiveWizard:         $('#receive-wizard'),
 
   // Telemetry
   tmBitrate:    $('#tm-bitrate'),
@@ -367,6 +379,77 @@ function updateAudioPanRow(snap) {
 // source kind. Called from render() on every state poll so the label
 // stays accurate even when something changes preview state out of
 // band (e.g. starting a stream tears the preview down server-side).
+/// Show/hide the top-of-page "receiver running" banner and mirror the
+/// wizard's running state. Called every poll tick from render(snap).
+///
+/// State machine:
+///   - source != relay → banner hidden, wizard back to default state.
+///   - source = relay, status = Idle/Interrupted → hidden (the wizard
+///     already shows error feedback in its own status panel).
+///   - source = relay, status = Connecting → yellow "waiting" banner
+///     (listener bound, no encoder pushing yet).
+///   - source = relay, status = Streaming → green "live" banner with
+///     bitrate; wizard summary glows.
+///
+/// The banner also acts as the canonical Stop control while the
+/// receiver is running, so the user doesn't have to scroll all the
+/// way down to the wizard to stop a stream.
+function updateReceiverUi(snap) {
+  const banner = els.receiverBanner;
+  const wizard = els.receiveWizard;
+  if (!banner) return;
+
+  const isRelay = snap && (snap.source_id === 'srt_listen' || snap.source_id === 'rtmp_listen');
+  const status = (snap && snap.stats && snap.stats.status) || 'Idle';
+  const active = isRelay && (status === 'Streaming' || status === 'Connecting');
+
+  if (wizard) wizard.classList.toggle('is-running', !!active);
+
+  if (!active) {
+    banner.hidden = true;
+    return;
+  }
+
+  const proto = snap.source_id === 'srt_listen' ? 'SRT' : 'RTMP';
+  // Reuse whatever URL the wizard already showed the user — they
+  // copy/pasted it into the encoder, so it's the canonical "what to
+  // connect to" string. Falls back to a generic constructed URL when
+  // the wizard hasn't rendered yet (rare; only on the very first
+  // tick before bind() has run).
+  const wizardUrl = (document.getElementById('rw-publish-url') || {}).value || '';
+  const r = snap.relay || {};
+  const fallbackHost = lanIp || '<your-lan-ip>';
+  const fallbackUrl = proto === 'SRT'
+    ? `srt://${fallbackHost}:${r.srt_port ?? 9710}`
+    : `rtmp://${fallbackHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+  const url = wizardUrl || fallbackUrl;
+
+  banner.classList.remove('is-waiting', 'is-error');
+  els.receiverBannerUrl.textContent = url;
+
+  if (status === 'Connecting') {
+    // Listener bound but no encoder pushing yet. Yellow pulse +
+    // "waiting" copy. The banner is meant to read "the server is up
+    // and ready — your job is to get the camera to connect."
+    banner.classList.add('is-waiting');
+    els.receiverBannerTitle.textContent = `${proto} server listening — no encoder yet`;
+    els.receiverBannerSubtitle.textContent = 'Paste the URL into your camera / drone / OBS / phone now. The banner turns green and shows the bitrate as soon as frames start flowing.';
+  } else {
+    // Streaming — frames are actually flowing through to ATEM.
+    // Solid green pulse, bitrate readout, "you're done — don't touch
+    // anything" copy.
+    const stats = snap.stats || {};
+    const kbps = Math.round((stats.bitrate || 0) / 1000);
+    const fps  = stats.fps ? `${Math.round(stats.fps)} fps` : '';
+    const live = kbps > 0
+      ? `Live · ${kbps} kbps${fps ? ' · ' + fps : ''}`
+      : 'Live · connection up';
+    els.receiverBannerTitle.textContent = `${proto} server — encoder connected, forwarding to ATEM`;
+    els.receiverBannerSubtitle.textContent = `${live}. Do NOT click Start Stream above — the relay handles the ATEM forward automatically.`;
+  }
+  banner.hidden = false;
+}
+
 function updatePreviewButton(snap) {
   if (!els.previewBtn) return;
   const isActive = snap.preview && snap.preview.active;
@@ -954,6 +1037,7 @@ function render(snap) {
   }
 
   updatePreviewButton(snap);
+  updateReceiverUi(snap);
 
   if (knownDevices.audio.length) {
     setOptions(els.avAudio, [
@@ -1484,6 +1568,25 @@ function bind() {
   // Start / stop
   els.startBtn.addEventListener('click', async () => {
     els.startBtn.disabled = true;
+    // Guard against the most-reported confusion: a user clicked
+    // "Start Receiver" in the wizard (which already begins forwarding
+    // to ATEM as soon as their encoder connects) and then expects
+    // they ALSO need to click Start Stream up here. /api/start would
+    // return "Stream already running" — but that error in the global
+    // banner reads as if something is broken, when actually the relay
+    // is running fine. Surface a clear "you're already streaming via
+    // the receiver" message instead and bail without calling the API.
+    const snap = lastSnapshot;
+    const isRelayRunning = snap
+      && (snap.source_id === 'srt_listen' || snap.source_id === 'rtmp_listen')
+      && snap.stats
+      && (snap.stats.status === 'Streaming' || snap.stats.status === 'Connecting');
+    if (isRelayRunning) {
+      els.error.hidden = false;
+      els.error.textContent = `Receiver is already running — your encoder's stream forwards to your ATEM automatically. Use the green banner above (or the Stop Receiver button in the wizard below) to stop it.`;
+      setTimeout(() => (els.startBtn.disabled = false), 600);
+      return;
+    }
     // Release the browser's getUserMedia hold on the camera before
     // FFmpeg tries to open it. Some virtual cameras (NDI Virtual
     // Camera in particular) serialize frame delivery to one consumer
@@ -1507,6 +1610,43 @@ function bind() {
       setTimeout(() => (els.startBtn.disabled = false), 600);
     }
   });
+
+  // "Receive a Stream" jump button in the player controls. Opens the
+  // receive-stream wizard at the bottom of the right column and
+  // smooth-scrolls so it's actually visible — without this users had
+  // to discover the wizard by scrolling. Also focuses the protocol
+  // toggle so keyboard users land somewhere useful.
+  if (els.receiveJumpBtn && els.receiveWizard) {
+    els.receiveJumpBtn.addEventListener('click', () => {
+      els.receiveWizard.open = true;
+      els.receiveWizard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Focus a sensible control inside the wizard after the scroll.
+      // Slight delay so smooth-scroll animation has started; without
+      // the delay the focus jump can fight the scroll and land us
+      // back at the top.
+      setTimeout(() => {
+        const first = document.querySelector('input[name="rw-proto"]:checked')
+                   || document.querySelector('input[name="rw-proto"]');
+        if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
+      }, 350);
+    });
+  }
+
+  // Receiver banner's Stop button — same effect as the wizard's
+  // Stop Receiver, but reachable without scrolling. Important for
+  // users whose wizard is collapsed at the bottom of the page.
+  if (els.receiverBannerStop) {
+    els.receiverBannerStop.addEventListener('click', async () => {
+      els.receiverBannerStop.disabled = true;
+      try {
+        const r = await fetch('/api/stop', { method: 'POST' });
+        const j = await r.json();
+        if (!j.error) render(j);
+      } finally {
+        setTimeout(() => (els.receiverBannerStop.disabled = false), 400);
+      }
+    });
+  }
   els.stopBtn.addEventListener('click', async () => {
     const r = await fetch('/api/stop', { method: 'POST' });
     render(await r.json());
@@ -1560,21 +1700,211 @@ function bind() {
   const rwAppPick = $('#rw-app-pick');
   const rwAppBody = $('#rw-app-instructions');
   const rwStart = $('#rw-start-receiver');
+  const rwStop = $('#rw-stop-receiver');
+  const rwStatus = $('#rw-status');
+  const rwIpPick = $('#rw-ip-pick');
+  const rwIpManual = $('#rw-ip-manual');
+  const rwIpStatus = $('#rw-ip-status');
+  const rwIpHint = $('#rw-ip-hint');
+
+  // The active host for the publish URL. Empty means "we don't know
+  // — user must type one in"; UI surfaces a yellow warning instead
+  // of substituting a misleading placeholder like 0.0.0.0 or
+  // window.location.hostname (which is just 127.0.0.1 inside the
+  // webview).
+  let rwSelectedIp = '';
+  let rwIpMode = 'auto'; // 'auto' (use detected) | 'manual' (user typed)
 
   function getRwProto() {
     for (const r of rwProto) if (r.checked) return r.value;
     return 'srt_listen';
   }
 
+  function getActiveHost() {
+    if (rwIpMode === 'manual') {
+      return (rwIpManual?.value || '').trim();
+    }
+    return rwSelectedIp || '';
+  }
+
   function refreshRwUrl() {
     if (!rwUrl) return;
     const proto = getRwProto();
-    const host = lanIp || window.location.hostname || '0.0.0.0';
+    const host = getActiveHost();
     const r = lastSnapshot?.relay || {};
+    // When we don't have a confirmed LAN IP, show a placeholder that
+    // CLEARLY signals "you need to fill this in" rather than a
+    // wrong-but-looking-real default. The IP-picker row above the URL
+    // surfaces the warning state explicitly.
+    const displayHost = host || '<your-lan-ip>';
     if (proto === 'srt_listen') {
-      rwUrl.value = `srt://${host}:${r.srt_port ?? 9710}`;
+      rwUrl.value = `srt://${displayHost}:${r.srt_port ?? 9710}`;
     } else {
-      rwUrl.value = `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+      rwUrl.value = `rtmp://${displayHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    }
+  }
+
+  function applyIpPickerState(interfaces, preferredIp) {
+    if (!rwIpPick || !rwIpManual || !rwIpStatus) return;
+    const usable = (interfaces || []).filter((iface) => iface.ip);
+    if (usable.length === 0) {
+      // Detection failed — surface a clear "type your IP" prompt.
+      rwIpPick.hidden = true;
+      rwIpPick.innerHTML = '';
+      rwIpManual.hidden = false;
+      rwIpManual.classList.add('needs-input');
+      rwIpStatus.textContent = 'Could not auto-detect your LAN IP. Type it in.';
+      rwIpStatus.classList.add('is-warning');
+      rwIpMode = 'manual';
+      rwSelectedIp = '';
+      if (rwIpHint) {
+        rwIpHint.innerHTML = `Find your IP in <strong>System Settings → Network</strong> (the IPv4 address on the interface that's on the same LAN as your camera). Default port is 9710 for SRT, 1935 for RTMP.`;
+      }
+      refreshRwUrl();
+      return;
+    }
+    if (usable.length === 1) {
+      // One interface — show it as a read-only label, not a dropdown.
+      rwIpPick.hidden = true;
+      rwIpPick.innerHTML = '';
+      rwIpManual.hidden = true;
+      rwIpManual.classList.remove('needs-input');
+      rwSelectedIp = usable[0].ip;
+      rwIpStatus.textContent = `${usable[0].ip} (${usable[0].name || 'auto'})`;
+      rwIpStatus.classList.remove('is-warning');
+      rwIpMode = 'auto';
+      refreshRwUrl();
+      return;
+    }
+    // Multiple interfaces — let the user pick. Default to preferred.
+    rwIpPick.innerHTML = '';
+    let preferred = preferredIp || usable.find((i) => i.preferred)?.ip || usable[0].ip;
+    for (const iface of usable) {
+      const opt = document.createElement('option');
+      opt.value = iface.ip;
+      opt.textContent = `${iface.ip}  (${iface.name || 'auto'})${iface.preferred ? ' — recommended' : ''}`;
+      if (iface.ip === preferred) opt.selected = true;
+      rwIpPick.appendChild(opt);
+    }
+    // Sentinel for manual entry, in case none of the auto-detected
+    // ones look right (rare, but worth a way out).
+    const manualOpt = document.createElement('option');
+    manualOpt.value = '__manual__';
+    manualOpt.textContent = 'Type a different IP…';
+    rwIpPick.appendChild(manualOpt);
+
+    rwIpPick.hidden = false;
+    rwIpManual.hidden = true;
+    rwIpManual.classList.remove('needs-input');
+    rwSelectedIp = preferred;
+    rwIpStatus.textContent = `${usable.length} interfaces detected — pick the one on the same network as your encoder.`;
+    rwIpStatus.classList.remove('is-warning');
+    rwIpMode = 'auto';
+    refreshRwUrl();
+  }
+
+  function setRwStatus(kind, html) {
+    if (!rwStatus) return;
+    rwStatus.classList.remove('is-listening', 'is-error', 'is-pending');
+    if (kind === 'listening') rwStatus.classList.add('is-listening');
+    else if (kind === 'error') rwStatus.classList.add('is-error');
+    else if (kind === 'pending') rwStatus.classList.add('is-pending');
+    rwStatus.innerHTML = html;
+    rwStatus.hidden = false;
+  }
+  function clearRwStatus() {
+    if (!rwStatus) return;
+    rwStatus.hidden = true;
+    rwStatus.innerHTML = '';
+  }
+
+  function getReceiverStatus(snap) {
+    // Returns one of: 'idle' | 'listening' | 'receiving' | 'interrupted'
+    // - listening = FFmpeg started, no encoder pushing yet (status=Connecting)
+    // - receiving = encoder connected and frames flowing to ATEM (status=Streaming)
+    // - interrupted = something errored / connection dropped (status=Interrupted)
+    if (!snap) return 'idle';
+    if (snap.source_id !== 'srt_listen' && snap.source_id !== 'rtmp_listen') return 'idle';
+    // Backend's status string lives at snap.stats.status — NOT
+    // snap.status or snap.streaming_status (those don't exist). Earlier
+    // versions read the wrong field and the wizard's status panel
+    // stayed stuck at "Starting receiver…" forever, even after the
+    // encoder had connected. Fixed by reading the right field.
+    const raw = (snap.stats && snap.stats.status) || '';
+    const s = raw.toLowerCase();
+    if (s === 'streaming') return 'receiving';
+    if (s === 'connecting') return 'listening';
+    if (s === 'interrupted') return 'interrupted';
+    return 'idle';
+  }
+
+  function isReceiverActive(snap) {
+    const s = getReceiverStatus(snap);
+    return s === 'listening' || s === 'receiving';
+  }
+
+  function updateReceiverButtons() {
+    if (!rwStart) return;
+    const status = getReceiverStatus(lastSnapshot);
+    const proto = (lastSnapshot && lastSnapshot.source_id === 'srt_listen') ? 'SRT' : 'RTMP';
+
+    if (status === 'listening' || status === 'receiving') {
+      rwStart.hidden = true;
+      if (rwStop) rwStop.hidden = false;
+      const url = rwUrl?.value || '';
+      const host = getActiveHost();
+
+      if (status === 'listening') {
+        // Listener bound, waiting for encoder. Animated dot pulses
+        // yellow to signal "ready and waiting" — distinct from the
+        // solid green "actively receiving" state.
+        const urlLine = host
+          ? `Paste this into your encoder: <code>${escapeHtml(url)}</code>`
+          : `Type your LAN IP above so we can show you the URL to paste into your encoder.`;
+        setRwStatus(
+          'pending',
+          `<span class="rw-status-title">` +
+          `<span class="rw-pulse rw-pulse-waiting" aria-hidden="true"></span>` +
+          `${proto} listener bound — waiting for encoder` +
+          `</span>` +
+          urlLine
+        );
+      } else {
+        // status === 'receiving' — frames flowing through to ATEM.
+        // Solid green dot, bitrate readout, clear "you're done" copy.
+        const stats = (lastSnapshot && lastSnapshot.stats) || {};
+        const kbps = Math.round((stats.bitrate || 0) / 1000);
+        const fps  = stats.fps ? `${Math.round(stats.fps)} fps` : '';
+        const live = kbps > 0
+          ? `${kbps} kbps${fps ? ' · ' + fps : ''}`
+          : 'connection up';
+        setRwStatus(
+          'listening',
+          `<span class="rw-status-title">` +
+          `<span class="rw-pulse rw-pulse-live" aria-hidden="true"></span>` +
+          `Encoder connected — forwarding to ATEM` +
+          `</span>` +
+          `Live: ${escapeHtml(live)}<br>` +
+          `Stop here when you're done — do NOT click <em>Start Stream</em> at the top of the page (it'll just complain "stream already running").`
+        );
+      }
+    } else if (status === 'interrupted') {
+      rwStart.hidden = false;
+      if (rwStop) rwStop.hidden = true;
+      const errText = (lastSnapshot && lastSnapshot.stats && lastSnapshot.stats.error) || '';
+      setRwStatus(
+        'error',
+        `<span class="rw-status-title">Receiver interrupted</span>` +
+        (errText ? `${escapeHtml(errText)}<br>` : '') +
+        `Click <strong>Start Receiver</strong> again to re-bind the listener. ` +
+        `Tip: most cameras (DJI Osmo Pocket, Larix, Blackmagic Camera) stop pushing as soon as the connection drops, so you'll need to re-start their stream too.`
+      );
+    } else {
+      // idle
+      rwStart.hidden = false;
+      if (rwStop) rwStop.hidden = true;
+      // Don't clear status here — preserve last error for the user
+      // to see. clearRwStatus() runs explicitly when they retry.
     }
   }
 
@@ -1608,6 +1938,27 @@ function bind() {
           <li>Format: MPEG-TS / FLV (matches the protocol you picked)</li>
           <li>Encoder: H.264 or HEVC, Keyframe interval 2s</li>
         </ol>`;
+    } else if (app === 'dji-osmo-pocket3') {
+      // The Osmo Pocket 3's Live Streaming flow lives inside the
+      // Mimo app (it streams via the phone, not directly from the
+      // Pocket itself). Mimo only does RTMP — no SRT path — so we
+      // hard-code RTMP examples even when the user has SRT selected
+      // in the wizard, with a hint about why.
+      const rtmpServer = `rtmp://${escapeHtml(lanIp || '<your-lan-ip>')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}`;
+      const rtmpKey = escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream');
+      const protoNote = proto === 'srt_listen'
+        ? `<p style="margin:6px 0 0;color:#ffc452;font-size:11px;">⚠ The Osmo Pocket 3 / Mimo app only speaks RTMP — switch the protocol toggle above to <strong>RTMP</strong> before starting the receiver.</p>`
+        : '';
+      html = `<strong>DJI Osmo Pocket 3 (via Mimo app on phone)</strong>
+        <ol>
+          <li>Pair the Pocket 3 to the <em>DJI Mimo</em> app on your phone.</li>
+          <li>In Mimo, open the camera view → tap the icon for <em>Live Streaming</em> (the bottom toolbar; it looks like a broadcast tower).</li>
+          <li>Pick <em>RTMP</em> as the platform.</li>
+          <li>Server URL: <code>${rtmpServer}</code></li>
+          <li>Stream Key: <code>${rtmpKey}</code></li>
+          <li>Tap <em>Start Live</em> in Mimo. The Pocket sends video over the phone's connection — make sure the phone is on the same Wi-Fi as this computer.</li>
+        </ol>
+        ${protoNote}`;
     } else if (app === 'dji') {
       html = `<strong>DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</strong>
         <ol>
@@ -1643,8 +1994,39 @@ function bind() {
   }));
   if (rwAppPick) rwAppPick.addEventListener('change', () => renderRwApp(rwAppPick.value));
   if (rwCopy) rwCopy.addEventListener('click', () => copyToClipboard(rwUrl.value, rwCopy));
+
+  if (rwIpPick) rwIpPick.addEventListener('change', () => {
+    if (rwIpPick.value === '__manual__') {
+      rwIpMode = 'manual';
+      rwSelectedIp = '';
+      rwIpManual.hidden = false;
+      rwIpManual.classList.add('needs-input');
+      rwIpManual.focus();
+    } else {
+      rwIpMode = 'auto';
+      rwSelectedIp = rwIpPick.value;
+      rwIpManual.hidden = true;
+      rwIpManual.classList.remove('needs-input');
+    }
+    refreshRwUrl();
+    updateReceiverButtons();
+  });
+  if (rwIpManual) rwIpManual.addEventListener('input', () => {
+    if (rwIpMode === 'manual') {
+      // Strip whitespace silently; let the user type freely otherwise.
+      const v = rwIpManual.value.trim();
+      // Drop the warning highlight as soon as something is typed.
+      if (v) rwIpManual.classList.remove('needs-input');
+      else rwIpManual.classList.add('needs-input');
+    }
+    refreshRwUrl();
+    updateReceiverButtons();
+  });
+
   if (rwStart) rwStart.addEventListener('click', async () => {
     rwStart.disabled = true;
+    clearRwStatus();
+    setRwStatus('pending', `<span class="rw-status-title">Starting receiver…</span>Spinning up the ${getRwProto() === 'srt_listen' ? 'SRT' : 'RTMP'} listener.`);
     try {
       // Switch the source to the chosen relay listener, then start the
       // stream. The relay panel below the source tiles becomes visible
@@ -1653,32 +2035,100 @@ function bind() {
       const r = await fetch('/api/start', { method: 'POST' });
       const j = await r.json();
       if (j.error) {
+        // Also bubble to the global error banner — but the wizard's
+        // own status pane is what users were looking at when they
+        // clicked Start, so it's the primary surface.
         els.error.hidden = false;
         els.error.textContent = j.error;
+        setRwStatus(
+          'error',
+          `<span class="rw-status-title">Could not start receiver</span>` +
+          `${escapeHtml(j.error)}<br>` +
+          `<span style="opacity:0.85;">Tip: make sure no other process is bound to the listener port (default 9710 SRT / 1935 RTMP). Check the log panel above for FFmpeg's stderr.</span>`
+        );
       } else {
+        // The receiver kicks off but won't have flow yet — the status
+        // panel updates to "listening" via the next poll cycle through
+        // updateReceiverButtons().
         render(j);
+        updateReceiverButtons();
       }
+    } catch (err) {
+      setRwStatus(
+        'error',
+        `<span class="rw-status-title">Could not reach the backend</span>` +
+        `${escapeHtml(err && err.message || String(err))}`
+      );
     } finally {
       setTimeout(() => (rwStart.disabled = false), 600);
+    }
+  });
+
+  if (rwStop) rwStop.addEventListener('click', async () => {
+    rwStop.disabled = true;
+    setRwStatus('pending', `<span class="rw-status-title">Stopping receiver…</span>`);
+    try {
+      const r = await fetch('/api/stop', { method: 'POST' });
+      const j = await r.json();
+      if (j.error) {
+        setRwStatus(
+          'error',
+          `<span class="rw-status-title">Could not stop receiver</span>${escapeHtml(j.error)}`
+        );
+      } else {
+        clearRwStatus();
+        render(j);
+        updateReceiverButtons();
+      }
+    } catch (err) {
+      setRwStatus(
+        'error',
+        `<span class="rw-status-title">Could not reach the backend</span>${escapeHtml(err && err.message || String(err))}`
+      );
+    } finally {
+      setTimeout(() => (rwStop.disabled = false), 600);
     }
   });
 
   // Refresh URL whenever the snapshot changes (port/app may move).
   // The poll loop already calls render(snap) on every tick; we just
   // need to re-render the URL when the wizard is open.
-  const urlRefreshTimer = setInterval(refreshRwUrl, 1000);
+  const urlRefreshTimer = setInterval(() => {
+    refreshRwUrl();
+    updateReceiverButtons();
+  }, 1000);
   // No teardown needed — runs for the lifetime of the page.
   void urlRefreshTimer;
+
+  // Expose the IP-picker initializer so the boot fetch (which runs
+  // after bind()) can populate the picker once /api/lan-ips returns.
+  // The handler closes over the wizard's local DOM refs, so it has to
+  // live inside bind() — exposing on window is the cheapest bridge.
+  window.applyIpPickerState = applyIpPickerState;
+  window.updateReceiverButtons = updateReceiverButtons;
 }
 
 bind();
 ensureDevicesLoaded();
 ensureNdiLoaded();
-fetchJSON('/api/lan-ip').then((j) => {
-  lanIp = j.ip || '';
-  // Wizard's publish URL also re-renders against this; render() will
-  // pick it up on the next poll cycle. No relay panels left to refresh.
-}).catch(() => {});
+// Probe every IPv4 interface so the wizard can show a picker when
+// the host has more than one (Wi-Fi + Ethernet, VPN, Apple Internet
+// Sharing, etc.). The legacy /api/lan-ip single-result endpoint is
+// kept for back-compat but the multi-IP endpoint is what the wizard
+// actually consumes. If detection fails entirely, applyIpPickerState
+// surfaces a "type your IP in" prompt instead of substituting a
+// wrong-but-real-looking default.
+fetchJSON('/api/lan-ips').then((j) => {
+  lanIp = j.preferred_ip || '';
+  if (typeof window.applyIpPickerState === 'function') {
+    window.applyIpPickerState(j.interfaces || [], j.preferred_ip || '');
+  }
+}).catch((err) => {
+  console.warn('LAN IP detection failed:', err);
+  if (typeof window.applyIpPickerState === 'function') {
+    window.applyIpPickerState([], '');
+  }
+});
 poll();
 setInterval(poll, 1000);
 // Refresh NDI senders every 30s — they come and go.
