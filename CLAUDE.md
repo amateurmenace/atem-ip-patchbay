@@ -305,119 +305,377 @@ What landed:
   Session 3.
 - **Notarization deferred.** Same as before Session 3.
 
-### Session 4 priorities (next pickup)
+### Session 4 wins (commits `c378c72` → `6a2bb73`, 2026-04-26 PM/evening)
+
+All seven Session 4 priorities shipped. Plus a meaningful
+network diagnostic tool. Plus the first signed + notarized
+public release.
+
+1. **VideoToolbox HEVC/H.264 hardware encoding** — `streamer.rs`
+   detects macOS and routes through `h264_videotoolbox` /
+   `hevc_videotoolbox` (`-realtime 1 -allow_sw 1
+   -constant_bit_rate 1 -bf 0 -profile:v main`) instead of
+   libx264/x265. Encoder CPU drops from ~80% (libx264 veryfast,
+   1080p30 NDI) to single digits. BMD-parity-verified end-to-
+   end against the user's real ATEM destination (Remote 2.xml).
+   Set `ATEM_DISABLE_VT=1` to fall back to libx264 for parity
+   testing.
+
+2. **Pre-stream Preview button** (`preview.rs` module) —
+   spins up a separate NDI Receiver at `ReceiverBandwidth::
+   Highest` (Lowest looked broken; the proxy stream was so ugly
+   users assumed their camera was failing). JPEG sampler stuffs
+   into the same `latest_jpeg` slot the streaming path uses, so
+   `/api/preview` is a single endpoint serving either source.
+   `Streamer::start()` calls `Preview::stop_for_streamer()`
+   before claiming the SDK handle to avoid double-claim. UI
+   button "▶ Preview" / "◼ Stop Preview" yellow when active.
+
+3. **Dante VSC channel selection** — new `audio_pan_l` /
+   `audio_pan_r` state fields (1-indexed); when source is
+   AVF + audio device name matches `dante` or `aggregate`,
+   `streamer.rs` emits `-af pan="stereo|c0=cN|c1=cM"` to route
+   the chosen channel pair to the outgoing AAC. Otherwise
+   FFmpeg auto-downmixes ALL N channels which sounds wrong for
+   Dante routing.
+
+4. **Audio Mixer card split** — Source card renamed to "Video
+   Source"; new "Audio Mixer" card holds Auto / Custom / Silent
+   radio + stereo/mono toggle + the Dante channel picker.
+   audio_mode="auto" forces av_audio_index=-1 in
+   `source_selection()` so the source resolver does the right
+   thing for combined-AV cameras vs separate AVF audio.
+   "silent" maps to `-af volume=0` regardless of source.
+
+5. **NDI video + Custom AVF audio (Dante) end-to-end** — the
+   headline production combo. When source is NDI AND
+   audio_mode=custom AND av_audio_name is set,
+   `build_ffmpeg_cmd_for_ndi` injects `-f avfoundation -i :NAME`
+   as input 1 instead of the lavfi anullsrc fallback. Pipe /
+   relay video sources still fall back to lavfi for now —
+   deferred (see Session 5 priorities).
+
+6. **NDI dylib bundling** — `tauri.conf.json` ships
+   `bundle.macOS.frameworks: ["/usr/local/lib/libndi.dylib"]`;
+   `build.rs` adds `-Wl,-rpath,@executable_path/../Frameworks`
+   to LC_RPATH on macOS. End users no longer need NDI Tools
+   pre-installed. The dylib auto-resolves to
+   `Contents/Frameworks/libndi.dylib` at launch via the
+   embedded rpath. CI's `Stage libndi.dylib at /usr/local/lib`
+   step copies the dylib from the SDK's
+   `/Library/NDI SDK for Apple/lib/macOS/` to `/usr/local/lib/`
+   so `bundle.macOS.frameworks` finds it (NDI SDK installs
+   there, not in NDI Tools' default).
+
+7. **FFmpeg sidecar bundled** — `bundle.resources:
+   ["sidecar/*"]` in tauri.conf.json. CI downloads
+   jellyfin-ffmpeg arm64 (Mac) and BtbN ffmpeg (Win) before
+   `cargo tauri build`. `ffmpeg_path::ffmpeg_path()` checks
+   `<resource_root>/sidecar/ffmpeg{,.exe}` first, falls
+   through to PATH. End users no longer need Homebrew.
+   `src-tauri/sidecar/README.txt` is committed as a placeholder
+   so the resources glob always matches at least one file in
+   local dev builds.
+
+8. **Recovery card + parent-death FFmpeg watchdog** — left-
+   column "Recovery" card under Overlays with a destructive-
+   red "✖ Kill orphans" CTA. POST `/api/kill-orphans` runs
+   `pkill -TERM -f "ffmpeg.*streamid="` then SIGKILL after a
+   settle. `Streamer::start()` ALSO spawns a tiny bash
+   watchdog (via `setsid` so it survives group-targeted
+   SIGKILLs) that polls our PID + FFmpeg's PID; when our
+   process dies ungracefully, watchdog SIGTERMs the FFmpeg
+   group within ~1s. Catches the cargo-tauri-dev rebuild
+   SIGKILL path that was leaving orphan streams running to
+   the destination.
+
+9. **Screen-capture scale filter** — AVF "Capture screen N"
+   ignores `-video_size`, returns native display resolution
+   (3456x2234 on Retina) with bogus 1000k tbr. ATEM rejected
+   silently; streams reported "running" but no picture. Now
+   `build_video_filter()` detects screen-capture sources and
+   emits `scale=W:H:force_original_aspect_ratio=decrease,
+   pad=W:H:(ow-iw)/2:(oh-ih)/2,fps=N,setsar=1` to scale-and-
+   letterbox to the configured `video_mode` with steady fps.
+
+10. **Many UI/UX cleanups** — 4K modes (2160p23.98–60),
+    OVERLAYS card moved to left column, port-forwarding
+    explainer rewritten for home/work/venue/church audiences
+    with an "ask of IT" template, FAQ entries for
+    SRT-vs-RTMP / H.264-vs-H.265 / encoder-CPU, NDI senders
+    moved up under Screens, URL/Pipe wizard above receive-
+    stream block, "SRT / RTMP SERVER:" prefix pill on receive
+    wizard, audio dropdown styled cyan with explicit
+    font-family, footer rework with weirdmachine wordmark
+    (text fallback when the PNG isn't dropped at
+    `/static/weirdmachine-logo.png`), hero credit moved to
+    footer, "Email Stephen" → "Email", hero subtitle adds
+    "to computer screens", `kill-orphans` button moved from
+    topbar to dedicated Recovery card with paragraph
+    explanation.
+
+11. **`atem-net-diag` companion tool** (`tools/atem-net-diag/`)
+    — a separate Rust binary for live network diagnostics.
+    Three modes that combine freely:
+    - **Active probe**: `--key K` builds BMD-flavored streamid
+      and runs FFmpeg-shell-out handshakes every N seconds.
+      `--key K1 --key K2 ...` rotates through multiple keys
+      per cycle to distinguish per-key vs destination-wide
+      lockouts.
+    - **Passive monitor (`--monitor IFACE`)**: wraps tshark
+      with a port filter (1935 / 9710 / 9977 / 1936 default).
+      Parses SRT control packets to extract receiver-reported
+      RTT, bandwidth estimate, receive rate, buffer level.
+      Falls through if tshark missing.
+    - **Visual dashboard (`--ui [PORT]`)**: embedded HTTP
+      server (tiny_http, port 8092 default) serving a single-
+      page web UI. Per-stream cards with health badges,
+      current bitrate, RTT, packet stats, 60-second bitrate
+      sparkline drawn on canvas. Configure target IP / port /
+      key / interval right in the form at the top, click
+      Apply, probe loop reconfigures live without restart.
+    The diag tool's Cargo manifest lives in
+    `tools/atem-net-diag/Cargo.toml` (no shared workspace);
+    `tools/atem-net-diag/package/{start.command,README.txt}`
+    holds the source files copied into release tarballs.
+    Built + signed + tarball'd into iCloud Drive for the user
+    to AirDrop to a peer Mac during productions.
+    **Important Session-4-end finding**: the user's first
+    test of the tool returned all REJECTED because the
+    hand-crafted bmd_uuid in `build_bmd_srt_url` had 13 hex
+    chars in the last group (UUIDs require 12). BMD receivers
+    silently reject malformed UUIDs. Fixed in commit
+    `de560bf` to a valid v4 UUID. **Also**: a peer Mac on a
+    switched LAN typically can't see traffic between two
+    other devices (modern switches don't broadcast unicast).
+    The tool needs to run on the SAME machine as the streamer
+    or on the ATEM's machine — see Session 5 priority #1
+    for the rework.
+
+12. **`tauri-rewrite` merged to `main`** — fast-forwarded.
+    `main` now points at the same commit as `tauri-rewrite`
+    and tracks all Tauri rewrite history. `v0.1.0-alpha.1`
+    tag stays reachable.
+
+### v0.2.0-alpha.6 — first PUBLIC signed + notarized release
+
+Live at https://github.com/amateurmenace/atem-ip-patchbay/releases/tag/v0.2.0-alpha.6
+
+- **macOS arm64 .dmg**: 33 MB. Signed by "Developer ID
+  Application: Stephen Walter (6M536MV7GT)", notarized via
+  `xcrun notarytool submit --wait`, ticket stapled with
+  `xcrun stapler staple`. Includes bundled
+  `Contents/Frameworks/libndi.dylib` (rebundled from NDI
+  SDK at /Library/NDI SDK for Apple/lib/macOS/) and
+  bundled `Contents/Resources/sidecar/ffmpeg` (Jellyfin
+  GPL build, libsrt + HEVC + VideoToolbox). End users
+  install on a clean Mac with zero Gatekeeper prompts.
+- **Windows x64 .exe**: NOT shipped in alpha.6. CI's
+  `Install NDI SDK (Windows)` step hung for 59 minutes
+  before manual cancellation — NewTek's NDI 6 SDK Windows
+  installer is built with InstallShield (NOT Inno Setup),
+  the `/S` flag we were passing didn't trigger silent
+  install and the runner sat waiting on a UAC dialog.
+  Fix already committed in `6a2bb73`: switch to
+  `/s /v"/qn"` (InstallShield silent + msiexec /qn
+  passthrough), add 5-min step timeout. Plus
+  `release.yml`'s release job now uses
+  `if: always() && needs.build-macos.result == 'success'`
+  so a Mac-only release publishes when Windows fails.
+  alpha.7 will re-attempt Windows.
+- For alpha.6 specifically I downloaded the Mac CI
+  artifact via `gh run download` and ran
+  `gh release create v0.2.0-alpha.6 ... <dmg>` locally
+  to publish. Future releases will be auto-published by
+  the pipeline.
+
+### Session 5 priorities (next pickup)
 
 User-stated priorities, in roughly intended order. Most are
-parallelizable and the user is fine with picking the right
-one to start with based on what's quickest to validate.
+parallelizable.
 
-1. **Hardware-accelerated encoding (Apple Silicon VideoToolbox).**
-   NDI streams in particular are CPU-intensive at the moment
-   because libx264 / libx265 run on CPU at preset=veryfast. On
-   M-series Macs, FFmpeg ships with `h264_videotoolbox` and
-   `hevc_videotoolbox` encoders that go through the Apple ANE +
-   GPU. Likely a small change in `streamer.rs build_ffmpeg_cmd`:
-   detect macOS, swap `-c:v libx264/libx265` for the
-   `*_videotoolbox` variants, drop `-x264-params` / `-x265-params`
-   (videotoolbox has its own knobs like `-allow_sw 0`,
-   `-realtime true`, `-profile:v main`). Bitrate / GOP / no-bframes
-   flags carry over. Verify the BMD streamid handshake still
-   accepts the resulting NAL unit pattern (the BMD parity work
-   from the bug-fix bundle was against libx264; videotoolbox
-   produces slightly different SPS/PPS).
-   - Check: `ffmpeg -hide_banner -encoders | grep videotoolbox`
-   - On Windows: `h264_qsv` / `h264_amf` / `h264_nvenc` depending
-     on GPU vendor; defer to a later cycle unless Windows test
-     forces the issue.
-2. **Pre-stream live preview button.** Currently NDI preview
-   starts the moment a tile is clicked (poll begins, but only
-   shows JPEGs once an NDI stream is actually running and the
-   capture loop has encoded one). For cameras / pipes / SRT
-   listeners there's no preview at all without streaming. User
-   wants a "Preview" button next to "Start Stream" that:
-   - Spins up a low-bandwidth NDI receiver for NDI sources
-     (`ReceiverBandwidth::Lowest`), or a server-side FFmpeg
-     snapshot loop for AVF / pipe / relay sources
-   - Exposes JPEGs through `/api/preview` the same way the
-     current streaming path does
-   - Tears down cleanly when the user hits Stop Preview OR
-     starts a real stream
-   - **Must not interfere with the streaming path** — the
-     real Start Stream tears the preview down before
-     touching the encoder, so the SDK handle / AVF device
-     isn't double-claimed.
-   See "Option B: select-time preview" in the Session 3
-   conversation for the design sketch.
-3. **Dante Virtual Sound Card audio with channel selection.**
-   Dante VSC shows up in the AVF audio device list (the user
-   confirmed this works as a generic audio source), but right
-   now we just pick channel 1+2. Real Dante use cases need to
-   route specific receive channels (often 4 / 8 / 16 / 64 of
-   them) onto the L/R of the outgoing stream. FFmpeg's
-   `pan` audio filter can do this if we know the source
-   layout; e.g.
-   `-af pan="stereo|c0=c4|c1=c5"` to pull Dante channels 5+6
-   as the stereo output. UI: when audio source name matches
-   `Dante` (or the user's renamed VSC name), expose a small
-   channel picker — start with two `<select>`s for L/R that
-   list 1..N channels (N = device's reported channel count).
-   - Probe channels via `ffmpeg -f avfoundation -list_devices
-     true -i ""` or by looking at the audio device's input
-     channel count (CoreAudio API → `kAudioDevicePropertyStreamConfiguration`).
-   - State: new `audio_pan_l: u8` / `audio_pan_r: u8` fields.
-4. **Test the Windows app** in earnest. CI builds NSIS
-   installers but the only Windows test in v0.1.0 was
-   commit `b9f1995`-era. v0.2.0 hasn't been driven through
-   real Windows hardware. Likely surface area: DirectShow
-   device enumeration, the FFmpeg path resolver
-   (`%LOCALAPPDATA%/...` rather than `/opt/homebrew`), the
-   NDI dylib path (`Processing.NDI.Lib.x64.dll` vs
-   `libndi.dylib`), and Tauri's Windows window-title /
-   acrylic theming.
-5. **Notarize + release v0.2.0.** Sequence:
-   a. Resolve NDI dylib bundling (issue #2 from Session 3).
-   b. User exports Developer ID cert via Keychain Access
-      → `gh secret set` for `MACOS_CERTIFICATE_P12`,
-      `MACOS_CERTIFICATE_PWD`, `MACOS_KEYCHAIN_PWD`,
-      `MACOS_SIGN_IDENTITY`.
-   c. Add `xcrun notarytool submit ... --wait` + `xcrun
-      stapler staple` to `release.yml`.
-   d. Tag `v0.2.0-alpha.4` (or `v0.2.0-beta.1` if confidence
-      is high). CI builds, signs, notarizes, attaches to
-      release.
-   e. Smoke-test the published .dmg on a clean Mac
-      (or a separate user account) to verify camera
-      permission prompt + NDI works without `NDI Tools`
-      pre-installed.
-6. **Merge `tauri-rewrite` into `main`.** `main` is currently
-   frozen at `v0.1.0-alpha.1` (Python). The Rust rewrite is
-   the new product; `main` should reflect that. Squash-merge
-   or fast-forward depending on whether the user wants the
-   per-commit history visible on `main`. Don't delete
-   `main`'s v0.1.0 tag — keep `v0.1.0-alpha.1` reachable for
-   anyone hitting the older binary.
-7. **ATEM network diagnostic tool.** User reports the ATEM
-   stops accepting new SRT connections after a few stream
-   tests. Build a small standalone tool (separate
-   binary/script in `tools/` or its own repo) that runs on
-   a peer machine on the same LAN as the ATEM and reports:
-   - Active SRT sessions on the ATEM (libsrt's
-     `srt_getsockstate` against a known SRT control port,
-     OR passive packet capture of port 1935 traffic via
-     pcap/tshark)
-   - Bandwidth per session, source IP, time connected
-   - Recent connection attempts (success/reject + reason)
-   - Whether a key-specific lock is held (the receiver-state
-     lockout from issue 3)
-   Output as a tiny TUI or a single-page web UI. Pure Rust
-   feels right (libsrt-rs / pcap crate). Could also start
-   simpler: a `tshark -i en0 'port 1935' -V` wrapper with
-   light parsing.
+1. **`atem-net-diag` rework: monitor-first, no-interfere mode.**
+   The user's primary use case is *live broadcast monitoring*
+   — show the operator what's flowing without ever touching
+   the production. The current default behavior runs active
+   probes (FFmpeg handshakes) that:
+   - Send actual SRT handshakes to the receiver
+   - Get rejected if a real stream is already using that key
+     (the user observed this — probes return REJECTED while
+     a healthy stream is in progress)
+   - May contend with the production for the receiver's
+     accept slot
+   This is wrong for live productions. The rework:
+   - **Default mode = passive monitor only**. No active
+     probes unless explicitly enabled.
+   - Three modes selectable in the dashboard: **Live** (pure
+     monitor, no probes), **Standby** (probes run, no active
+     production expected), **Auto** (probes only when no
+     flow has been seen on the configured key/port for
+     N seconds).
+   - **Detect active flows from the capture and pause probes
+     for those keys** — needs key correlation (see #2).
+   - Big visual indicator at the top: "Mode: LIVE — passive
+     only" with a clear toggle.
+   Network architecture caveat that needs documenting in the
+   tool's README + onboarding: a peer Mac on a switched LAN
+   typically CAN'T see unicast traffic between two other
+   devices. The tool must run on:
+   - The same Mac as the streamer (sees egress), OR
+   - The ATEM's machine (if it's a server you can run on),
+     OR
+   - A machine receiving port-mirrored / spanned traffic
+     from the switch
+   The "I'll run it on my laptop next to the ATEM" mental
+   model doesn't work without a managed switch. UI should
+   detect "no traffic ever" + "configured ATEM IP isn't ours"
+   and surface a hint about port mirroring.
 
-### v0.2.0 release attempt — `tauri-rewrite` tags
+2. **Per-key flow correlation in atem-net-diag.** Right now
+   the UI shows flows by `src:port → dst:port`; we don't
+   match flows to specific stream keys. tshark's SRT
+   dissector parses the HSv5 handshake fields but doesn't
+   extract the SID extension that carries the streamid.
+   Either:
+   - Parse the binary HSv5 conclusion ourselves (~50-100
+     lines of SRT wire-format work in Rust),
+   - OR shell out to `tshark -V` and grep for the streamid,
+   - OR snoop the full handshake packet via `tshark -e
+     data.data` and decode the streamid TLV.
+   Per-key correlation lets the dashboard show "stream X
+   on key K is at 6.1 Mbps with RTT 45ms", which is what
+   the operator actually wants during a multi-source
+   production.
 
-Three release attempts so far, none successful — production
-binaries not yet published.
+3. **Multi-source mode in the main app.** Goal: a single
+   user pushes 2-4 different sources to 2-4 different ATEM
+   inputs simultaneously. Two paths, both should ship:
+   - **Multiple instances** (already supported via
+     `--instance-name N` from Phase 6). Document in the FAQ:
+     "How do I run multiple streams to multiple destinations?"
+     with a step-by-step (open the .app multiple times,
+     each gets its own port pair + state directory).
+   - **In-app multi-source mode**. New toggle near the top
+     of the main window. When enabled:
+     - Opens a second window with a 2x2 multi-view (4
+       boxes, each rendering one source's preview JPEG)
+     - Main window grows a prominent "Input 1 / 2 / 3 / 4"
+       picker at the top
+     - User selects an input, configures destination /
+       source / audio / etc. for that input independently
+     - Each input has its own EncoderState, Streamer, port
+       pair (HTTP + BMD) — basically four parallel instance
+       managers inside one process
+     - "Start All" / "Stop All" controls in addition to
+       per-input start/stop
+   - UI placement for the multi-source toggle: **above the
+     Recovery card in the left column**, with title
+     "Multi-Source", a paragraph explanation of the two
+     paths (in-app multi-source vs multiple .app
+     instances), the in-app toggle, and an FAQ-style
+     expandable for "Can I run several streams at once?".
+   Architecture sketch:
+   - New module `multi.rs` with `MultiState` holding 4
+     `EncoderState` + 4 `Streamer` instances
+   - Window 2: opens via Tauri's `WebviewWindow::new`
+     pointed at `/static/multiview.html`
+   - HTTP API gets prefixed routes: `/api/i1/state`,
+     `/api/i2/state`, ... so the multiview page can poll
+     all four cheaply
+   - `/api/preview` becomes `/api/i1/preview` ... etc.
+   - Single FFmpeg per input → 4 FFmpeg processes total
+     (M-series Mac with VideoToolbox can sustain this
+     comfortably since each encode is ~5% CPU)
+   This is significant work — probably its own session.
+
+4. **Test the Windows .exe build on real Windows hardware.**
+   alpha.7 release pipeline (already configured) should
+   produce a working Windows installer once the NDI silent-
+   install fix lands. After that, drive the install through
+   real Windows: DirectShow device enumeration, FFmpeg path
+   resolver (sidecar/ffmpeg.exe), NDI dylib path
+   (Processing.NDI.Lib.x64.dll bundled? sidecar? PATH?),
+   Tauri's Windows window chrome.
+
+5. **Custom audio for pipe / relay video sources.** Today
+   only AVF + NDI video sources support Custom audio mode.
+   Pipe (URL/RTSP) and relay (SRT/RTMP listener) video
+   sources still fall back to lavfi anullsrc when the user
+   picks Custom + an AVF audio device. The fix is structurally
+   the same as the NDI path: detect `audio_mode == "custom"`
+   in the source builder, append `-f avfoundation -i :NAME`
+   as the audio input, set `combined_av=false`. Each source
+   builder needs its own version of the conditional.
+
+### atem-net-diag tool architecture (Session 4)
+
+Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
+Cargo.toml, no workspace). Three modes that combine freely:
+
+```
+src/
+  main.rs          — CLI parser, probe loop, monitor mode (CLI),
+                     SRT/UDP packet parsing helpers
+  dashboard.rs     — embedded HTTP server (tiny_http), shared
+                     state via Arc<Mutex<DashboardState>>, probe +
+                     monitor threads write to it, /api/state +
+                     /api/config served from it
+  dashboard.html   — single-page HTML UI, embedded via include_str!
+                     into the binary at compile time. Polls /api/state
+                     at 1Hz, renders per-stream cards with sparklines
+package/
+  start.command    — double-click launcher, .command extension makes
+                     macOS open it in Terminal automatically. Clears
+                     com.apple.quarantine, checks for ffmpeg, prints
+                     URL banner, runs ./atem-net-diag --ui, keeps
+                     terminal open for error visibility.
+  README.txt       — end-user usage doc shipped in the tarball
+dist/              — gitignored build output; tar.gz produced here
+```
+
+Build + sign + tarball flow (manual today; should be a script):
+
+```
+cargo build --release
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: Stephen Walter (6M536MV7GT)" \
+  --identifier "org.weirdmachine.atem-net-diag" \
+  target/release/atem-net-diag
+mkdir -p dist/atem-net-diag-X.Y.Z-macos-arm64
+cp target/release/atem-net-diag dist/.../
+cp package/start.command package/README.txt dist/.../
+chmod +x dist/.../start.command
+tar -czf dist/atem-net-diag-X.Y.Z-macos-arm64.tar.gz -C dist atem-net-diag-X.Y.Z-macos-arm64
+cp dist/*.tar.gz ~/Library/Mobile\ Documents/com~apple~CloudDocs/
+```
+
+Distribution today: drop tarball into iCloud Drive root, the
+user pulls it from iCloud on the test Mac. Future: ship as a
+separate GitHub release asset alongside the main app.
+
+Key implementation gotchas:
+- **bmd_uuid format**: hand-crafted UUIDs MUST be valid v4
+  format (8-4-4-4-12 hex chars). BMD receivers silently
+  reject malformed UUIDs. Current value:
+  `d1a90517-1c00-4e57-9fab-617465616d64`. The "atemd" hex
+  payload in the last group is decorative.
+- **Switched LAN visibility**: a peer Mac running tshark
+  CAN'T see unicast traffic between two other devices on
+  most modern Ethernet switches. Tool needs to run on the
+  same machine as the streamer, on the receiver's machine,
+  on a port-mirrored / SPAN port, or query a router/gateway
+  API (UDM Pro Max etc.).
+- **tshark capture permissions**: macOS requires either
+  ChmodBPF (Wireshark installer's helper) or sudo. The
+  dashboard's empty-flows state hints at this.
+- **SRT field extraction**: tshark's SRT dissector parses
+  HSv5 ACKD packets and exposes `srt.bw`, `srt.rate`,
+  `srt.rtt`, `srt.rttvar`, `srt.bufavail` as `-e` field
+  outputs. The streamid extension (carries the user's
+  stream key) is NOT extracted — Session 5 priority #2
+  needs to fix this for per-key correlation.
+
+### v0.2.0 release tags
 
 - `v0.2.0-alpha.1` (commit `16baa5d`): NDI SDK headers missing
   on both Mac + Win runners.
@@ -761,44 +1019,61 @@ device-list cache. Low priority.
 - SRT/RTMP relay sources (`srt_listen` / `rtmp_listen`) — turn the
   patchbay into a server for OBS / Larix / iPhone to publish into.
 
-## Latest commits (v0.2.0 / `tauri-rewrite`)
+## Latest commits (v0.2.0 / `tauri-rewrite` == `main` after Session 4 merge)
 
-Run `git log --oneline -20 tauri-rewrite` for the live list.
-Session 3 added (newest first):
+Run `git log --oneline -25 main` for the live list. Session 4
+added (newest first):
 
 ```
-6529cae ndi preview: stop swallowing tick errors + reset previewKey on stopPreview
-677d7ad ndi preview: per-tick diagnostic log
-f471f35 fix: re-read index.html on each request + remove duplicate SRT advanced block
-7600ad7 ui: tone down disclaimer + reword credit with MIT/GitHub line
-e6b4c48 ui: drop SRT/RTMP receive tiles, restyle wizard as prominent green CTA
-5d9f90f ui: remove duplicate relay panels, refresh button, prominent audio, demo-app text relocation
-14773a7 ui: NDI preview defenses against stale CSS cache + diagnostic logs
-6677bf9 ui: auto-start NDI preview poll from state, not just from tile click
-a01bc1a http: send Cache-Control: no-cache on /static/*
-d9d9202 ui: NDI tile + preview render bugs (CSS hidden, img overlay, isActive)
-e5ab4c0 ui: bind Cmd/Ctrl-R + F5 to location.reload() for the Tauri WebView
-c9a3057 ui: keep NDI preview poll alive when waiting-message hint shows
-754e741 streamer: scale NDI sources to the configured video_mode
-ce0f617 ndi_capture: strip line-stride padding, add per-second telemetry
-51c1158 CLAUDE.md: correct NDI issue — discovery works, receive doesn't
+6a2bb73 release.yml: fix Windows NDI install hang + Mac-only release path
+d82fd7d chore: gitignore .claude/ agent state directory
+cfa3ef4 net-diag: per-stream cards in dashboard with bitrate, RTT, health
+267caa0 net-diag: bare --ui launch (no URL) now works + improved start.command
+c6433b9 net-diag: add package/ source files (start.command launcher + README)
+de560bf net-diag: live config form in dashboard + valid UUID in BMD streamid
+17e2f40 net-diag: --ui [PORT] mode — embedded HTTP server + live web dashboard
+435287a net-diag: --monitor IFACE — passive flow capture via tshark
+ec58db8 net-diag: multi-key rotation — distinguish per-key vs destination-wide lockouts
+a47c3a2 streamer: setsid the FFmpeg watchdog so group-kills can't take it down
+689a246 fix: screen-capture scale + notarize-non-fatal upload
+50d40b8 net-diag: --key K flag — build BMD streamid from a key + base URL
+50b4418 streamer: bash watchdog for parent-death FFmpeg cleanup
+bbc54a7 fix: screen-capture + video-only AVF sources stream cleanly
+121ca90 release: bundle FFmpeg into the .app/.exe so end users without Homebrew can stream
+ac96b81 ui: hero subtitle adds "to computer screens" to the source list
+42398e6 ui: move kill-orphans into a Recovery card under Overlays
+9c917f5 ui: kill-orphans button keeps its name, asterisks link button to hint
+be2e797 release: bump to 0.2.0-alpha.4 for the first signed + notarized build
+e4cf7ad audio: NDI video + custom AVF audio (Dante) end-to-end
+85bfd29 ui: split audio into Audio Mixer card + kill-orphans button + footer rework
+b2ece30 release: add notarytool + stapler step + libndi bundle sanity-check
+cd722bc bundle: ship libndi.dylib in Contents/Frameworks/ + neutral SRT/RTMP wizard
+3bca7e2 audio: L/R channel pan picker for Dante VSC + aggregate devices
+2e9c1f1 preview: receive full-bandwidth (was Lowest, looked broken)
+2928973 preview: add pre-stream Preview button (NDI low-bandwidth)
+c378c72 streamer: route through VideoToolbox on macOS for hardware encoding
 ```
+
+Session 4's first commit (VideoToolbox) is `c378c72`. The
+fast-forward of `main` to `tauri-rewrite` happened at
+`d82fd7d` (commit message: "chore: gitignore .claude/").
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 4 priorities"** under the v0.2.0 direction
+See **"Session 5 priorities"** under the v0.2.0 direction
 section above for the full list. Quick summary:
 
-1. Hardware-accelerated encoding (Apple Silicon VideoToolbox)
-   to drop NDI encoder CPU load.
-2. Pre-stream live preview button (NDI low-bandwidth receiver
-   or server-side AVF JPEG snapshot loop).
-3. Dante VSC channel selection via FFmpeg `pan` filter.
-4. Test the Windows .exe build for real.
-5. NDI dylib bundling → notarize → release v0.2.0.
-6. Merge `tauri-rewrite` into `main`.
-7. Build an ATEM-side network diagnostic tool to characterise
-   the receiver-lockout bug.
+1. **atem-net-diag rework** — default to monitor-only, add
+   Live/Standby/Auto modes, document switched-LAN visibility
+   gotchas, optional UDM Pro / UniFi API integration.
+2. **Per-key flow correlation** in atem-net-diag — parse SRT
+   HSv5 SID extension to map flows to stream keys.
+3. **Multi-source mode** in main app — both
+   `--instance-name`-via-multiple-launches AND in-app 2x2
+   multi-view + per-input config picker.
+4. **Test Windows .exe** on real Windows hardware (alpha.7
+   tag once the NDI installer fix is verified by CI).
+5. **Custom audio for pipe / relay** video sources.
 
 ## v0.2.0 candidate features
 
