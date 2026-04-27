@@ -665,45 +665,204 @@ What landed:
   in the user's own shell and have Claude inherit it via
   the launcher, never paste it into the conversation.
 
-### Session 6 priorities (next pickup)
+### Session 6 wins (atem-net-diag UDM live validation, 2026-04-26 evening)
+
+Validated the Session 5 UDM polling against the real
+production LAN, found three coupled bugs that the dev-Mac
+build couldn't have caught, fixed them on a `udm-live-fixes`
+branch (commit `8a80b5d`). Mode toggle verified end-to-end.
+Per-key SRT correlation still untested live, but for a
+documented topology reason (this Mac is a peer on a switched
+LAN — can't see ATEM unicast traffic — same caveat already
+in the README).
+
+What landed:
+
+1. **UDM polling works as designed.** Legacy `/proxy/network/
+   api/s/default/stat/sta` returned HTTP 200 with 123 clients
+   on the first authenticated request; integration v1 fallback
+   wasn't needed (and in fact returned HTTP 000 on this UDM,
+   so the legacy-first preference paid off). `unifi_status`
+   reaches `connected`, ATEM is correctly identified
+   (`is_atem: true`, MAC matches), `unifi_clients` populates
+   in full.
+
+2. **Three bugs found + fixed in `unifi.rs`** (all on
+   `udm-live-fixes`, single commit `8a80b5d`):
+
+   a. **USW-attached clients use hyphenated counter fields.**
+      The ATEM (and 90+ other wired clients on this LAN) report
+      bytes via `wired-tx_bytes` / `wired-rx_bytes` — the plain
+      `tx_bytes` / `rx_bytes` come back zero for them. Only
+      ~13 of 123 clients (the wireless ones) populated the plain
+      pair; everything else used `wired-*` exclusively. The two
+      pairs are mutually exclusive in observed data, never both
+      populated for the same client. Fix: deserialize both via
+      `#[serde(rename = "wired-tx_bytes")]` and sum.
+
+   b. **Inverted tx/rx perspective.** UniFi's stat/sta reports
+      counters from the **AP/switch perspective**: a client's TX
+      is what the port RX'd from it. The Session 5 code passed
+      UDM `tx_bytes` straight through to the snapshot's
+      `tx_bytes`, so during a 6 Mbps SRT stream **into** the
+      ATEM the dashboard showed "ATEM TX 6.8 Mbps". Swap the
+      mapping so dashboard `tx_kbps` / `rx_kbps` are
+      device-perspective — matching the file's own documented
+      intent ("show what's flowing to the ATEM").
+
+   c. **2-second poll interval shorter than UDM's counter
+      refresh.** The UDM updates its byte counters every
+      ~5-10 seconds, so most polls saw zero delta and one poll
+      per refresh window saw ~10s of accumulated bytes squeezed
+      into a 2s window — a real 6 Mbps stream displayed as 0
+      kbps for ~3 polls then a 49 Mbps spike, then 0 again.
+      The UDM already publishes its own smoothed rate in
+      `tx_bytes-r` / `rx_bytes-r` (and `wired-*` variants).
+      New `udm_rate_kbps()` method prefers those when present,
+      falls back to delta math only for the integration API
+      path which doesn't surface rate fields. Result: ATEM
+      kbps is now stable and accurate, holding the same value
+      for ~3 polls between UDM refreshes.
+
+3. **Mode toggle test (Task D) passed.** `POST /api/config
+   {"mode":"standby"}` flipped to standby cleanly; one probe
+   fired in the next 5s interval; `POST {"mode":"live"}`
+   stopped probes within one cycle. Probe outcome was
+   `timeout` because keys were empty + the ATEM's accept slot
+   was held by the live stream — that's correct behavior, not
+   a tool bug.
+
+4. **Empirical UniFi quirk catalog.** Wrote up the three
+   stat/sta endpoint quirks (hyphenated fields, switch
+   perspective, slow refresh) so the next API integration
+   doesn't have to rediscover them. See the `udm_rate_kbps`
+   doc-comment in `unifi.rs` for the inline version.
+
+### Open issues from Session 6
+
+- **`udm-live-fixes` branch is local-only.** The production-
+  LAN Mac doesn't have GitHub credentials configured (no
+  `gh`, no SSH key, no HTTPS cred helper). Commit `8a80b5d`
+  is on the branch locally but not pushed. **Must be pushed
+  and merged before any new tarball is built**, or the
+  bandwidth display will continue to be inverted + jumpy.
+  Easiest path: `brew install gh && gh auth login` on the
+  production-LAN Mac, then `git push -u origin udm-live-fixes`.
+
+- **The shipped v0.2.0 tarball in iCloud Drive is buggy.**
+  `~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`
+  predates the udm-live-fixes commit; it shows the ATEM's
+  inbound stream as `tx` (wrong direction) and the kbps is
+  3-5x inflated with frequent zeros. Rebuild + replace once
+  the branch merges.
+
+- **Per-key SID parsing still untested live.** Same Session 5
+  caveat: a peer Mac on a switched LAN can't see ATEM unicast
+  traffic. Direct tshark probes on both en0 and en34 over
+  5 seconds saw 0 packets matching the ATEM. The unit tests
+  pass against synthetic handshakes, but no real BMD encoder
+  has been observed end-to-end yet. To unblock this in
+  Session 7 the tool needs to either run on the streamer's
+  machine, or the production switch needs port-mirroring to
+  this Mac.
+
+- **Production-LAN Mac has dual NICs on the same /24.**
+  en0 (Wi-Fi) at `192.168.20.209` and en34 (USB-C virtual
+  ethernet to a *second* ATEM, the Mini Extreme ISO G2) at
+  `192.168.20.177`. Side-effect: ICMP "no route to host" to
+  same-subnet neighbors even when TCP/UDP works — `ping`
+  is a misleading reachability test on this machine; use
+  `nc -zv host port` instead. Also, the `monitor_iface`
+  auto-pick chose en0 unconditionally; for some setups
+  en34 might be the right pick. Better selection UX is in
+  Session 7 priorities.
+
+- **API key was pasted into the conversation again.** Same
+  warning as Session 5: treat the key shared this session as
+  compromised, rotate it, and prefer env-var-from-launcher
+  flows for future sessions.
+
+### Session 7 priorities (next pickup)
 
 User-stated priorities, in roughly intended order. The first
-one HAS to happen on the production-LAN Mac (anywhere with line
-of sight to `192.168.20.1`); the others can happen on any dev
-machine.
+four came out of operator feedback during Session 6 — the
+v0.2.0 dashboard is "scattered" and needs to feel like a single
+coherent tool, not three loosely-coupled views. The remainder
+are carry-overs.
 
-1. **Live UDM + per-key validation on the production-LAN Mac.**
-   The Session 5 v0.2.0 atem-net-diag tarball is at
-   `~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`
-   (sync to whichever Mac is on `192.168.20.x`). Run with
-   `UDM_API_KEY=...` set, hit `/api/state`, and verify:
-   - `unifi_status.state == "connected"` (not stuck at
-     `connecting` or returning `failed`).
-   - `unifi_clients` has the expected number of devices on
-     the LAN, including the ATEM at `is_atem: true`.
-   - Per-client `tx_kbps` / `rx_kbps` look reasonable
-     (idle clients ≈ 0, active clients non-zero).
-   - During a real stream from the parent app, the Live
-     streams card shows the flow AND the SID parser pulls
-     out the BMD `u=KEY` (rendered on the card as `key:
-     <KEY>`).
-   If UDM polling fails, the most likely fixes are in
-   `tools/atem-net-diag/src/unifi.rs`: endpoint path
-   (legacy vs integration), response field names (snake_case
-   vs camelCase, alias via `#[serde(rename = "...")]`), or
-   integration-vs-legacy fallback ordering. Iterate, push
-   to a `udm-live-fixes` branch, drop a fresh tarball.
+1. **Unify the dashboard around the client list with
+   drill-down.** The Session 5 layout has bandwidth, flows, and
+   probe controls living in separate cards — operator has to
+   mentally join them. Replace with: click any client row →
+   inline expand showing everything that's known about that
+   device (UDM bandwidth, captured flows touching it, probe
+   history if any, stream key if extracted, per-flow bitrate
+   sparkline). Pin the ATEM to the top of the list,
+   expanded-by-default. "Probe this destination" becomes a
+   button inside the expanded ATEM panel, not a separate card.
+   The Standby probe-history table goes inside the expanded
+   ATEM card so probe outcomes ("just timed out 3.3s ago, key
+   was empty, see why →") sit next to the live state.
 
-2. **Auto mode in atem-net-diag** (deferred from Session 5
-   spec, blocked on #1 above being reliable). Third diag
-   mode where probes run only after N seconds of no observed
-   flow on the configured key/port — combines the safety of
-   Live with the proactive-testing benefit of Standby.
-   Needs per-key correlation to be live + reliable so we
-   can correctly detect "is flow X actually flowing right
-   now?" before deciding to probe.
+2. **Stream identification fallback when SID extraction
+   fails.** Even without per-key correlation, tshark's
+   protocol dissectors can identify SRT vs RTMP vs RTMPS
+   handshakes per `(src_ip, src_port) → (dst_ip, dst_port)`
+   tuple. Count distinct active streams, show per-stream
+   protocol + bitrate + jitter + RTT + packet-loss-from-SRT-
+   control-packets. Reference: Speedify's VPN client surfaces
+   this view ("3 streams: SRT 6.1 Mbps from 1.2.3.4:50001,
+   RTMP 4.2 Mbps from 5.6.7.8:443, ..."). For port-forwarded
+   traffic this is the operator's "is the show actually live
+   right now?" pre-flight check. Most of the plumbing exists
+   (`flows` HashMap in `dashboard.rs`); needs a protocol-tag
+   field per flow + UI surfacing.
 
-3. **Multi-source mode in the main app.** Goal: a single
+3. **Interface picker UX (dual-NIC handling).** When the
+   tool detects multiple interfaces on the configured ATEM's
+   subnet, expose a dropdown in the dashboard config form
+   (currently auto-picks `en0` blindly). Default to the one
+   whose default route handles the ATEM IP. Visually mark
+   which interface is actually carrying ATEM traffic
+   (correlate with `flows` non-empty). Surface a hint when
+   the user is on the "wrong" interface — currently the user
+   has to read the README's switched-LAN section and infer.
+
+4. **Pre-show / during-show broadcast tooling.** The user's
+   actual production day involves port-forwarding streams from
+   the public internet into the ATEM. Useful additions:
+   - **Pre-show panel** with explicit checks: WAN IP detected,
+     port-forward live (try connecting back to your own WAN
+     IP:1935 from inside the LAN — round-trip via NAT-loopback
+     or via a remote helper if NAT-loopback is disabled),
+     ATEM input slots free, UDM polling healthy, "all green"
+     banner.
+   - **During-show health.** Per-stream jitter, loss,
+     retransmits from SRT NAK/ACK control packets (which
+     tshark exposes in its SRT dissector). "Stream went dark"
+     detection (last_seen aging). WAN-side bandwidth at the
+     UDM (separate `stat/dpi` or similar endpoint) so we can
+     show "WAN ingress is 6 Mbps, ATEM RX is 6 Mbps,
+     accounted for" vs "WAN says 12 Mbps but ATEM only sees
+     5 — check NAT/forwarding".
+   This is the largest piece — likely needs to break into
+   sub-tasks, but #1 of those is the pre-show panel since it
+   prevents the most operator pain.
+
+5. **Push `udm-live-fixes`, merge, rebuild tarball.**
+   Mechanical, carries over from Session 6. Until done, the
+   shipped binary has wrong-direction + jumpy bandwidth.
+
+6. **Auto mode in atem-net-diag** (deferred from Session 5
+   spec, was Session 6 #2). Third diag mode where probes run
+   only after N seconds of no observed flow on the configured
+   key/port — combines the safety of Live with the proactive-
+   testing benefit of Standby. Needs per-key correlation to
+   be live + reliable, which depends on getting the tool onto
+   a machine that actually sees the traffic (Session 7 #2 +
+   #3 progress is a prerequisite).
+
+7. **Multi-source mode in the main app.** Goal: a single
    user pushes 2-4 different sources to 2-4 different ATEM
    inputs simultaneously. Two paths, both should ship:
    - **Multiple instances** (already supported via
@@ -744,7 +903,7 @@ machine.
      comfortably since each encode is ~5% CPU)
    This is significant work — probably its own session.
 
-4. **Test the Windows .exe build on real Windows hardware.**
+8. **Test the Windows .exe build on real Windows hardware.**
    alpha.7 release pipeline (already configured) should
    produce a working Windows installer once the NDI silent-
    install fix lands. After that, drive the install through
@@ -753,7 +912,7 @@ machine.
    (Processing.NDI.Lib.x64.dll bundled? sidecar? PATH?),
    Tauri's Windows window chrome.
 
-5. **Custom audio for pipe / relay video sources.** Today
+9. **Custom audio for pipe / relay video sources.** Today
    only AVF + NDI video sources support Custom audio mode.
    Pipe (URL/RTSP) and relay (SRT/RTMP listener) video
    sources still fall back to lavfi anullsrc when the user
