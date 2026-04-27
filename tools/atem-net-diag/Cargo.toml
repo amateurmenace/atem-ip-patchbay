@@ -1,8 +1,8 @@
 [package]
 name = "atem-net-diag"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "ATEM SRT/RTMP reachability + connection-state probe — runs on a peer machine on the same LAN as the ATEM and logs whether it's currently accepting connections"
+description = "ATEM network diagnostic — Live (passive UDM polling + tshark capture, default) or Standby (active SRT/RTMP probe). Per-key flow correlation via SRT HSv5 SID extension parsing. Designed for live broadcast monitoring without interfering with the production stream."
 license = "MIT"
 
 [[bin]]
@@ -13,8 +13,18 @@ path = "src/main.rs"
 # Probe + monitor logic uses std-only (shells out to ffmpeg /
 # tshark and parses their output). The --ui mode adds a small
 # blocking HTTP server (tiny_http, ~30KB) and JSON serialization
-# (serde+serde_json) for the live-dashboard API endpoint. Total
-# binary still under 5 MB after stripping.
+# (serde+serde_json) for the live-dashboard API endpoint. The
+# UniFi-API integration adds ureq + rustls for HTTPS calls to the
+# UDM (which ships with a self-signed cert by default). Total
+# stripped binary stays under ~7 MB.
 tiny_http = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# UniFi-API client: ureq for HTTPS, native-tls so we can opt out
+# of cert verification per-host (the UDM ships with a self-signed
+# cert by default; users don't typically swap it out for a
+# real one on a LAN-only controller). cookies feature is needed
+# for the local-account login flow (TOKEN cookie + CSRF dance);
+# even with API-key auth it's harmless.
+ureq = { version = "2", default-features = false, features = ["native-tls", "json", "cookies"] }
+native-tls = "0.2"

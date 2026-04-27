@@ -29,6 +29,7 @@
 //!     filter and parses HSv5 control packets.
 
 mod dashboard;
+mod unifi;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
@@ -43,6 +44,17 @@ const DEFAULT_SUMMARY_EVERY: u32 = 12;
 /// receiver; longer values just slow down the loop when the
 /// destination is genuinely down.
 const PROBE_TIMEOUT_US: &str = "3000000";
+
+// Default target: the user's actual ATEM. Pre-populating these in
+// the dashboard form means a bare `--ui` launch is immediately
+// useful against the production destination — no copy-pasting an
+// IP from the patchbay's UI to start monitoring. UDM correlation
+// uses the MAC (UniFi keys clients by MAC primarily), so even if
+// the ATEM gets a new DHCP lease the right device is still found.
+pub(crate) const DEFAULT_ATEM_IP: &str = "192.168.20.189";
+pub(crate) const DEFAULT_ATEM_MAC: &str = "7c:2e:0d:21:ab:fe";
+pub(crate) const DEFAULT_ATEM_PORT: u16 = 1935;
+pub(crate) const DEFAULT_UDM_HOST: &str = "https://192.168.20.1";
 
 fn main() {
     let cli = match Cli::parse() {
@@ -332,6 +344,15 @@ pub(crate) fn tshark_field_args(iface: &str, filter: &str) -> Vec<String> {
         "-e", "srt.rtt",
         "-e", "srt.rttvar",
         "-e", "srt.bufavail",
+        // Raw UDP payload — populated for every UDP frame as hex.
+        // We only parse it when we suspect an SRT control packet
+        // (srt.iscontrol == 1) carrying a handshake with the SID
+        // extension. Wireshark's SRT dissector exposes only a few
+        // SRT fields; the streamid extension isn't among them, so
+        // we extract it from the raw bytes ourselves. Cost: ~1500
+        // bytes of stdout per UDP frame, which is bounded and
+        // tolerable for diagnostic use.
+        "-e", "udp.payload",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -492,6 +513,13 @@ pub(crate) struct PacketInfo {
     /// control packet from this frame. Receivers send ACKs every
     /// ~10ms during a healthy stream so these tick frequently.
     pub srt: Option<SrtAck>,
+    /// Stream ID extracted from the SRT HSv5 conclusion handshake's
+    /// SID extension (extension type 0x0005). Present only on the
+    /// rare frames that carry the conclusion handshake — once per
+    /// connection. The dashboard caches this against the flow key
+    /// so subsequent data packets on the same flow can render the
+    /// stream ID without re-parsing the handshake.
+    pub stream_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -597,7 +625,7 @@ impl FlowStats {
 }
 
 pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
-    // 15 fields separated by commas (was 9 before SRT extension):
+    // 16 fields separated by commas (was 15 before SID parsing):
     //   0  time.relative
     //   1  ip.src
     //   2  tcp.srcport
@@ -613,6 +641,9 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
     //  12  srt.rtt          (ACKD RTT, microseconds)
     //  13  srt.rttvar       (ACKD RTT variance, microseconds)
     //  14  srt.bufavail     (receiver buffer available, pkts)
+    //  15  udp.payload      (raw UDP payload as hex; we parse it
+    //                       only when srt.iscontrol == 1 to find
+    //                       the streamid in HSv5 conclusion HS)
     let fields: Vec<&str> = line.split(',').collect();
     if fields.len() < 9 {
         return None;
@@ -640,7 +671,7 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
     // recognized as SRT — non-SRT UDP and TCP packets have empty
     // strings for these slots. Treat any populated field as a
     // signal that this is an SRT control packet worth recording.
-    let srt = if fields.len() >= 15 {
+    let (srt, is_srt_control) = if fields.len() >= 15 {
         let is_control = parse_tshark_bool(fields[9]);
         let bw = fields[10].trim().parse::<u32>().ok();
         let rate = fields[11].trim().parse::<u32>().ok();
@@ -654,16 +685,37 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
             || rttvar.is_some()
             || bufavail.is_some()
         {
-            Some(SrtAck {
-                is_control: is_control.unwrap_or(false),
-                bw_pkts_s: bw,
-                rate_pkts_s: rate,
-                rtt_us: rtt,
-                rttvar_us: rttvar,
-                buf_avail_pkts: bufavail,
-            })
+            (
+                Some(SrtAck {
+                    is_control: is_control.unwrap_or(false),
+                    bw_pkts_s: bw,
+                    rate_pkts_s: rate,
+                    rtt_us: rtt,
+                    rttvar_us: rttvar,
+                    buf_avail_pkts: bufavail,
+                }),
+                is_control.unwrap_or(false),
+            )
         } else {
+            (None, false)
+        }
+    } else {
+        (None, false)
+    };
+
+    // Streamid extraction — only attempted when this is an SRT
+    // control packet AND we have payload bytes. Most control
+    // packets are ACKD/NAK (carry no SID); only the conclusion
+    // handshake does. parse_srt_handshake_streamid returns None
+    // for any other control packet, so the cost is one early-out
+    // header check per ACK. Cheap.
+    let stream_id = if is_srt_control && fields.len() >= 16 {
+        let payload_hex = fields[15].trim();
+        if payload_hex.is_empty() {
             None
+        } else {
+            let payload = hex_decode(payload_hex);
+            parse_srt_handshake_streamid(&payload)
         }
     } else {
         None
@@ -678,7 +730,147 @@ pub(crate) fn parse_tshark_line(line: &str) -> Option<PacketInfo> {
         protocol,
         bytes,
         srt,
+        stream_id,
     })
+}
+
+/// Parse the streamid from an SRT HSv5 conclusion handshake's SID
+/// extension. Returns None when the payload is too short, isn't a
+/// control packet, isn't a handshake, isn't a conclusion, or has
+/// no SID extension.
+///
+/// Wire format (per RFC 8723 §3.2.1 and SRT spec):
+/// - Control packet header (16 bytes):
+///   - Word 0: bit 0 = control flag (1), bits 1-15 = control type,
+///     bits 16-31 = subtype (typically 0 for handshake)
+///   - Word 1: type-specific
+///   - Word 2: timestamp
+///   - Word 3: destination socket ID
+/// - Handshake body (48 bytes):
+///   - +0  4B: version (5 for HSv5)
+///   - +4  2B: encryption field
+///   - +6  2B: extension field bitmap
+///   - +8  4B: initial seq #
+///   - +12 4B: MTU
+///   - +16 4B: max flow window
+///   - +20 4B: handshake type (0xFFFFFFFF = conclusion)
+///   - +24 4B: SRT socket ID
+///   - +28 4B: SYN cookie
+///   - +32 16B: peer IP
+/// - Extensions follow at body offset 48 — only on conclusion
+///   handshakes with the SID bit (0x04 in the extension bitmap).
+///   Each extension: 2B type, 2B length-in-words, N*4B data.
+///   SID extension is type 0x0005.
+pub(crate) fn parse_srt_handshake_streamid(payload: &[u8]) -> Option<String> {
+    // Minimum: 16 control header + 48 handshake body + 4 ext header + 4 ext data = 72 bytes.
+    if payload.len() < 72 {
+        return None;
+    }
+    // Control bit must be set.
+    if payload[0] & 0x80 == 0 {
+        return None;
+    }
+    // Control type — first 16 bits with control bit masked off.
+    // Type 0 = handshake.
+    let control_type = u16::from_be_bytes([payload[0] & 0x7F, payload[1]]);
+    if control_type != 0 {
+        return None;
+    }
+    let body = &payload[16..];
+    if body.len() < 48 {
+        return None;
+    }
+    let version = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    if version != 5 {
+        return None;
+    }
+    // Handshake type at body+20 — conclusion is -1 (0xFFFFFFFF).
+    let hs_type = u32::from_be_bytes([body[20], body[21], body[22], body[23]]);
+    if hs_type != 0xFFFFFFFF {
+        return None;
+    }
+    // Walk extensions starting at body+48.
+    let mut ext = &body[48..];
+    while ext.len() >= 4 {
+        let ext_type = u16::from_be_bytes([ext[0], ext[1]]);
+        let ext_len_words = u16::from_be_bytes([ext[2], ext[3]]) as usize;
+        let ext_data_len = ext_len_words.saturating_mul(4);
+        if ext.len() < 4 + ext_data_len {
+            break;
+        }
+        if ext_type == 0x0005 {
+            // SID extension — bytes are 4-byte words with bytes
+            // reversed per word from the original UTF-8 string.
+            let sid_bytes = &ext[4..4 + ext_data_len];
+            return decode_srt_sid(sid_bytes);
+        }
+        ext = &ext[4 + ext_data_len..];
+    }
+    None
+}
+
+/// Decode an SRT SID payload into a UTF-8 string. Each 4-byte word
+/// in the payload is byte-reversed from the source string (per RFC
+/// 8723 §3.2.1.1.3); we reverse each chunk back, concatenate, and
+/// strip trailing nulls (string padding to 4-byte alignment).
+pub(crate) fn decode_srt_sid(bytes: &[u8]) -> Option<String> {
+    let mut decoded = Vec::with_capacity(bytes.len());
+    for chunk in bytes.chunks(4) {
+        let mut word: Vec<u8> = chunk.to_vec();
+        word.reverse();
+        decoded.extend_from_slice(&word);
+    }
+    while decoded.last() == Some(&0) {
+        decoded.pop();
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Extract the BMD stream key from a streamid string. BMD-flavored
+/// streamids look like `#!::bmd_uuid=UUID,bmd_name=NAME,u=KEY` —
+/// the key is the value of the `u=` field. Returns None when the
+/// streamid isn't BMD-flavored or the key field is missing/empty.
+pub(crate) fn extract_bmd_key(streamid: &str) -> Option<String> {
+    let body = streamid.strip_prefix("#!::").unwrap_or(streamid);
+    for field in body.split(',') {
+        if let Some(val) = field.strip_prefix("u=") {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Decode a hex string (lowercase or uppercase, optionally with
+/// `:` separators) into bytes. Returns an empty Vec on any
+/// non-hex character (no errors — tshark sometimes emits
+/// truncated payloads which we tolerate).
+pub(crate) fn hex_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut nibble: Option<u8> = None;
+    for &b in bytes {
+        if let Some(d) = hex_digit(b) {
+            match nibble.take() {
+                Some(hi) => out.push((hi << 4) | d),
+                None => nibble = Some(d),
+            }
+        }
+        // Non-hex (`:`, whitespace) just skipped — no nibble reset
+        // because tshark sometimes uses `:` between every byte.
+    }
+    out
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_tshark_bool(field: &str) -> Option<bool> {
@@ -924,13 +1116,14 @@ impl Cli {
         }
         // Monitor mode short-circuits the URL requirement — tshark
         // captures from a network interface, not from a remote URL.
-        // UI mode also tolerates a missing URL: the dashboard's
-        // config form is the canonical way to set the target, so
-        // `atem-net-diag --ui` alone is a valid bare launch (the
-        // probe loop sleeps until the user submits the form).
+        // UI mode also tolerates a missing URL: the dashboard
+        // pre-fills the configured ATEM target as the default, but
+        // the active-probe loop is gated by the diag mode (Live by
+        // default = no probes), so the URL existing here doesn't
+        // mean we'll hammer the destination on launch.
         if (monitor_iface.is_some() || ui_port.is_some()) && url.is_none() {
             return Ok(Self {
-                url: "monitor://".into(),
+                url: format!("srt://{DEFAULT_ATEM_IP}:{DEFAULT_ATEM_PORT}"),
                 keys,
                 interval,
                 summary_every,
@@ -1051,3 +1244,106 @@ fn clock_now() -> String {
 // process at SIGINT is exactly the right behavior for a probe
 // loop. No need to pull in the `ctrlc` crate or a libc dep for a
 // graceful "stopped" log line.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_sid_single_word() {
+        // "abcd" is stored byte-reversed per 4-byte word, so the
+        // wire bytes are [d, c, b, a]. Decode reverses each word
+        // back to UTF-8 order.
+        let bytes = [b'd', b'c', b'b', b'a'];
+        assert_eq!(decode_srt_sid(&bytes), Some("abcd".to_string()));
+    }
+
+    #[test]
+    fn decode_sid_with_null_padding() {
+        // "abcde" pads to 8 bytes (2 words). Word 1 = "abcd" sent
+        // as "dcba"; word 2 = "e\0\0\0" sent as "\0\0\0e". After
+        // reversal we get "abcde\0\0\0" then strip trailing nulls.
+        let bytes = [b'd', b'c', b'b', b'a', 0, 0, 0, b'e'];
+        assert_eq!(decode_srt_sid(&bytes), Some("abcde".to_string()));
+    }
+
+    #[test]
+    fn extract_bmd_key_full_streamid() {
+        let s = "#!::bmd_uuid=d1a90517-1c00-4e57-9fab-617465616d64,bmd_name=ATEM-net-diag,u=q1ry-abcd-1234";
+        assert_eq!(extract_bmd_key(s), Some("q1ry-abcd-1234".to_string()));
+    }
+
+    #[test]
+    fn extract_bmd_key_no_prefix() {
+        assert_eq!(extract_bmd_key("u=onlykey"), Some("onlykey".to_string()));
+    }
+
+    #[test]
+    fn extract_bmd_key_missing() {
+        assert_eq!(extract_bmd_key("no key here"), None);
+        assert_eq!(extract_bmd_key("user=foo,name=bar"), None);
+    }
+
+    #[test]
+    fn hex_decode_basic() {
+        assert_eq!(hex_decode("64636261"), vec![0x64, 0x63, 0x62, 0x61]);
+        assert_eq!(hex_decode("64:63:62:61"), vec![0x64, 0x63, 0x62, 0x61]);
+        assert_eq!(hex_decode(""), Vec::<u8>::new());
+        // Mixed case + odd characters tolerated; `:` separator is
+        // ignored whether single or repeated.
+        assert_eq!(hex_decode("FF::aa"), vec![0xFF, 0xAA]);
+    }
+
+    #[test]
+    fn parse_full_hsv5_conclusion_with_sid() {
+        // Build a synthetic SRT HSv5 conclusion handshake control
+        // packet carrying a SID extension with streamid "abcd".
+        let mut packet = Vec::new();
+        // Control packet header — 16 bytes.
+        packet.extend_from_slice(&[0x80, 0x00]); // control bit + type 0 (handshake)
+        packet.extend_from_slice(&[0x00, 0x00]); // subtype
+        packet.extend_from_slice(&[0u8; 4]); // type-specific
+        packet.extend_from_slice(&[0u8; 4]); // timestamp
+        packet.extend_from_slice(&[0u8; 4]); // dst socket ID
+        // Handshake body — 48 bytes.
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x05]); // version 5
+        packet.extend_from_slice(&[0x00, 0x00]); // encryption
+        packet.extend_from_slice(&[0x00, 0x04]); // ext flag with SID bit
+        packet.extend_from_slice(&[0u8; 4]); // initial seq
+        packet.extend_from_slice(&[0x00, 0x00, 0x05, 0xDC]); // MTU 1500
+        packet.extend_from_slice(&[0x00, 0x00, 0x20, 0x00]); // max flow window
+        packet.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // hs type = conclusion
+        packet.extend_from_slice(&[0u8; 4]); // SRT socket ID
+        packet.extend_from_slice(&[0u8; 4]); // SYN cookie
+        packet.extend_from_slice(&[0u8; 16]); // peer IP
+        // SID extension.
+        packet.extend_from_slice(&[0x00, 0x05]); // ext type = SID
+        packet.extend_from_slice(&[0x00, 0x01]); // length = 1 word
+        packet.extend_from_slice(&[b'd', b'c', b'b', b'a']); // "abcd" byte-swapped
+        assert_eq!(
+            parse_srt_handshake_streamid(&packet),
+            Some("abcd".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_rejects_non_handshake_control() {
+        // Control bit set but type ≠ 0 — should reject early.
+        let mut packet = vec![0x80, 0x02]; // control + type 2 (ACK)
+        packet.extend_from_slice(&[0u8; 70]);
+        assert_eq!(parse_srt_handshake_streamid(&packet), None);
+    }
+
+    #[test]
+    fn parse_rejects_data_packet() {
+        // Control bit clear — data packet, not control.
+        let packet = vec![0x00; 100];
+        assert_eq!(parse_srt_handshake_streamid(&packet), None);
+    }
+
+    #[test]
+    fn parse_rejects_too_short() {
+        assert_eq!(parse_srt_handshake_streamid(&[]), None);
+        assert_eq!(parse_srt_handshake_streamid(&[0x80; 16]), None);
+    }
+}
