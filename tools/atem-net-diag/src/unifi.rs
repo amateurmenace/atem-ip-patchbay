@@ -35,7 +35,10 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use ureq::Agent;
 
-use crate::dashboard::{DashboardState, UnifiClientSnapshot, UnifiStatus, WanSnapshot, WanStatus};
+use crate::dashboard::{
+    AlarmSnapshot, DashboardState, SwitchPortSnapshot, SwitchSnapshot, SystemStatus,
+    UnifiClientSnapshot, UnifiStatus, WanSnapshot, WanStatus,
+};
 
 /// How often to poll. Faster = tighter bandwidth resolution but
 /// more load on the UDM. 2s is a good live-monitoring balance —
@@ -589,6 +592,20 @@ struct HealthSubsystem {
     latency: Option<u64>,
     #[serde(default)]
     status: Option<String>,
+    /// Gateway-side runtime stats. Strings in the UDM response
+    /// because the controller stringifies floats like "19.2".
+    #[serde(default, rename = "gw_system-stats")]
+    gw_system_stats: Option<GwSysStats>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct GwSysStats {
+    #[serde(default)]
+    cpu: Option<String>,
+    #[serde(default)]
+    mem: Option<String>,
+    #[serde(default)]
+    uptime: Option<String>,
 }
 
 pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
@@ -639,6 +656,12 @@ pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Das
                         while s.wan_download_history.len() > WAN_HISTORY_LEN {
                             s.wan_download_history.pop_front();
                         }
+                        let parse_pct = |s: &Option<String>| -> Option<f64> {
+                            s.as_deref().and_then(|x| x.parse().ok())
+                        };
+                        let parse_u64 = |s: &Option<String>| -> Option<u64> {
+                            s.as_deref().and_then(|x| x.parse().ok())
+                        };
                         s.wan_snapshot = Some(WanSnapshot {
                             upload_kbps,
                             download_kbps,
@@ -647,6 +670,9 @@ pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Das
                             isp_org: w.isp_organization.clone(),
                             wan_latency_ms: www.and_then(|w| w.latency),
                             wan_status: w.status.clone(),
+                            gw_cpu_pct: w.gw_system_stats.as_ref().and_then(|g| parse_pct(&g.cpu)),
+                            gw_mem_pct: w.gw_system_stats.as_ref().and_then(|g| parse_pct(&g.mem)),
+                            gw_uptime_secs: w.gw_system_stats.as_ref().and_then(|g| parse_u64(&g.uptime)),
                         });
                         s.wan_status = WanStatus::Connected { last_poll_at: now };
                         s.last_wan_poll_at = now;
@@ -682,3 +708,286 @@ pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Das
         }
     }
 }
+
+
+// ---- Switches + alarms (slower-cadence system poll) ---------------------
+//
+// These endpoints change less frequently than client / WAN throughput,
+// so polling them at 5s is plenty. One thread iterates through both
+// per cycle, which keeps the UDM API call rate predictable.
+// Events endpoint (/list/event, /stat/event) was tried with multiple
+// query-param shapes — all returned 400/404 against this UniFi OS 9
+// controller with a Local Controller API key. Likely gated behind
+// admin/superadmin permissions; left as a TODO.
+// DPI endpoint returned empty data (DPI feature is opt-in per-site
+// and not enabled on this controller). Left as a TODO.
+
+const SYSTEM_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize)]
+struct DeviceEnvelope {
+    data: Vec<RawDevice>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawDevice {
+    #[serde(default)] mac: String,
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] hostname: Option<String>,
+    #[serde(default)] model: Option<String>,
+    #[serde(default, rename = "type")] dtype: String, // "usw", "uap", "udm"
+    #[serde(default)] uptime: Option<u64>,
+    #[serde(default, rename = "system-stats")] system_stats: Option<DevSysStats>,
+    #[serde(default)] port_table: Vec<RawPort>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSysStats {
+    #[serde(default)] cpu: Option<String>,
+    #[serde(default)] mem: Option<String>,
+    #[serde(default)] uptime: Option<String>,
+}
+
+/// Optionally-numeric / optionally-string field. The UDM is
+/// inconsistent — some firmware versions return SFP optical metrics
+/// as JSON strings ("66.765"), others as JSON numbers. Accept both.
+#[derive(Default, Debug, Clone)]
+struct Numericish(Option<f64>);
+
+impl<'de> Deserialize<'de> for Numericish {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(Numericish(match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Number(n) => n.as_f64(),
+            _ => None,
+        }))
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct RawPort {
+    #[serde(default)] port_idx: u32,
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] media: Option<String>,
+    #[serde(default)] speed: Option<u32>,
+    #[serde(default)] up: bool,
+    #[serde(default)] enable: bool,
+    #[serde(default, rename = "tx_bytes-r")] tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")] rx_bytes_r: f64,
+    #[serde(default)] tx_errors: u64,
+    #[serde(default)] rx_errors: u64,
+    #[serde(default)] tx_dropped: u64,
+    #[serde(default)] rx_dropped: u64,
+    #[serde(default)] link_down_count: u64,
+    #[serde(default)] last_connection: Option<LastConnection>,
+    #[serde(default)] sfp_temperature: Numericish,
+    #[serde(default)] sfp_txpower: Numericish,
+    #[serde(default)] sfp_rxpower: Numericish,
+}
+
+#[derive(Deserialize, Default)]
+struct LastConnection {
+    #[serde(default)] mac: Option<String>,
+    #[serde(default)] ip: Option<String>,
+    #[serde(default)] connected: bool,
+}
+
+#[derive(Deserialize)]
+struct AlarmEnvelope {
+    data: Vec<RawAlarm>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawAlarm {
+    #[serde(default, rename = "_id")] id: Option<String>,
+    #[serde(default)] key: Option<String>,
+    #[serde(default)] msg: Option<String>,
+    #[serde(default)] subsystem: Option<String>,
+    #[serde(default)] time: Option<u64>,
+    #[serde(default)] archived: bool,
+    #[serde(default)] severity: Option<String>,
+}
+
+pub fn system_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
+    let mut client = match UnifiClient::new(host, creds) {
+        Ok(c) => c,
+        Err(e) => {
+            let mut s = state.lock().unwrap();
+            s.system_status = SystemStatus::Failed { error: format!("init: {e}"), last_attempt: now_secs() };
+            return;
+        }
+    };
+    if let Err(e) = client.login() {
+        let mut s = state.lock().unwrap();
+        s.system_status = SystemStatus::Failed { error: format!("login: {e}"), last_attempt: now_secs() };
+        return;
+    }
+    {
+        let mut s = state.lock().unwrap();
+        s.system_thread_alive = true;
+        s.system_status = SystemStatus::Connecting;
+    }
+
+    let atem_mac_lower: Option<String> = state.lock().unwrap().config.atem.mac.as_deref().map(|m| m.to_ascii_lowercase());
+
+    loop {
+        let mut last_err: Option<String> = None;
+
+        // /stat/device → switches + APs + UDM. We surface USWs (port
+        // tables) and the UDM (just for the device-level system
+        // stats which we already have via WAN health, so we mostly
+        // ignore that here). UAPs have no port_table.
+        match client.get("/proxy/network/api/s/default/stat/device") {
+            Ok(resp) => match resp.into_json::<DeviceEnvelope>() {
+                Ok(env) => {
+                    let mut switches: Vec<SwitchSnapshot> = Vec::new();
+                    for dev in env.data {
+                        if dev.dtype != "usw" { continue; }
+                        let cpu_pct = dev.system_stats.as_ref().and_then(|s| s.cpu.as_deref().and_then(|x| x.parse::<f64>().ok()));
+                        let mem_pct = dev.system_stats.as_ref().and_then(|s| s.mem.as_deref().and_then(|x| x.parse::<f64>().ok()));
+                        let mut ports: Vec<SwitchPortSnapshot> = Vec::new();
+                        for p in &dev.port_table {
+                            // Skip totally idle disabled ports for the operator-facing list.
+                            if !p.enable && !p.up && p.tx_bytes_r == 0.0 && p.rx_bytes_r == 0.0 { continue; }
+                            // Only surface a connected_mac/ip when the port
+                            // is actually up AND the last_connection record
+                            // says it's currently connected. Otherwise
+                            // last_connection is just history (the MAC that
+                            // *used to* be on this port) which produces
+                            // false-positive ATEM matches on dead ports.
+                            let lc_active = p.last_connection.as_ref().map(|c| c.connected).unwrap_or(false) && p.up;
+                            let connected_mac = if lc_active {
+                                p.last_connection.as_ref().and_then(|c| c.mac.clone()).map(|m| m.to_ascii_lowercase())
+                            } else { None };
+                            let connected_ip = if lc_active {
+                                p.last_connection.as_ref().and_then(|c| c.ip.clone())
+                            } else { None };
+                            let is_atem_port = atem_mac_lower.as_deref().zip(connected_mac.as_deref())
+                                .map(|(a, c)| a == c).unwrap_or(false);
+                            ports.push(SwitchPortSnapshot {
+                                port_idx: p.port_idx,
+                                name: p.name.clone().unwrap_or_else(|| format!("Port {}", p.port_idx)),
+                                media: p.media.clone(),
+                                speed_mbps: p.speed.unwrap_or(0),
+                                up: p.up,
+                                tx_kbps: (p.tx_bytes_r * 8.0 / 1000.0) as u64,
+                                rx_kbps: (p.rx_bytes_r * 8.0 / 1000.0) as u64,
+                                tx_errors: p.tx_errors,
+                                rx_errors: p.rx_errors,
+                                tx_dropped: p.tx_dropped,
+                                rx_dropped: p.rx_dropped,
+                                link_down_count: p.link_down_count,
+                                connected_mac,
+                                connected_ip,
+                                is_atem_port,
+                                sfp_temp_c: p.sfp_temperature.0,
+                                sfp_tx_dbm: p.sfp_txpower.0,
+                                sfp_rx_dbm: p.sfp_rxpower.0,
+                            });
+                        }
+                        switches.push(SwitchSnapshot {
+                            mac: dev.mac.clone(),
+                            name: dev.name.clone().or(dev.hostname.clone()).unwrap_or_else(|| dev.mac.clone()),
+                            model: dev.model.clone().unwrap_or_default(),
+                            cpu_pct,
+                            mem_pct,
+                            uptime_secs: dev.uptime,
+                            ports,
+                        });
+                    }
+                    state.lock().unwrap().switches = switches;
+                }
+                Err(e) => last_err = Some(format!("device JSON: {e}")),
+            },
+            Err(e) => last_err = Some(format!("device fetch: {e}")),
+        }
+
+        // /list/alarm → unarchived alarms. Empty list when healthy.
+        match client.get("/proxy/network/api/s/default/list/alarm") {
+            Ok(resp) => match resp.into_json::<AlarmEnvelope>() {
+                Ok(env) => {
+                    let alarms: Vec<AlarmSnapshot> = env.data.into_iter()
+                        .filter(|a| !a.archived)
+                        .map(|a| AlarmSnapshot {
+                            key: a.key.unwrap_or_default(),
+                            msg: a.msg.unwrap_or_default(),
+                            subsystem: a.subsystem.unwrap_or_default(),
+                            time: a.time.unwrap_or(0),
+                            severity: a.severity,
+                        })
+                        .collect();
+                    state.lock().unwrap().alarms = alarms;
+                }
+                Err(e) => last_err = Some(format!("alarm JSON: {e}")),
+            },
+            Err(e) => last_err = Some(format!("alarm fetch: {e}")),
+        }
+
+        let now = now_secs();
+        let mut s = state.lock().unwrap();
+        if let Some(e) = last_err {
+            s.system_status = SystemStatus::Failed { error: e, last_attempt: now };
+        } else {
+            s.system_status = SystemStatus::Connected { last_poll_at: now };
+            s.last_system_poll_at = now;
+        }
+        drop(s);
+        std::thread::sleep(SYSTEM_POLL_INTERVAL);
+    }
+}
+
+// ---- Reverse DNS worker --------------------------------------------------
+//
+// Resolves source IPs to PTR records using the system `host` command.
+// Spawned once at startup; reads from a queue of pending IPs the main
+// poller fills as new flow source IPs are seen. Cached in a HashMap on
+// DashboardState; stays for the lifetime of the binary.
+//
+// Rationale for shelling out: avoids a heavy-weight DNS resolver crate
+// and keeps the binary surface small. `host -W 2` enforces a 2-second
+// per-query timeout so a slow public resolver does not stall the worker.
+
+pub fn rdns_worker_loop(state: Arc<Mutex<DashboardState>>) {
+    use std::process::Command;
+    loop {
+        // Pop the next un-resolved IP off the in-progress set, or
+        // sleep when there is nothing to do. We intentionally do
+        // not lock the mutex while shelling out.
+        let next: Option<String> = {
+            let s = state.lock().unwrap();
+            s.rdns_pending.iter().next().cloned()
+        };
+        let Some(ip) = next else {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        };
+
+        let resolved: Option<String> = Command::new("host")
+            .args(["-W", "2", &ip])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if !out.status.success() { return None; }
+                let s = String::from_utf8_lossy(&out.stdout);
+                // host output: "1.2.3.4.in-addr.arpa domain name pointer foo.example.com."
+                for line in s.lines() {
+                    if let Some(idx) = line.find("domain name pointer ") {
+                        let name = &line[idx + "domain name pointer ".len()..];
+                        let name = name.trim().trim_end_matches('.').to_string();
+                        if !name.is_empty() { return Some(name); }
+                    }
+                }
+                None
+            });
+
+        let mut s = state.lock().unwrap();
+        s.rdns_cache.insert(ip.clone(), resolved);
+        s.rdns_pending.remove(&ip);
+    }
+}
+

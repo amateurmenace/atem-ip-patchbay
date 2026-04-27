@@ -649,6 +649,162 @@
       font-size: 11px; font-weight: 500; cursor: pointer;
     }
     .key-add-form button:hover { background: rgba(78,167,255,0.25); }
+
+    /* Collapsible cards. Click the h2 → toggle the body. The
+       summary span next to the title shows essential info in the
+       collapsed state so the operator doesn't have to expand to
+       see what's there. */
+    .card.collapsible h2 {
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card.collapsible h2:hover { color: var(--accent); }
+    .card.collapsible h2 .card-summary {
+      flex: 1;
+      text-transform: none;
+      letter-spacing: normal;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 400;
+      font-family: "SF Mono", Menlo, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .card.collapsible h2 .chevron {
+      font-size: 11px;
+      color: var(--muted-2);
+      transition: transform 0.15s ease;
+    }
+    .card.collapsible.expanded h2 .chevron { transform: rotate(180deg); }
+    .card.collapsible .card-body { display: none; }
+    .card.collapsible.expanded .card-body { display: block; }
+
+    /* Show-more button at the bottom of the clients list. */
+    .clients-show-more {
+      margin: 8px auto 0;
+      display: block;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 6px 14px;
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .clients-show-more:hover {
+      color: var(--text);
+      border-color: rgba(78,167,255,0.30);
+    }
+
+    /* Active alarms banner — red, only rendered when alarms array
+       has entries. Sits below the pre-show banner. */
+    .alarms-banner {
+      grid-column: 1 / -1;
+      margin: 0 16px 12px;
+      padding: 10px 14px;
+      background: rgba(255,109,98,0.10);
+      border: 1px solid rgba(255,109,98,0.35);
+      border-radius: 7px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .alarms-banner-head {
+      font-size: 12px; font-weight: 600;
+      color: var(--bad);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .alarm-row {
+      font-size: 12px; color: var(--text);
+      display: grid;
+      grid-template-columns: 100px 1fr 80px;
+      gap: 8px;
+    }
+    .alarm-row .alarm-time { color: var(--muted); font-family: "SF Mono", Menlo, monospace; }
+    .alarm-row .alarm-subsystem { color: var(--muted-2); text-align: right; font-size: 11px; }
+
+    /* Switch port utilization card. */
+    .switches-grid {
+      display: flex; flex-direction: column; gap: 16px;
+      margin-top: 8px;
+    }
+    .switch-block {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .switch-block-head {
+      display: flex; align-items: baseline; gap: 12px;
+      margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .switch-block-head .name {
+      font-weight: 600; color: var(--text);
+      font-size: 13px;
+    }
+    .switch-block-head .model {
+      color: var(--muted-2); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .switch-block-head .stats {
+      margin-left: auto;
+      color: var(--muted); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .ports-table {
+      display: grid;
+      grid-template-columns: 50px 1fr 70px 75px 75px 70px 1fr;
+      gap: 4px 10px;
+      font-size: 11px;
+      align-items: baseline;
+    }
+    .ports-table .ports-head {
+      color: var(--muted-2);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      font-size: 10px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      margin-bottom: 4px;
+    }
+    .port-row {
+      display: contents;
+    }
+    .port-row > span {
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .port-row.atem > span { background: rgba(247,166,93,0.08); color: var(--text); }
+    .port-row.atem .port-name::before {
+      content: '◉ ';
+      color: #f7a65d;
+    }
+    .port-row.down > span { color: var(--muted-2); }
+    .port-row.has-errors > span { color: var(--bad); }
+    .port-bw { text-align: right; color: var(--accent); }
+    .port-bw.zero { color: var(--muted-2); }
+    .port-meta { color: var(--muted); font-size: 10px; }
+
+    /* Reverse DNS hint on flow cards. */
+    .stream-rdns {
+      color: var(--muted-2);
+      font-size: 10px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+
+    /* Gateway stats row in process health. */
+    .gw-stats {
+      grid-column: 1 / -1;
+      margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      font-size: 11px; color: var(--muted);
+      display: flex; gap: 14px; flex-wrap: wrap;
+    }
+    .gw-stats strong { color: var(--text); font-weight: 500; }
   </style>
 </head>
 <body>
@@ -667,6 +823,13 @@
     <span class="preshow-pills" id="preshow-pills"></span>
   </div>
 
+  <!-- Active alarms — red banner, hidden when zero alarms. Polled
+       from the UDM's /list/alarm endpoint every 5s. -->
+  <div class="alarms-banner" id="alarms-banner" hidden>
+    <div class="alarms-banner-head" id="alarms-banner-head">0 active alarms</div>
+    <div id="alarms-list"></div>
+  </div>
+
   <div class="mode-banner live" id="mode-banner">
     <span class="label" id="mode-banner-label">Mode: LIVE</span>
     <span class="desc" id="mode-banner-desc">
@@ -676,27 +839,57 @@
   </div>
 
   <main>
-    <!-- ATEM target + UDM controller — always visible, drives the rest. -->
-    <section class="card">
-      <h2>ATEM target</h2>
-      <form class="atem-target-form" id="atem-target-form" autocomplete="off">
-        <label>IP
-          <input id="atem-ip-input" type="text" placeholder="192.168.20.189" />
-        </label>
-        <label>MAC <span class="muted-inline">(for UDM lookup)</span>
-          <input id="atem-mac-input" type="text" placeholder="7c:2e:0d:21:ab:fe" />
-        </label>
-        <label>Port
-          <input id="atem-port-input" type="number" min="1" max="65535" placeholder="1935" />
-        </label>
-        <button id="atem-target-apply" type="submit">Save target</button>
-      </form>
-      <div class="config-status" id="atem-target-status"></div>
-      <div class="summary-grid" id="atem-summary" style="margin-top: 6px;">
-        <div class="label">UDM sees</div>
-        <div></div>
-        <div></div>
-        <div class="value" id="atem-udm-state" style="grid-column: 1 / 4;">checking…</div>
+    <!-- ATEM target + Capture interface — both small config cards,
+         collapsed by default to keep the WAN + clients views above
+         the fold. Click the title to expand. -->
+    <section class="card collapsible" id="atem-card" data-collapse-key="atem-target">
+      <h2>
+        ATEM target
+        <span class="card-summary" id="atem-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <form class="atem-target-form" id="atem-target-form" autocomplete="off">
+          <label>IP
+            <input id="atem-ip-input" type="text" placeholder="192.168.20.189" />
+          </label>
+          <label>MAC <span class="muted-inline">(for UDM lookup)</span>
+            <input id="atem-mac-input" type="text" placeholder="7c:2e:0d:21:ab:fe" />
+          </label>
+          <label>Port
+            <input id="atem-port-input" type="number" min="1" max="65535" placeholder="1935" />
+          </label>
+          <button id="atem-target-apply" type="submit">Save target</button>
+        </form>
+        <div class="config-status" id="atem-target-status"></div>
+        <div class="summary-grid" id="atem-summary" style="margin-top: 6px;">
+          <div class="label">UDM sees</div>
+          <div></div>
+          <div></div>
+          <div class="value" id="atem-udm-state" style="grid-column: 1 / 4;">checking…</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card collapsible" id="iface-card" data-collapse-key="capture-iface">
+      <h2>
+        Capture interface
+        <span class="card-summary" id="iface-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <form class="iface-form" id="iface-form" autocomplete="off">
+          <label>Interface
+            <input id="iface-input" type="text" placeholder="en0" />
+          </label>
+          <button id="iface-apply" type="submit">Save</button>
+        </form>
+        <div class="config-status" id="iface-status"></div>
+        <div class="muted-inline" id="iface-hint" style="margin-top: 6px; font-size: 11px;">
+          tshark monitors this interface for SRT/RTMP traffic. On a switched LAN
+          a peer machine usually can't see ATEM unicast — choose the streamer's
+          interface, or set up port mirroring. Restart the tool to apply changes.
+        </div>
       </div>
     </section>
 
@@ -735,6 +928,20 @@
           </form>
           <div class="config-status" id="wan-cap-status"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- Switches: per-USW port utilization, errors, ATEM-port spotlight.
+         Collapsible because it can be a wall of ports on a busy network. -->
+    <section class="card full collapsible" id="switches-card" data-collapse-key="switches">
+      <h2>
+        Switches &amp; ports
+        <span class="card-summary" id="switches-card-summary">—</span>
+        <span class="chevron">▾</span>
+      </h2>
+      <div class="card-body">
+        <div class="switches-grid" id="switches-grid"></div>
+        <div class="empty" id="switches-empty">No switches reported by the UDM yet.</div>
       </div>
     </section>
 
@@ -785,23 +992,6 @@
       <div class="empty" id="flows-empty">
         No traffic on the monitored ports yet. (Capture only sees flows that
         physically traverse this machine — UDM data above is independent.)
-      </div>
-    </section>
-
-    <!-- Capture interface — passive, always relevant. -->
-    <section class="card">
-      <h2>Capture interface</h2>
-      <form class="iface-form" id="iface-form" autocomplete="off">
-        <label>Interface
-          <input id="iface-input" type="text" placeholder="en0" />
-        </label>
-        <button id="iface-apply" type="submit">Save</button>
-      </form>
-      <div class="config-status" id="iface-status"></div>
-      <div class="muted-inline" id="iface-hint" style="margin-top: 6px; font-size: 11px;">
-        tshark monitors this interface for SRT/RTMP traffic. On a switched LAN
-        a peer machine usually can't see ATEM unicast — choose the streamer's
-        interface, or set up port mirroring.
       </div>
     </section>
 
@@ -947,6 +1137,12 @@
       if (ipIn && document.activeElement !== ipIn) ipIn.value = atem.ip || '';
       if (macIn && document.activeElement !== macIn) macIn.value = atem.mac || '';
       if (portIn && document.activeElement !== portIn) portIn.value = atem.port != null ? String(atem.port) : '';
+
+      // Collapsed-state summary so the operator sees the key info
+      // without expanding the card.
+      const parts = [atem.ip || '?', `port ${atem.port != null ? atem.port : '?'}`];
+      if (atem.mac) parts.push(atem.mac);
+      updateCardSummary('atem-card', parts.join(' · '));
 
       // Cross-reference with UDM client list to confirm online status.
       const clients = state.unifi_clients || [];
@@ -1119,6 +1315,136 @@
       pillsEl.innerHTML = checks.map((c) => `<span class="preshow-pill ${c.s}">${c.t}</span>`).join('');
     }
 
+    // Collapse state for the small config cards. Persists in
+    // localStorage so the operator's preference survives reloads.
+    function initCollapsibles() {
+      $$('.card.collapsible').forEach((card) => {
+        const key = 'collapse:' + (card.dataset.collapseKey || card.id);
+        // Default = collapsed. The user explicitly asked for this:
+        // ATEM target + Capture interface should not waste rows
+        // above the WAN + clients views unless the operator opens them.
+        const stored = localStorage.getItem(key);
+        if (stored === 'expanded') card.classList.add('expanded');
+        const h2 = card.querySelector('h2');
+        if (!h2) return;
+        h2.addEventListener('click', () => {
+          card.classList.toggle('expanded');
+          const now = card.classList.contains('expanded') ? 'expanded' : 'collapsed';
+          localStorage.setItem(key, now);
+        });
+      });
+    }
+
+    // Update the inline summary text shown next to a collapsible
+    // card title (so the operator can see key info without
+    // expanding). Called from each card's render path.
+    function updateCardSummary(cardId, text) {
+      const el = document.getElementById(cardId + '-summary');
+      if (el) el.textContent = text || '—';
+    }
+
+    // Network clients display cap: long lists push everything below
+    // far down the page. Show 25 by default, "Show all N" expands.
+    let __clientsShowAll = false;
+    const CLIENTS_DEFAULT_LIMIT = 25;
+
+    // Active alarms banner. Hidden when alarms array is empty;
+    // shown red with a list of pending alarms when not.
+    function renderAlarms(state) {
+      const banner = $('#alarms-banner');
+      const head = $('#alarms-banner-head');
+      const list = $('#alarms-list');
+      const alarms = state.alarms || [];
+      if (alarms.length === 0) {
+        banner.hidden = true;
+        return;
+      }
+      banner.hidden = false;
+      head.textContent = `${alarms.length} active alarm${alarms.length === 1 ? '' : 's'}`;
+      list.innerHTML = alarms.slice(0, 8).map((a) => `
+        <div class="alarm-row">
+          <span class="alarm-time">${a.time ? fmtTime(a.time) : '—'}</span>
+          <span>${a.msg || '(no message)'}</span>
+          <span class="alarm-subsystem">${a.subsystem || ''}</span>
+        </div>
+      `).join('');
+    }
+
+    // Switch port utilization. One block per USW, with a port table
+    // showing real-time tx/rx kbps, errors, link state. The ATEM's
+    // port is highlighted with an orange dot.
+    function renderSwitches(state) {
+      const switches = state.switches || [];
+      const grid = $('#switches-grid');
+      const empty = $('#switches-empty');
+      if (switches.length === 0) {
+        grid.innerHTML = '';
+        empty.hidden = false;
+        updateCardSummary('switches-card', '—');
+        return;
+      }
+      empty.hidden = true;
+      const totalPorts = switches.reduce((acc, sw) => acc + sw.ports.length, 0);
+      const errPorts = switches.reduce((acc, sw) => acc + sw.ports.filter((p) => p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped > 0).length, 0);
+      const atemPort = switches.flatMap((sw) => sw.ports.filter((p) => p.is_atem_port).map((p) => `${sw.name} ${p.name}`)).join(', ');
+      const sumParts = [`${switches.length} switch${switches.length === 1 ? '' : 'es'}`, `${totalPorts} active ports`];
+      if (errPorts > 0) sumParts.push(`${errPorts} with errors`);
+      if (atemPort) sumParts.push(`ATEM on ${atemPort}`);
+      updateCardSummary('switches-card', sumParts.join(' · '));
+
+      grid.innerHTML = switches.map((sw) => {
+        const cpu = sw.cpu_pct != null ? `${sw.cpu_pct.toFixed(1)}% CPU` : '';
+        const mem = sw.mem_pct != null ? `${sw.mem_pct.toFixed(1)}% mem` : '';
+        const up = sw.uptime_secs != null ? `up ${fmtUptime(sw.uptime_secs)}` : '';
+        const stats = [cpu, mem, up].filter(Boolean).join(' · ');
+        const portRows = sw.ports.map((p) => {
+          const errs = p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped;
+          const cls = ['port-row'];
+          if (p.is_atem_port) cls.push('atem');
+          if (!p.up) cls.push('down');
+          if (errs > 0) cls.push('has-errors');
+          const txDisp = fmtKbps(p.tx_kbps);
+          const rxDisp = fmtKbps(p.rx_kbps);
+          const meta = [];
+          if (!p.up) meta.push('LINK DOWN');
+          else if (p.speed_mbps) meta.push(p.speed_mbps >= 1000 ? `${p.speed_mbps/1000}G` : `${p.speed_mbps}M`);
+          if (p.media) meta.push(p.media);
+          if (errs > 0) meta.push(`${errs} err/drop`);
+          if (p.link_down_count > 0) meta.push(`${p.link_down_count} flap${p.link_down_count === 1 ? '' : 's'}`);
+          if (p.sfp_temp_c != null) meta.push(`${p.sfp_temp_c.toFixed(0)}°C`);
+          const conn = [p.connected_ip, p.connected_mac].filter(Boolean).join(' · ');
+          return `
+            <div class="${cls.join(' ')}">
+              <span>${p.port_idx}</span>
+              <span class="port-name">${p.name}</span>
+              <span class="port-bw ${txDisp.zero ? 'zero' : ''}">${txDisp.value}<span class="unit"> ${txDisp.unit}</span></span>
+              <span class="port-bw ${rxDisp.zero ? 'zero' : ''}">${rxDisp.value}<span class="unit"> ${rxDisp.unit}</span></span>
+              <span class="port-meta">${meta.join(' · ')}</span>
+              <span class="port-meta">${conn}</span>
+              <span></span>
+            </div>`;
+        }).join('');
+        return `
+          <div class="switch-block">
+            <div class="switch-block-head">
+              <span class="name">${sw.name}</span>
+              <span class="model">${sw.model}</span>
+              <span class="stats">${stats}</span>
+            </div>
+            <div class="ports-table">
+              <span class="ports-head">Port</span>
+              <span class="ports-head">Name</span>
+              <span class="ports-head">TX</span>
+              <span class="ports-head">RX</span>
+              <span class="ports-head">Link</span>
+              <span class="ports-head">Connected to</span>
+              <span class="ports-head"></span>
+              ${portRows}
+            </div>
+          </div>`;
+      }).join('');
+    }
+
     function renderClients(state) {
       const clients = state.unifi_clients || [];
       const grid = $('#clients-grid');
@@ -1141,8 +1467,31 @@
         const bName = (b.name || b.hostname || b.mac || '').toLowerCase();
         return aName.localeCompare(bName);
       });
-      grid.innerHTML = sorted.map(renderClientRow).join('');
-      const onlineCount = clients.filter((c) => state.now - (c.last_seen || 0) < 300).length;
+      // Apply default cap so the WAN + Live streams cards stay near
+      // the fold. Also exclude long-stale entries from the cap (any
+      // client not seen in 5 minutes is probably not interesting and
+      // shouldn't push the active ones out of the visible window).
+      const fresh = sorted.filter((c) => state.now - (c.last_seen || 0) < 300);
+      const stale = sorted.filter((c) => state.now - (c.last_seen || 0) >= 300);
+      const visible = __clientsShowAll
+        ? sorted
+        : (fresh.length >= CLIENTS_DEFAULT_LIMIT ? fresh.slice(0, CLIENTS_DEFAULT_LIMIT) : fresh.concat(stale.slice(0, CLIENTS_DEFAULT_LIMIT - fresh.length)));
+      let html = visible.map(renderClientRow).join('');
+      const hidden = sorted.length - visible.length;
+      if (hidden > 0 && !__clientsShowAll) {
+        html += `<button class="clients-show-more" id="clients-show-more">Show all ${sorted.length} clients (+${hidden} hidden)</button>`;
+      } else if (__clientsShowAll && sorted.length > CLIENTS_DEFAULT_LIMIT) {
+        html += `<button class="clients-show-more" id="clients-show-more">Collapse to ${CLIENTS_DEFAULT_LIMIT}</button>`;
+      }
+      grid.innerHTML = html;
+      const showMoreBtn = document.getElementById('clients-show-more');
+      if (showMoreBtn) {
+        showMoreBtn.addEventListener('click', () => {
+          __clientsShowAll = !__clientsShowAll;
+          renderClients(state);
+        });
+      }
+      const onlineCount = fresh.length;
       const txTotal = clients.reduce((acc, c) => acc + (c.tx_kbps || 0), 0);
       summary.textContent = `${clients.length} known · ${onlineCount} online · ${(txTotal / 1000).toFixed(1)} Mbps total egress`;
     }
@@ -1177,10 +1526,15 @@
       if (ifaceIn && document.activeElement !== ifaceIn) {
         ifaceIn.value = cfg.monitor_iface || '';
       }
+      // Capture interface card summary.
+      const flowCount = (s.flows || []).length;
+      updateCardSummary('iface-card', `${cfg.monitor_iface || '(none)'} · ${flowCount} flow${flowCount === 1 ? '' : 's'}`);
 
       renderModeBanner(cfg.mode || 'live');
       renderPreshow(s);
+      renderAlarms(s);
       renderWan(s);
+      renderSwitches(s);
       renderAtem(s);
       renderUnifi(s);
       renderClients(s);
@@ -1221,6 +1575,16 @@
       const lastProbeAgo = s.last_probe_at ? (s.now - s.last_probe_at) : null;
       const lastFlowAgo = s.last_flow_at ? (s.now - s.last_flow_at) : null;
       const lastUdmAgo = s.last_unifi_poll_at ? (s.now - s.last_unifi_poll_at) : null;
+      const wan = s.wan_snapshot;
+      const gwLine = wan && (wan.gw_cpu_pct != null || wan.gw_mem_pct != null || wan.gw_uptime_secs != null)
+        ? `<div class="gw-stats">
+            <span><strong>UDM gateway</strong></span>
+            ${wan.gw_cpu_pct != null ? `<span><strong>CPU</strong> ${wan.gw_cpu_pct.toFixed(1)}%</span>` : ''}
+            ${wan.gw_mem_pct != null ? `<span><strong>mem</strong> ${wan.gw_mem_pct.toFixed(1)}%</span>` : ''}
+            ${wan.gw_uptime_secs != null ? `<span><strong>up</strong> ${fmtUptime(wan.gw_uptime_secs)}</span>` : ''}
+            ${s.system_status && s.system_status.state ? `<span><strong>system poll</strong> ${s.system_status.state}${s.last_system_poll_at ? ' · ' + fmtAgo(s.now - s.last_system_poll_at) + ' ago' : ''}</span>` : ''}
+          </div>`
+        : '';
       $('#health').innerHTML = `
         <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
           <div>
@@ -1241,6 +1605,7 @@
             <span style="color:var(--muted);"> &middot; ${udmStatus}</span>
             <div style="color:var(--muted); font-size: 11px; margin-top: 3px;">last: ${fmtAgo(lastUdmAgo)} ago</div>
           </div>
+          ${gwLine}
         </div>`;
 
       // Probe timeline + table
@@ -1406,6 +1771,14 @@
         ? `<div class="stream-alerts">${alerts.map(a => `<span class="stream-alert ${a.s}">${a.t}</span>`).join('')}</div>`
         : '';
 
+      // Reverse DNS for the source IP — populated by the rdns
+      // worker thread. Resolves only for public IPs (RFC1918 are
+      // skipped server-side). Empty string if pending or no PTR.
+      const rdns = (__currentState && __currentState.rdns_cache) ? __currentState.rdns_cache[f.src_ip] : undefined;
+      const rdnsLine = rdns
+        ? `<div class="stream-rdns">${rdns}</div>`
+        : (rdns === null ? '<div class="stream-rdns" style="opacity:0.5">no PTR record</div>' : '');
+
       return `
         <div class="stream-card ${health}">
           <div class="stream-head">
@@ -1418,6 +1791,7 @@
             <span class="arrow">→</span>
             <span>${f.dst_ip}:${f.dst_port}</span>
           </div>
+          ${rdnsLine}
           ${keyHtml}
           ${alertsHtml}
           <div class="stream-bitrate">
@@ -1683,6 +2057,7 @@
         console.error('tick:', e);
       }
     }
+    initCollapsibles();
     tick();
     setInterval(tick, 1000);
   </script>
