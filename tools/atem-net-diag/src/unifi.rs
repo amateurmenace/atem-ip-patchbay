@@ -264,6 +264,16 @@ struct IntegrationClient {
 
 /// Normalized client record fed into the snapshot builder. Either
 /// source path (legacy / integration) maps into this shape.
+///
+/// Byte counters: the legacy stat/sta endpoint reports two
+/// disjoint pairs depending on how the client connects. Wireless
+/// clients populate `tx_bytes`/`rx_bytes`; clients attached via a
+/// USW switch populate `wired-tx_bytes`/`wired-rx_bytes` and leave
+/// the plain pair zero. We deserialize both and let
+/// [`Self::effective_tx_bytes`] / [`Self::effective_rx_bytes`] sum
+/// them — safe because the two pairs are mutually exclusive in the
+/// observed data (a client is either wired-via-switch or wireless,
+/// never both at once for the same poll).
 #[derive(Deserialize, Debug, Clone, Default)]
 struct RawClient {
     #[serde(default)]
@@ -282,8 +292,65 @@ struct RawClient {
     tx_bytes: u64,
     #[serde(default)]
     rx_bytes: u64,
+    #[serde(default, rename = "wired-tx_bytes")]
+    wired_tx_bytes: u64,
+    #[serde(default, rename = "wired-rx_bytes")]
+    wired_rx_bytes: u64,
+    /// UDM-reported rate fields (bytes/sec). The controller smooths
+    /// these over its internal sampling window (~5-10s), which is
+    /// LONGER than our 2s poll interval — so deriving kbps from
+    /// our own (current_bytes - prev_bytes) / dt produces wildly
+    /// jumpy numbers (most polls see no counter movement, then one
+    /// poll sees ~10s of accumulated bytes). When these rate
+    /// fields are populated we use them directly for stable kbps
+    /// and only fall back to delta math when the UDM doesn't
+    /// surface a rate (e.g., the integration API path).
+    #[serde(default, rename = "tx_bytes-r")]
+    tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")]
+    rx_bytes_r: f64,
+    #[serde(default, rename = "wired-tx_bytes-r")]
+    wired_tx_bytes_r: f64,
+    #[serde(default, rename = "wired-rx_bytes-r")]
+    wired_rx_bytes_r: f64,
     #[serde(default)]
     is_wired: bool,
+}
+
+impl RawClient {
+    /// Bytes leaving this client (toward the switch/AP). UniFi's
+    /// stat/sta reports counters from the **infrastructure's**
+    /// perspective: a client's TX is what the AP/switch port RX'd
+    /// from it. We invert here so the dashboard's `tx_kbps` /
+    /// `rx_kbps` reflect device-perspective — which matches the
+    /// documented intent ("show what's flowing to the ATEM").
+    fn effective_tx_bytes(&self) -> u64 {
+        self.rx_bytes.saturating_add(self.wired_rx_bytes)
+    }
+    fn effective_rx_bytes(&self) -> u64 {
+        self.tx_bytes.saturating_add(self.wired_tx_bytes)
+    }
+
+    /// Device-perspective TX/RX rates in kbps, sourced from the
+    /// UDM's smoothed rate fields. Returns `None` if the UDM
+    /// didn't include any rate field (caller falls back to delta-
+    /// derived rates from the byte counters). Same perspective
+    /// inversion as the byte counters.
+    fn udm_rate_kbps(&self) -> Option<(u64, u64)> {
+        let any_present = self.tx_bytes_r > 0.0
+            || self.rx_bytes_r > 0.0
+            || self.wired_tx_bytes_r > 0.0
+            || self.wired_rx_bytes_r > 0.0;
+        if !any_present {
+            return None;
+        }
+        let device_tx_bps = self.rx_bytes_r + self.wired_rx_bytes_r;
+        let device_rx_bps = self.tx_bytes_r + self.wired_tx_bytes_r;
+        Some((
+            (device_tx_bps * 8.0 / 1000.0) as u64,
+            (device_rx_bps * 8.0 / 1000.0) as u64,
+        ))
+    }
 }
 
 impl RawClient {
@@ -297,6 +364,12 @@ impl RawClient {
             last_seen: parse_iso8601_to_unix(c.last_seen.as_deref()),
             tx_bytes: 0,
             rx_bytes: 0,
+            wired_tx_bytes: 0,
+            wired_rx_bytes: 0,
+            tx_bytes_r: 0.0,
+            rx_bytes_r: 0.0,
+            wired_tx_bytes_r: 0.0,
+            wired_rx_bytes_r: 0.0,
             is_wired: c.r#type.as_deref().map(|t| t.eq_ignore_ascii_case("WIRED")).unwrap_or(false),
         }
     }
@@ -404,23 +477,34 @@ pub fn poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Dashboa
                             .as_deref()
                             .map(|m| m == mac_lower)
                             .unwrap_or(false);
-                        let (tx_kbps, rx_kbps) = match prev.get(&mac_lower) {
-                            Some((prev_tx, prev_rx, prev_at)) => {
-                                let dt = now.duration_since(*prev_at).as_secs_f64();
-                                if dt > 0.1 {
-                                    let tx_dbits = r.tx_bytes.saturating_sub(*prev_tx) as f64 * 8.0;
-                                    let rx_dbits = r.rx_bytes.saturating_sub(*prev_rx) as f64 * 8.0;
-                                    (
-                                        (tx_dbits / dt / 1000.0) as u64,
-                                        (rx_dbits / dt / 1000.0) as u64,
-                                    )
-                                } else {
-                                    (0, 0)
+                        let tx_total = r.effective_tx_bytes();
+                        let rx_total = r.effective_rx_bytes();
+                        let (tx_kbps, rx_kbps) = if let Some(rates) = r.udm_rate_kbps() {
+                            rates
+                        } else {
+                            // Fallback path (integration API or other source
+                            // without rate fields): derive from byte deltas.
+                            // Subject to the same UDM-refresh-cadence jitter
+                            // we'd see on the legacy path without rates, so
+                            // these numbers may be jumpy.
+                            match prev.get(&mac_lower) {
+                                Some((prev_tx, prev_rx, prev_at)) => {
+                                    let dt = now.duration_since(*prev_at).as_secs_f64();
+                                    if dt > 0.1 {
+                                        let tx_dbits = tx_total.saturating_sub(*prev_tx) as f64 * 8.0;
+                                        let rx_dbits = rx_total.saturating_sub(*prev_rx) as f64 * 8.0;
+                                        (
+                                            (tx_dbits / dt / 1000.0) as u64,
+                                            (rx_dbits / dt / 1000.0) as u64,
+                                        )
+                                    } else {
+                                        (0, 0)
+                                    }
                                 }
+                                None => (0, 0),
                             }
-                            None => (0, 0),
                         };
-                        prev.insert(mac_lower.clone(), (r.tx_bytes, r.rx_bytes, now));
+                        prev.insert(mac_lower.clone(), (tx_total, rx_total, now));
                         UnifiClientSnapshot {
                             mac: mac_lower,
                             ip: r.ip,
@@ -428,8 +512,8 @@ pub fn poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Dashboa
                             name: r.name,
                             oui: r.oui,
                             last_seen: r.last_seen.unwrap_or(0),
-                            tx_bytes: r.tx_bytes,
-                            rx_bytes: r.rx_bytes,
+                            tx_bytes: tx_total,
+                            rx_bytes: rx_total,
                             tx_kbps,
                             rx_kbps,
                             is_atem,
