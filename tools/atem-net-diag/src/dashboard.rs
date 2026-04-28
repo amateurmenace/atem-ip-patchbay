@@ -280,6 +280,14 @@ pub struct DashboardState {
     /// (so we don't retry forever for IPs without PTR records).
     pub rdns_cache: HashMap<String, Option<String>>,
     pub rdns_pending: HashSet<String>,
+
+    /// PID of the currently-running tshark child process. Used by
+    /// `apply_config_update` to send SIGTERM when the operator
+    /// changes `monitor_iface` — the monitor_loop's outer respawn
+    /// wrapper then re-reads the new iface from config and starts
+    /// fresh. None when the capture thread isn't running (no
+    /// tshark, missing dep, etc.).
+    pub monitor_pid: Option<u32>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -850,6 +858,11 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
+    let monitor_iface_field = parsed
+        .get("monitor_iface")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
     let wan_up_cap_field = parsed
         .get("wan_upload_cap_mbps")
         .and_then(|v| v.as_f64())
@@ -906,6 +919,21 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
     }
     if let Some(h) = unifi_host_field {
         s.config.unifi_host = h;
+    }
+    if let Some(new_iface) = monitor_iface_field {
+        if !new_iface.is_empty() && Some(&new_iface) != s.config.monitor_iface.as_ref() {
+            s.config.monitor_iface = Some(new_iface);
+            // Kick the running tshark child so the monitor_loop's
+            // outer wrapper respawns on the new interface. Use
+            // `kill -TERM` via Command (no extra deps); the loop's
+            // wait() reaps the child after EOF.
+            if let Some(pid) = s.monitor_pid.take() {
+                let _ = std::process::Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
     }
     if let Some(c) = wan_up_cap_field {
         s.config.wan_upload_cap_mbps = c;
@@ -1000,7 +1028,7 @@ fn do_one_probe(url: &str, key: &str, state: &Arc<Mutex<DashboardState>>) {
     s.last_probe_at = now_secs();
 }
 
-fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>>) {
+fn monitor_loop(default_iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>>) {
     let tshark = match find_tshark() {
         Some(p) => p,
         None => {
@@ -1013,23 +1041,42 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
         .map(|p| format!("port {p}"))
         .collect::<Vec<_>>()
         .join(" or ");
-    let mut child = match Command::new(tshark)
-        .args(tshark_field_args(&iface, &filter))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("[monitor] failed to spawn tshark: {err}");
-            return;
-        }
-    };
     state.lock().unwrap().monitor_thread_alive = true;
-    let stdout = match child.stdout.take() {
-        Some(s) => s,
-        None => return,
-    };
+
+    // Outer loop: each iteration spawns a fresh tshark on whatever
+    // interface is currently configured. When the iface is changed
+    // via /api/config, apply_config_update sends SIGTERM to the
+    // running child; tshark exits, the inner read loop hits EOF,
+    // and we land back here to spawn anew on the updated interface.
+    loop {
+        let iface = state
+            .lock()
+            .unwrap()
+            .config
+            .monitor_iface
+            .clone()
+            .unwrap_or_else(|| default_iface.clone());
+        let mut child = match Command::new(&tshark)
+            .args(tshark_field_args(&iface, &filter))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(err) => {
+                eprintln!("[monitor] failed to spawn tshark on {iface}: {err}");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+        eprintln!("[monitor] tshark spawned on {iface} (pid {})", child.id());
+        let spawn_time = Instant::now();
+        state.lock().unwrap().monitor_pid = Some(child.id());
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => continue,
+        };
+        let stderr = child.stderr.take();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Some(packet) = parse_tshark_line(&line) {
             let mut s = state.lock().unwrap();
@@ -1063,7 +1110,34 @@ fn monitor_loop(iface: String, ports: Vec<u16>, state: Arc<Mutex<DashboardState>
             s.last_flow_at = now_secs();
         }
     }
-    state.lock().unwrap().monitor_thread_alive = false;
+        // tshark stdout EOF — process exited (either we asked
+        // it to, via SIGTERM from apply_config_update on an
+        // iface change, or it crashed). Reap the child, clear
+        // the PID, and let the outer loop respawn.
+        let _ = child.wait();
+        state.lock().unwrap().monitor_pid = None;
+
+        // If tshark exited within a couple of seconds it almost
+        // certainly hit a permission error or an interface that
+        // doesn't support capture (BPF denied, virtual NIC, bad
+        // iface name). Drain stderr to surface the actual error
+        // and back off longer so we don't peg CPU respawning.
+        let exited_fast = spawn_time.elapsed() < Duration::from_secs(2);
+        if exited_fast {
+            if let Some(mut e) = stderr {
+                let mut buf = String::new();
+                use std::io::Read as _;
+                let _ = e.read_to_string(&mut buf);
+                let trimmed = buf.trim();
+                if !trimmed.is_empty() {
+                    eprintln!("[monitor] tshark on {iface} exited quickly: {trimmed}");
+                }
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        } else {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
 }
 
 fn now_secs() -> u64 {
