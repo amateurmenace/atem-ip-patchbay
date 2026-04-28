@@ -14,6 +14,8 @@
 use crate::ffmpeg_path::ffmpeg_path;
 use crate::ndi_capture::{NdiCapture, NdiVideoFormat};
 use crate::ndi_runtime;
+use crate::omt_capture::{OmtCapture, OmtVideoFormat};
+use crate::omt_runtime;
 use crate::preview::Preview;
 use crate::sources::Source;
 use crate::state::{EncoderState, Snapshot};
@@ -88,6 +90,10 @@ struct Inner {
     /// Held when source_id == "ndi"; dropped on stop() so the
     /// receiver thread exits and FFmpeg's stdin pipe closes cleanly.
     ndi_capture: Option<NdiCapture>,
+    /// Same role as ndi_capture but for source_id == "omt". Always
+    /// None when the `omt` cargo feature is off (start_and_probe_format
+    /// errors out before the field gets populated).
+    omt_capture: Option<OmtCapture>,
 }
 
 impl Streamer {
@@ -101,6 +107,7 @@ impl Streamer {
                 last_log_lines: VecDeque::with_capacity(LOG_TAIL_CAPACITY),
                 stop_requested: false,
                 ndi_capture: None,
+                omt_capture: None,
             }),
         })
     }
@@ -129,6 +136,17 @@ impl Streamer {
     pub async fn current_ndi_preview(&self) -> Option<Vec<u8>> {
         let inner = self.inner.lock().await;
         inner.ndi_capture.as_ref().and_then(|c| c.latest_preview())
+    }
+
+    /// Latest JPEG preview from the active OMT capture, if any. Same
+    /// contract as `current_ndi_preview`. Returns None when:
+    /// - No OMT source active (most cases — OMT is feature-gated)
+    /// - The active OMT capture hasn't encoded a preview yet
+    /// - The `omt` cargo feature is off (`OmtCapture::latest_preview`
+    ///   returns None unconditionally in that case)
+    pub async fn current_omt_preview(&self) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().await;
+        inner.omt_capture.as_ref().and_then(|c| c.latest_preview())
     }
 
     pub async fn last_log_tail(&self, lines: usize) -> Vec<String> {
@@ -169,29 +187,43 @@ impl Streamer {
             ));
         }
 
-        // NDI sources need a probe + receiver-thread spin-up before we
-        // know the FFmpeg input args. Other source types build the
-        // command directly from EncoderState.
-        let (cmd, ndi_capture, ndi_frame_rx) = if plan.source.id == "ndi" {
-            let source_name = plan.source.label.clone();
-            let ndi_source = ndi_runtime::find_source_by_name(&source_name)
-                .ok_or_else(|| anyhow!("NDI source not found: {source_name:?}. Refresh the discovery list."))?;
-            let (format, capture, rx) = NdiCapture::start_and_probe_format(
-                ndi_source,
-                Duration::from_secs(5),
-            )?;
-            let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
-            (cmd, Some(capture), Some(rx))
-        } else {
-            (self.build_ffmpeg_cmd(&plan), None, None)
+        // NDI / OMT sources need a probe + receiver-thread spin-up
+        // before we know the FFmpeg input args. Other source types
+        // build the command directly from EncoderState.
+        let (cmd, ndi_capture, omt_capture, frame_rx) = match plan.source.id.as_str() {
+            "ndi" => {
+                let source_name = plan.source.label.clone();
+                let ndi_source = ndi_runtime::find_source_by_name(&source_name).ok_or_else(
+                    || anyhow!("NDI source not found: {source_name:?}. Refresh the discovery list."),
+                )?;
+                let (format, capture, rx) =
+                    NdiCapture::start_and_probe_format(ndi_source, Duration::from_secs(5))?;
+                let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
+                (cmd, Some(capture), None, Some(rx))
+            }
+            "omt" => {
+                let source_name = plan.source.label.clone();
+                let address = omt_runtime::find_address_by_name(&source_name).ok_or_else(|| {
+                    anyhow!(
+                        "OMT source not found: {source_name:?}. Refresh the discovery list, \
+                         or rebuild with --features omt if support isn't compiled in."
+                    )
+                })?;
+                let (format, capture, rx) =
+                    OmtCapture::start_and_probe_format(address, Duration::from_secs(5))?;
+                let cmd = self.build_ffmpeg_cmd_for_omt(&plan, &format);
+                (cmd, None, Some(capture), Some(rx))
+            }
+            _ => (self.build_ffmpeg_cmd(&plan), None, None, None),
         };
 
         log::info!("Launching FFmpeg: {}", shlex_join(&cmd));
 
+        let needs_stdin = ndi_capture.is_some() || omt_capture.is_some();
         let mut command = Command::new(&cmd[0]);
         command
             .args(&cmd[1..])
-            .stdin(if ndi_capture.is_some() {
+            .stdin(if needs_stdin {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -277,12 +309,15 @@ impl Streamer {
             }
         }
 
-        // Wire the NDI -> FFmpeg stdin pipe via a small drainer task.
-        if let (Some(_), Some(rx)) = (ndi_capture.as_ref(), ndi_frame_rx) {
+        // Wire NDI/OMT -> FFmpeg stdin via a small drainer task. The
+        // task body just consumes Vec<u8>s from the channel and
+        // writes them to stdin — same shape regardless of which SDK
+        // produced the frames, so a single helper handles both.
+        if let Some(rx) = frame_rx {
             let stdin = child
                 .stdin
                 .take()
-                .ok_or_else(|| anyhow!("ffmpeg stdin was not piped (NDI source)"))?;
+                .ok_or_else(|| anyhow!("ffmpeg stdin was not piped (raw video source)"))?;
             tokio::spawn(ndi_writer_task(stdin, rx));
         }
 
@@ -306,6 +341,7 @@ impl Streamer {
             inner.stop_requested = false;
             inner.child = Some(child);
             inner.ndi_capture = ndi_capture;
+            inner.omt_capture = omt_capture;
         }
 
         // Spawn the monitor task. It owns the stderr handle, parses
@@ -326,6 +362,12 @@ impl Streamer {
             // Drop blocks while the receiver thread joins; do it
             // before killing FFmpeg so the rawvideo input gets a
             // clean EOF.
+            capture.stop();
+        }
+        if let Some(mut capture) = inner.omt_capture.take() {
+            // Same contract as the NDI capture above — drop sender
+            // first so FFmpeg's stdin closes cleanly before we
+            // SIGTERM the process group.
             capture.stop();
         }
         if let Some(child) = inner.child.as_mut() {
@@ -492,6 +534,33 @@ impl Streamer {
         }
 
         self.build_ffmpeg_cmd(&adjusted)
+    }
+
+    /// Same shape as `build_ffmpeg_cmd_for_ndi` but for an OMT source.
+    /// The two formats are structurally identical (width/height/fps_num/
+    /// fps_den/ffmpeg_pix_fmt) — we keep separate methods for clarity
+    /// and to leave room for SDK-specific tweaks (e.g. OMT might need
+    /// different audio handling once libomt audio integration lands
+    /// in alpha.10). Today this is a thin pass-through that builds an
+    /// equivalent NDI format and reuses the NDI code path.
+    fn build_ffmpeg_cmd_for_omt(&self, plan: &StreamPlan, fmt: &OmtVideoFormat) -> Vec<String> {
+        let as_ndi = NdiVideoFormat {
+            width: fmt.width,
+            height: fmt.height,
+            fps_num: fmt.fps_num,
+            fps_den: fmt.fps_den,
+            ffmpeg_pix_fmt: fmt.ffmpeg_pix_fmt,
+        };
+        // Log the bridge so the FFmpeg log card surfaces "this OMT
+        // source is being treated as a raw rawvideo pipe" — useful
+        // when a sender produces an unexpected format and we want to
+        // compare against what a known-good NDI sender would have done.
+        log::info!(
+            "OMT capture flowing through NDI-equivalent FFmpeg builder: \
+             {}x{}@{}/{} pix_fmt={}",
+            fmt.width, fmt.height, fmt.fps_num, fmt.fps_den, fmt.ffmpeg_pix_fmt,
+        );
+        self.build_ffmpeg_cmd_for_ndi(plan, &as_ndi)
     }
 
     fn build_ffmpeg_cmd(&self, plan: &StreamPlan) -> Vec<String> {

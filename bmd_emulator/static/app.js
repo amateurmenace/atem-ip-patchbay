@@ -148,6 +148,7 @@ const els = {
 let lastSnapshot   = null;
 let knownDevices   = { video: [], audio: [] };
 let knownNdi       = [];                 // discovered NDI senders
+let knownOmt       = [];                 // discovered OMT senders (alpha.9)
 let browserDevices = [];                 // navigator.mediaDevices results
 let activeStream   = null;               // current MediaStream in preview
 let previewKey     = '';                 // de-dupe preview switches
@@ -163,6 +164,7 @@ const ICONS = {
   capture_card: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="12" rx="1.5"/><circle cx="7" cy="12" r="1.2" fill="currentColor"/><circle cx="11" cy="12" r="1.2" fill="currentColor"/><circle cx="15" cy="12" r="1.2" fill="currentColor"/><path d="M19 10.5v3"/></svg>`,
   screen:       `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M9 21h6M12 17v4"/></svg>`,
   ndi:          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>`,
+  omt:          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M5 8h14M5 16h14M9 5l-2 14M15 5l2 14"/></svg>`,
   iphone:       `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>`,
   virtual:      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12c0-4 3.5-7 8-7s8 3 8 7-3.5 7-8 7-8-3-8-7z"/><path d="M9 12h.01M15 12h.01M9.5 15c.8.6 1.7 1 2.5 1s1.7-.4 2.5-1"/></svg>`,
   pipe:         `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 14l-3 3a3 3 0 1 1-4-4l3-3M14 10l3-3a3 3 0 1 1 4 4l-3 3M8 16l8-8"/></svg>`,
@@ -175,6 +177,7 @@ const CATEGORY_LABEL = {
   capture_card: 'Capture',
   screen:       'Screen',
   ndi:          'NDI',
+  omt:          'OMT',
   iphone:       'iPhone',
   virtual:      'Virtual',
   pipe:         'URL / Pipe',
@@ -631,6 +634,17 @@ async function setPreviewFor(tile) {
   if (tile.sourceId === 'pipe')         return showPipePreview(tile.name);
   if (tile.sourceId === 'ndi-sender')   return startNdiPreview(tile.name);
   if (tile.sourceId === 'ndi')          return startNdiPreview(tile.name);
+  // OMT preview piggybacks on the same /api/preview endpoint as NDI.
+  // The server's preview waterfall returns whichever capture is
+  // active (NDI > OMT > pre-stream Preview backend). In alpha.9
+  // OMT preview JPEGs aren't generated (libomt-rs 0.1.3 doesn't
+  // expose frame stride accessors cleanly enough to sample),
+  // so this falls through to the bridge-waiting hint when the
+  // user is on an OMT source — but the start-stream path still
+  // works and the streaming output to ATEM is visible.
+  if (tile.sourceId === 'omt-sender' || tile.sourceId === 'omt') {
+    return startNdiPreview(tile.name);
+  }
   if (tile.sourceId === 'srt_listen' || tile.sourceId === 'rtmp_listen') {
     return showRelayWaiting(tile.sourceId);
   }
@@ -790,6 +804,7 @@ function buildSourceTiles(snap) {
     ['iphone',       'iPhone (Continuity)'],
     ['screen',       'Screens'],
     ['ndi_senders',  'NDI senders on your network'],
+    ['omt_senders',  'OMT senders on your network'],
     ['ndi',          'NDI Bridge (NDI Virtual Camera)'],
     ['virtual',      'Virtual cameras'],
   ];
@@ -805,6 +820,27 @@ function buildSourceTiles(snap) {
           discovered: true,
         });
       }
+      continue;
+    }
+    if (cat === 'omt_senders') {
+      // Skip the section entirely when no OMT senders are visible —
+      // most users don't have OMT on their network, and showing an
+      // empty "OMT senders" header noisily implies the feature is
+      // broken. The section appears when discovery finds something
+      // OR when the user has a previously-selected OMT source still
+      // in their state (so the active tile renders as a placeholder).
+      const omtTiles = [];
+      for (const sender of knownOmt) {
+        omtTiles.push({
+          sourceId: 'omt-sender',
+          avIndex: null,
+          name: sender.name,
+          category: 'omt',
+          section: label,
+          discovered: true,
+        });
+      }
+      tiles.push(...omtTiles);
       continue;
     }
     for (const d of groups[cat]) {
@@ -844,12 +880,14 @@ function buildSourceTiles(snap) {
       els.sourceTiles.appendChild(sec);
       lastSection = t.section;
     }
-    // NDI tiles: state.source_id is "ndi" but the tile's sourceId is
-    // "ndi-sender" (the discovery list); match by ndi_source_name so
-    // the right sender within the discovered set highlights.
+    // NDI/OMT tiles: state.source_id is "ndi"/"omt" but the tile's
+    // sourceId is "ndi-sender"/"omt-sender" (the discovery list);
+    // match by ndi_source_name / omt_source_name so the right sender
+    // within the discovered set highlights.
     const isActive =
       ((snap.source_id === t.sourceId) ||
-       (snap.source_id === 'ndi' && t.sourceId === 'ndi-sender' && snap.ndi_source_name === t.name)) &&
+       (snap.source_id === 'ndi' && t.sourceId === 'ndi-sender' && snap.ndi_source_name === t.name) ||
+       (snap.source_id === 'omt' && t.sourceId === 'omt-sender' && snap.omt_source_name === t.name)) &&
       (t.sourceId !== 'avfoundation' || snap.av_video_index === t.avIndex);
     const div = document.createElement('div');
     div.className = 'tile' + (isActive ? ' active' : '') + (t.discovered ? ' discovered' : '');
@@ -871,6 +909,16 @@ function selectSource(t) {
     // /api/preview once Start Stream starts the receiver.
     applySettings({ source_id: 'ndi', ndi_source_name: t.name });
     setPreviewFor({ ...t, sourceId: 'ndi' });
+    return;
+  }
+  if (t.sourceId === 'omt-sender') {
+    // alpha.9: same handling as NDI — switch source_id, persist the
+    // sender name. Note: OMT preview is no-op in alpha.9 (libomt-rs
+    // 0.1.3 doesn't surface frame stride/rate cleanly enough to
+    // sample preview JPEGs); the streaming output to ATEM still
+    // works once Start Stream fires.
+    applySettings({ source_id: 'omt', omt_source_name: t.name });
+    setPreviewFor({ ...t, sourceId: 'omt' });
     return;
   }
   // Hide the NDI inline hint when the user picks a real source.
@@ -1141,6 +1189,21 @@ async function ensureNdiLoaded(force = false) {
     const u = force ? '/api/ndi-senders?force=1' : '/api/ndi-senders';
     const j = await fetchJSON(u);
     knownNdi = j.senders || [];
+    if (lastSnapshot) render(lastSnapshot);
+  } catch (_e) { /* ignore */ }
+}
+
+// alpha.9: parallel of ensureNdiLoaded for OMT senders. The endpoint
+// always exists on the server side; when the `omt` cargo feature is
+// off (default for prebuilt releases), it returns an empty list and
+// the OMT section in the tile gallery stays hidden. No client-side
+// feature detection needed — empty list = no section, full list =
+// section appears.
+async function ensureOmtLoaded(force = false) {
+  try {
+    const u = force ? '/api/omt-senders?force=1' : '/api/omt-senders';
+    const j = await fetchJSON(u);
+    knownOmt = j.senders || [];
     if (lastSnapshot) render(lastSnapshot);
   } catch (_e) { /* ignore */ }
 }
@@ -2111,6 +2174,7 @@ function bind() {
 bind();
 ensureDevicesLoaded();
 ensureNdiLoaded();
+ensureOmtLoaded();
 // Probe every IPv4 interface so the wizard can show a picker when
 // the host has more than one (Wi-Fi + Ethernet, VPN, Apple Internet
 // Sharing, etc.). The legacy /api/lan-ip single-result endpoint is
@@ -2133,6 +2197,10 @@ poll();
 setInterval(poll, 1000);
 // Refresh NDI senders every 30s — they come and go.
 setInterval(() => ensureNdiLoaded(true), 30000);
+// Same for OMT senders. Cheap when the omt feature is off (server
+// returns empty immediately); polls real OmtDiscovery::addresses
+// otherwise.
+setInterval(() => ensureOmtLoaded(true), 30000);
 
 // Tauri's WebView ships with no menu bar and no built-in reload
 // shortcut, which is friction during dev iteration. Bind the same
