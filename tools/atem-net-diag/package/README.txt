@@ -1,8 +1,47 @@
 atem-net-diag — ATEM network diagnostic tool
-v0.2.0  ·  arm64 macOS  ·  signed by "Developer ID Application: Stephen Walter (6M536MV7GT)"
+v0.2.1  ·  arm64 macOS
 
-WHAT'S NEW IN v0.2.0
---------------------
+WHAT'S NEW IN v0.2.1 (Session 6 — monitor-first rework)
+-------------------------------------------------------
+* WAN BANDWIDTH AT THE GATEWAY — polled from the UDM's stat/health
+  endpoint and graphed as upload + download sparklines. Set your
+  upload cap once and get a real-time headroom indicator
+  ("14/20 Mbps used · 70%") that turns yellow at 70%, red at 90%.
+
+* PER-SOURCE STICKY LABELS — click "name this source…" on any flow
+  card to tag the source IP ("Jamie's basement", "Tightrope carousel").
+  Persists across the binary's lifetime.
+
+* PRE-SHOW HEALTH BANNER — single green/yellow/red banner at the top
+  aggregating UDM, ATEM, WAN, and capture state. One glance to know
+  if you're ready to go live.
+
+* QUALITY ALERTS — per-flow alert badges for bitrate dropouts (>50% /
+  >75% drop), idle stalls, RTT spikes (>200ms / >500ms), stalling.
+
+* SWITCH PORT UTILIZATION — every UniFi switch with per-port real-time
+  tx/rx, errors, link-flaps, SFP optical metrics. The ATEM's port is
+  highlighted with an orange dot. Switches sorted with the ATEM's
+  host switch first.
+
+* ACTIVE ALARMS BANNER — surfaces UDM-reported alarms when present.
+
+* GATEWAY SYSSTATS — UDM CPU / mem / uptime in the Process health card.
+
+* REVERSE-DNS for stream sources — public-IP flow sources auto-resolve
+  to their PTR records ("96.234.1.2 → cust-3-12.verizon.com"). LAN
+  IPs skipped.
+
+* EDITABLE ATEM TARGET / CAPTURE INTERFACE — both as collapsible cards
+  at the top, two-up. Click to expand.
+
+* THREE BANDWIDTH BUGS FIXED — UDM byte counters for wired clients now
+  read correctly, tx/rx labels reflect device perspective (not the
+  switch's), and kbps numbers are stable (use UDM-reported rate fields
+  rather than self-derived 2s deltas).
+
+WHAT'S NEW IN v0.2.0 (Session 5)
+--------------------------------
 * DEFAULT MODE = LIVE — pure passive monitoring, zero outbound traffic to
   the ATEM. Safe to run alongside an in-progress production. Switch to
   STANDBY (toggle in dashboard) only when you want to actively test
