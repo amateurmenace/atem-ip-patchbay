@@ -66,8 +66,19 @@ pub fn run() {
             // Tell the FFmpeg path resolver where the bundled sidecar
             // lives. Phase 9 adds bundle.externalBin; for now this just
             // primes the lookup so dev builds prefer $PATH.
+            //
+            // On Windows we ALSO have to teach the OS DLL loader where
+            // to look for Processing.NDI.Lib.x64.dll (and any future
+            // OMT dylibs we bundle). macOS's dyld picks them up via
+            // the @executable_path/../Frameworks rpath set in build.rs;
+            // Windows has no equivalent baked into the binary, so we
+            // call SetDllDirectoryW at startup instead. Without this,
+            // grafton-ndi's runtime-load fails with "module not found"
+            // even though the DLL is sitting in resources\sidecar\
+            // right next to ffmpeg.exe.
             if let Ok(resource_dir) = app.handle().path().resource_dir() {
-                ffmpeg_path::set_resource_root(resource_dir);
+                ffmpeg_path::set_resource_root(resource_dir.clone());
+                add_windows_dll_search_path(&resource_dir);
             }
 
             load_default_xml_files(app.handle(), &encoder);
@@ -176,6 +187,60 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+/// Teach Windows' DLL loader to find bundled sidecar dylibs (currently
+/// `Processing.NDI.Lib.x64.dll`; Phase D adds `libomt.dll` next to it).
+/// macOS handles this via `@executable_path/../Frameworks` rpath set in
+/// build.rs; Windows has no equivalent baked into the executable, so
+/// we call into the Win32 API at startup. Stashed here as its own
+/// `#[cfg]`-gated helper so it stays out of the way on Mac/Linux.
+///
+/// Without this, `grafton-ndi`'s dlopen-equivalent fails with "module
+/// not found" even though the DLL is sitting in `resources\sidecar\`
+/// right next to `ffmpeg.exe` — Windows only searches the executable's
+/// own dir + System32 + PATH by default. End users see "NDI features
+/// disabled" with no actionable cause; this fixes that.
+#[cfg(target_os = "windows")]
+fn add_windows_dll_search_path(resource_dir: &std::path::Path) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    let sidecar = resource_dir.join("sidecar");
+    if !sidecar.exists() {
+        log::warn!(
+            "sidecar dir not found at {} — NDI/OMT may fail to load",
+            sidecar.display()
+        );
+        return;
+    }
+
+    let wide: Vec<u16> = OsStr::new(&sidecar)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    extern "system" {
+        fn SetDllDirectoryW(lp_path_name: *const u16) -> i32;
+    }
+
+    unsafe {
+        if SetDllDirectoryW(wide.as_ptr()) == 0 {
+            log::warn!(
+                "SetDllDirectoryW failed for {}; NDI/OMT runtime load may fail",
+                sidecar.display()
+            );
+        } else {
+            log::info!("Windows DLL search path added: {}", sidecar.display());
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn add_windows_dll_search_path(_resource_dir: &std::path::Path) {
+    // macOS uses @executable_path/../Frameworks rpath set in build.rs;
+    // Linux uses LD_LIBRARY_PATH (we don't currently bundle libndi
+    // for Linux — users install NDI Tools).
 }
 
 /// Run an initial AVF / DirectShow scan and pre-select the most
