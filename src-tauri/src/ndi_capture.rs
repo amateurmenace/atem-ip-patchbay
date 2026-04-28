@@ -317,66 +317,18 @@ fn bytes_per_pixel(pf: PixelFormat) -> usize {
     }
 }
 
-/// Tightly pack the NDI VideoFrame so each row is exactly
-/// `width * bpp` bytes with no trailing padding.
-///
-/// NDI senders are allowed to use a `line_stride > width * bpp` for
-/// SIMD alignment. The grafton-ndi `VideoFrame.data` Vec is the raw
-/// NDI buffer and may include that per-row padding. FFmpeg's
-/// `-f rawvideo -s WxH` input expects exactly `width * bpp * height`
-/// bytes — passing padded bytes would shift every row right by the
-/// padding size and the destination would see torn / corrupted video.
-///
-/// Fast path: if the row is already tight (or the frame metadata is
-/// `DataSizeBytes`, i.e. compressed/opaque), clone-as-is. The hot
-/// path here is one memcpy per frame either way; only the slow path
-/// (real padding) does H separate copies.
+/// Stride-strip a grafton-ndi VideoFrame for FFmpeg's rawvideo demuxer.
+/// Thin wrapper that pulls the right fields off `VideoFrame` and hands
+/// them to the shared `frame_pack::pack_frame` (Phase B refactor —
+/// same logic backs OMT capture too, see `omt_capture.rs`).
 fn pack_frame(frame: &VideoFrame, bpp: usize) -> Vec<u8> {
     let width = frame.width.max(0) as usize;
     let height = frame.height.max(0) as usize;
-    let expected_stride = width * bpp;
-    let expected_total = expected_stride * height;
-
-    let actual_stride = match frame.line_stride_or_size {
-        LineStrideOrSize::LineStrideBytes(s) if s > 0 => s as usize,
-        // DataSizeBytes (compressed) or zero/negative stride — pass
-        // through and let downstream complain. We don't know how to
-        // tighten an unknown layout.
-        _ => return frame.data.clone(),
+    let line_stride = match frame.line_stride_or_size {
+        LineStrideOrSize::LineStrideBytes(s) if s > 0 => Some(s as usize),
+        // DataSizeBytes (compressed) or zero/negative stride — let
+        // the shared helper passthrough.
+        _ => None,
     };
-
-    if actual_stride == expected_stride {
-        // Already tight. The buffer may still be longer than needed
-        // (e.g. SDK-internal trailing alignment) — slice to the
-        // exact expected length so FFmpeg doesn't see stray bytes.
-        let take = expected_total.min(frame.data.len());
-        return frame.data[..take].to_vec();
-    }
-
-    if actual_stride < expected_stride {
-        // Underflow stride is nonsensical for uncompressed frames;
-        // log and pass through.
-        log::warn!(
-            "NDI line_stride={actual_stride} < expected={expected_stride} for {width}x{height}@{bpp}bpp; \
-             passing through unpacked"
-        );
-        return frame.data.clone();
-    }
-
-    // Padded — copy each row's first `expected_stride` bytes into a
-    // tight buffer.
-    let mut packed = Vec::with_capacity(expected_total);
-    for row in 0..height {
-        let row_start = row * actual_stride;
-        let row_end = row_start + expected_stride;
-        if row_end > frame.data.len() {
-            log::warn!(
-                "NDI pack_frame row {row} out of bounds: row_end={row_end} > data.len={} (stride={actual_stride}, expected_stride={expected_stride}, height={height})",
-                frame.data.len()
-            );
-            break;
-        }
-        packed.extend_from_slice(&frame.data[row_start..row_end]);
-    }
-    packed
+    crate::frame_pack::pack_frame(&frame.data, width, height, bpp, line_stride)
 }
