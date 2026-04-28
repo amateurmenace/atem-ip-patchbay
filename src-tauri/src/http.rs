@@ -123,6 +123,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/discover", get(api_discover))
         .route("/api/ndi-senders", get(api_ndi_senders))
         .route("/api/omt-senders", get(api_omt_senders))
+        .route("/api/omt-output", post(api_omt_output))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
         .route("/api/kill-orphans", post(api_kill_orphans))
@@ -466,6 +467,28 @@ async fn api_omt_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoR
     Json(OmtSendersResponse { senders })
 }
 
+/// Toggle / configure OMT output. POST { enabled: bool, name?: String }.
+/// alpha.9 only takes effect when source_id == "ndi" — see streamer.rs
+/// frame-tee logic. The toggle is always settable; flipping it on with
+/// a non-NDI source surfaces a streamer error at Start Stream time.
+#[derive(Deserialize)]
+struct OmtOutputUpdate {
+    enabled: Option<bool>,
+    name: Option<String>,
+}
+
+async fn api_omt_output(
+    State(state): State<HttpAppState>,
+    Json(p): Json<OmtOutputUpdate>,
+) -> impl IntoResponse {
+    state.encoder.apply_settings(&crate::state::SettingsUpdate {
+        omt_output_enabled: p.enabled,
+        omt_output_name: p.name,
+        ..Default::default()
+    });
+    Json(serde_json::json!(state.encoder.snapshot()))
+}
+
 async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {
     match state.streamer.start().await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
@@ -752,6 +775,8 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             current_server_name: p.current_server_name,
             ndi_source_name: p.ndi_source_name,
             omt_source_name: p.omt_source_name,
+            omt_output_enabled: None,
+            omt_output_name: None,
             av_video_index: p.av_video_index,
             av_video_name: p.av_video_name,
             av_audio_index: p.av_audio_index,

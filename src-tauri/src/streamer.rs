@@ -94,6 +94,12 @@ struct Inner {
     /// None when the `omt` cargo feature is off (start_and_probe_format
     /// errors out before the field gets populated).
     omt_capture: Option<OmtCapture>,
+    /// Active OMT sender when omt_output_enabled is on. alpha.9 only
+    /// populates this for source_id == "ndi" (frame-tee at the writer
+    /// task); other source types leave it None and the OMT output
+    /// silently doesn't fire. Drop sends OMT_SendDestroy so the
+    /// network announcement disappears.
+    omt_sender: Option<Arc<crate::omt_sender::OmtSender>>,
 }
 
 impl Streamer {
@@ -108,6 +114,7 @@ impl Streamer {
                 stop_requested: false,
                 ndi_capture: None,
                 omt_capture: None,
+                omt_sender: None,
             }),
         })
     }
@@ -190,31 +197,85 @@ impl Streamer {
         // NDI / OMT sources need a probe + receiver-thread spin-up
         // before we know the FFmpeg input args. Other source types
         // build the command directly from EncoderState.
-        let (cmd, ndi_capture, omt_capture, frame_rx) = match plan.source.id.as_str() {
-            "ndi" => {
-                let source_name = plan.source.label.clone();
-                let ndi_source = ndi_runtime::find_source_by_name(&source_name).ok_or_else(
-                    || anyhow!("NDI source not found: {source_name:?}. Refresh the discovery list."),
-                )?;
-                let (format, capture, rx) =
-                    NdiCapture::start_and_probe_format(ndi_source, Duration::from_secs(5))?;
-                let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
-                (cmd, Some(capture), None, Some(rx))
+        //
+        // raw_format carries the dimensions + pix_fmt back so we can
+        // start an OmtSender that exactly matches the source feed
+        // (alpha.9 OMT output is a frame-tee, so the sender's format
+        // is whatever the source produces — no transcode, no resize).
+        let (cmd, ndi_capture, omt_capture, frame_rx, raw_format) =
+            match plan.source.id.as_str() {
+                "ndi" => {
+                    let source_name = plan.source.label.clone();
+                    let ndi_source =
+                        ndi_runtime::find_source_by_name(&source_name).ok_or_else(|| {
+                            anyhow!(
+                                "NDI source not found: {source_name:?}. Refresh the discovery list."
+                            )
+                        })?;
+                    let (format, capture, rx) =
+                        NdiCapture::start_and_probe_format(ndi_source, Duration::from_secs(5))?;
+                    let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
+                    let rf = Some((format.width, format.height, format.ffmpeg_pix_fmt));
+                    (cmd, Some(capture), None, Some(rx), rf)
+                }
+                "omt" => {
+                    let source_name = plan.source.label.clone();
+                    let address =
+                        omt_runtime::find_address_by_name(&source_name).ok_or_else(|| {
+                            anyhow!(
+                                "OMT source not found: {source_name:?}. Refresh the discovery list, \
+                                 or rebuild with --features omt if support isn't compiled in."
+                            )
+                        })?;
+                    let (format, capture, rx) =
+                        OmtCapture::start_and_probe_format(address, Duration::from_secs(5))?;
+                    let cmd = self.build_ffmpeg_cmd_for_omt(&plan, &format);
+                    let rf = Some((format.width, format.height, format.ffmpeg_pix_fmt));
+                    (cmd, None, Some(capture), Some(rx), rf)
+                }
+                _ => (self.build_ffmpeg_cmd(&plan), None, None, None, None),
+            };
+
+        // OMT output (frame-tee). When the user has enabled OMT
+        // output AND we have a raw frame source (NDI or OMT), spin up
+        // an OmtSender matching the source format. Other source types
+        // surface a warning and fall through (output silently
+        // doesn't fire — the existing ATEM SRT path keeps working).
+        let snap_for_omt = self.state.snapshot();
+        let omt_sender = if snap_for_omt.omt_output_enabled {
+            if let Some((w, h, pix_fmt)) = raw_format {
+                match crate::omt_sender::OmtSender::start_for_format(
+                    &snap_for_omt.omt_output_name,
+                    w,
+                    h,
+                    pix_fmt,
+                ) {
+                    Ok(s) => {
+                        log::info!(
+                            "OMT output enabled: publishing as {:?} at {}x{} ({})",
+                            snap_for_omt.omt_output_name,
+                            w,
+                            h,
+                            pix_fmt
+                        );
+                        Some(Arc::new(s))
+                    }
+                    Err(err) => {
+                        log::warn!("OMT output requested but sender start failed: {err}");
+                        None
+                    }
+                }
+            } else {
+                log::warn!(
+                    "OMT output requested but source {:?} doesn't produce raw frames. \
+                     alpha.9 only supports frame-tee from NDI/OMT sources; use a different \
+                     source or disable OMT output.",
+                    plan.source.id
+                );
+                None
             }
-            "omt" => {
-                let source_name = plan.source.label.clone();
-                let address = omt_runtime::find_address_by_name(&source_name).ok_or_else(|| {
-                    anyhow!(
-                        "OMT source not found: {source_name:?}. Refresh the discovery list, \
-                         or rebuild with --features omt if support isn't compiled in."
-                    )
-                })?;
-                let (format, capture, rx) =
-                    OmtCapture::start_and_probe_format(address, Duration::from_secs(5))?;
-                let cmd = self.build_ffmpeg_cmd_for_omt(&plan, &format);
-                (cmd, None, Some(capture), Some(rx))
-            }
-            _ => (self.build_ffmpeg_cmd(&plan), None, None, None),
+        } else {
+            None
         };
 
         log::info!("Launching FFmpeg: {}", shlex_join(&cmd));
@@ -312,13 +373,17 @@ impl Streamer {
         // Wire NDI/OMT -> FFmpeg stdin via a small drainer task. The
         // task body just consumes Vec<u8>s from the channel and
         // writes them to stdin — same shape regardless of which SDK
-        // produced the frames, so a single helper handles both.
+        // produced the frames, so a single helper handles both. When
+        // OMT output is also active, the same task fans each frame
+        // out to the OmtSender before writing to stdin (no separate
+        // tee thread; the OMT publish is so cheap relative to BGRA
+        // memcpy that inline serialization is fine).
         if let Some(rx) = frame_rx {
             let stdin = child
                 .stdin
                 .take()
                 .ok_or_else(|| anyhow!("ffmpeg stdin was not piped (raw video source)"))?;
-            tokio::spawn(ndi_writer_task(stdin, rx));
+            tokio::spawn(ndi_writer_task(stdin, rx, omt_sender.clone()));
         }
 
         // Reset stats for the new session.
@@ -342,6 +407,7 @@ impl Streamer {
             inner.child = Some(child);
             inner.ndi_capture = ndi_capture;
             inner.omt_capture = omt_capture;
+            inner.omt_sender = omt_sender;
         }
 
         // Spawn the monitor task. It owns the stderr handle, parses
@@ -369,6 +435,18 @@ impl Streamer {
             // first so FFmpeg's stdin closes cleanly before we
             // SIGTERM the process group.
             capture.stop();
+        }
+        // Drop the OMT publisher last (its lifetime is shorter than
+        // the writer task's; dropping while the writer holds an Arc
+        // would just defer the actual destroy until the task exits,
+        // which is fine — but logging the announcement going away
+        // is cleaner here).
+        if let Some(sender) = inner.omt_sender.take() {
+            log::info!(
+                "OMT output stopping: had {} active connection(s)",
+                sender.connection_count()
+            );
+            // Arc drops when the writer task exits next tick.
         }
         if let Some(child) = inner.child.as_mut() {
             // First send SIGTERM to the whole process group so
@@ -1135,15 +1213,36 @@ fn needs_quoting(c: char) -> bool {
 /// Drains NDI frames from the mpsc channel into FFmpeg's stdin. Exits
 /// when the channel closes (NDI capture stopped) or stdin write fails
 /// (FFmpeg exited).
-async fn ndi_writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<Vec<u8>>) {
+async fn ndi_writer_task(
+    mut stdin: tokio::process::ChildStdin,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    omt_sender: Option<Arc<crate::omt_sender::OmtSender>>,
+) {
+    let mut sender_log_throttle: u64 = 0;
     while let Some(buf) = rx.recv().await {
+        // OMT-out fan-out: feed the same frame to OmtSender before
+        // writing to FFmpeg's stdin. Errors here don't break the
+        // ATEM-bound FFmpeg path — they just log and skip this
+        // frame's OMT publish (a missed OMT frame is recoverable;
+        // a missed FFmpeg-stdin frame stalls the encoder).
+        if let Some(sender) = omt_sender.as_ref() {
+            match sender.feed_frame(&buf) {
+                Ok(_rc) => {}
+                Err(err) => {
+                    if sender_log_throttle.is_multiple_of(60) {
+                        log::warn!("OMT-out feed_frame failed (logged 1/60): {err}");
+                    }
+                    sender_log_throttle = sender_log_throttle.wrapping_add(1);
+                }
+            }
+        }
         if let Err(err) = stdin.write_all(&buf).await {
-            log::warn!("NDI->ffmpeg stdin write failed: {err}");
+            log::warn!("raw->ffmpeg stdin write failed: {err}");
             break;
         }
     }
     let _ = stdin.shutdown().await;
-    log::info!("NDI->ffmpeg writer task exiting");
+    log::info!("raw->ffmpeg writer task exiting");
 }
 
 #[allow(dead_code)]

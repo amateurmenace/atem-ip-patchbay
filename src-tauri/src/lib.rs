@@ -7,6 +7,7 @@ mod ndi_capture;
 mod ndi_runtime;
 mod omt_capture;
 mod omt_runtime;
+mod omt_sender;
 mod preview;
 mod protocol;
 mod sources;
