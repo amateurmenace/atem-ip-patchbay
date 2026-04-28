@@ -34,6 +34,15 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
+      <button id="open-net-diag" type="button" class="net-diag-btn"
+              title="Open the ATEM Net Diag operator dashboard (separate companion app — download from Releases if not installed)"
+              aria-label="Open ATEM Net Diag">
+        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
+          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        Net Diag
+      </button>
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
