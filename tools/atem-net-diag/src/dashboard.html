@@ -727,6 +727,79 @@
     .alarm-row .alarm-time { color: var(--muted); font-family: "SF Mono", Menlo, monospace; }
     .alarm-row .alarm-subsystem { color: var(--muted-2); text-align: right; font-size: 11px; }
 
+    /* Mirror-mode visibility banner — yellow/warn, surfaces when the
+       capture loop has been running >30s, has seen own-host flows,
+       but ZERO peer flows. Same banner pattern as alarms but warn-
+       coloured (problem is recoverable; user just needs to set up
+       SPAN). The wizard expansion lives inside this same element so
+       state stays grouped. */
+    .visibility-banner {
+      grid-column: 1 / -1;
+      margin: 0 16px 12px;
+      padding: 10px 14px;
+      background: rgba(243,196,75,0.08);
+      border: 1px solid rgba(243,196,75,0.30);
+      border-radius: 7px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .visibility-head {
+      display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    }
+    .visibility-title {
+      font-size: 12px; font-weight: 600;
+      color: var(--warn);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .visibility-since { color: var(--muted); font-size: 11px; }
+    .visibility-toggle {
+      margin-left: auto;
+      padding: 5px 12px; border-radius: 5px; cursor: pointer;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.03em;
+      border: 1px solid rgba(243,196,75,0.40);
+      background: rgba(243,196,75,0.10); color: var(--warn);
+    }
+    .visibility-toggle:hover { background: rgba(243,196,75,0.20); }
+    .visibility-summary {
+      color: var(--text); font-size: 12px; line-height: 1.5;
+    }
+    .visibility-summary code {
+      color: var(--accent); background: rgba(255,255,255,0.04);
+      padding: 1px 5px; border-radius: 3px;
+    }
+    .visibility-wizard { display: none; margin-top: 6px; }
+    .visibility-wizard.open { display: block; }
+    .visibility-wizard details {
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding: 8px 0;
+    }
+    .visibility-wizard details summary {
+      cursor: pointer; font-size: 12px; font-weight: 600;
+      color: var(--text); padding: 4px 0;
+      list-style: none;
+    }
+    .visibility-wizard details summary::-webkit-details-marker { display: none; }
+    .visibility-wizard details summary::before {
+      content: '▸ '; color: var(--warn); margin-right: 4px;
+      transition: transform 0.15s;
+      display: inline-block;
+    }
+    .visibility-wizard details[open] summary::before {
+      transform: rotate(90deg);
+    }
+    .visibility-wizard details .step-body {
+      margin-top: 6px; padding-left: 18px;
+      color: var(--muted); font-size: 12px; line-height: 1.55;
+    }
+    .visibility-wizard details .step-body code {
+      color: var(--text); background: rgba(255,255,255,0.04);
+      padding: 1px 5px; border-radius: 3px;
+    }
+    .visibility-wizard details .step-body strong { color: var(--text); }
+    .visibility-wizard a {
+      color: var(--signal); text-decoration: none;
+    }
+    .visibility-wizard a:hover { text-decoration: underline; }
+
     /* Switch port utilization card. */
     .switches-grid {
       display: flex; flex-direction: column; gap: 16px;
@@ -828,6 +901,68 @@
   <div class="alarms-banner" id="alarms-banner" hidden>
     <div class="alarms-banner-head" id="alarms-banner-head">0 active alarms</div>
     <div id="alarms-list"></div>
+  </div>
+
+  <!-- Mirror-mode visibility — yellow banner, hidden unless capture
+       has been running >30s, has seen own-host flows, but ZERO peer
+       flows (a peer Mac on a switched LAN with no SPAN port). The
+       wizard expansion below the banner walks the user through UDM
+       port-mirror setup. -->
+  <div class="visibility-banner" id="visibility-banner" hidden>
+    <div class="visibility-head">
+      <span class="visibility-title">Network visibility — you appear blind to ATEM traffic</span>
+      <span class="visibility-since" id="visibility-since"></span>
+      <button class="visibility-toggle" id="visibility-toggle" type="button">Set up port mirroring →</button>
+    </div>
+    <div class="visibility-summary" id="visibility-summary">
+      <!-- Filled in by renderVisibility() with live local-IP + ATEM data. -->
+    </div>
+    <div class="visibility-wizard" id="visibility-wizard">
+      <details>
+        <summary>Step 1 — Identify the port the peer Mac is plugged into on the UDM</summary>
+        <div class="step-body" id="visibility-step-1">
+          This Mac's local IP is <code id="visibility-local-ip">—</code>.
+          In the UDM web UI, go to <strong>Insights → Clients</strong>, find the entry for this IP,
+          and note which switch + port it's connected to.
+        </div>
+      </details>
+      <details>
+        <summary>Step 2 — Identify the port the ATEM is on</summary>
+        <div class="step-body" id="visibility-step-2">
+          The ATEM is at <code id="visibility-atem-ip">—</code>.
+          Find the same entry in <strong>Insights → Clients</strong> for this IP and note its port too.
+        </div>
+      </details>
+      <details>
+        <summary>Step 3 — Open Settings → Ports → Port Mirroring</summary>
+        <div class="step-body" id="visibility-step-3">
+          Open the UDM at <code><a id="visibility-unifi-link" href="#" target="_blank" rel="noopener">https://192.168.20.1</a></code>,
+          then click <strong>Settings → Ports → Port Mirroring</strong>.
+          On older UniFi OS this lives under <strong>Devices → [your switch] → Settings → Port Profile → Mirror</strong>.
+        </div>
+      </details>
+      <details>
+        <summary>Step 4 — Save the mirror: source = ATEM port, destination = peer Mac port</summary>
+        <div class="step-body">
+          Set <strong>Source Ports</strong> to the ATEM's switch port (Step 2),
+          <strong>Destination Port</strong> to this Mac's switch port (Step 1),
+          and save. The capture should start seeing peer flows within ~5 seconds —
+          this banner will disappear automatically. If it stays after a minute,
+          double-check that you saved the change AND that the destination port is
+          set to "All packets" (not "TX only" or "RX only").
+        </div>
+      </details>
+      <details>
+        <summary>Alternative — run atem-net-diag on the streamer's Mac instead</summary>
+        <div class="step-body">
+          If you can't configure port mirroring (e.g. you're not the network admin),
+          quit this instance and run atem-net-diag on the same Mac that's running
+          ATEM IP Patchbay. That Mac sees its own outbound traffic to the ATEM
+          natively — no SPAN port needed. The UDM polling data source still
+          works from any machine that can reach the controller.
+        </div>
+      </details>
+    </div>
   </div>
 
   <div class="mode-banner live" id="mode-banner">
@@ -1370,6 +1505,76 @@
       `).join('');
     }
 
+    // Mirror-mode visibility banner. Hidden when capture sees peer
+    // traffic (we're on a SPAN port or the streamer's machine) or
+    // hasn't been running long enough to call. Surfaces yellow when
+    // we're stuck on a non-mirrored switch port — the wizard below
+    // the banner walks the user through UDM port-mirror setup so
+    // they can recover without leaving the dashboard.
+    function renderVisibility(state) {
+      const banner = $('#visibility-banner');
+      const vis = state.lan_visibility || { state: 'unknown' };
+      if (vis.state !== 'possibly_blind') {
+        banner.hidden = true;
+        return;
+      }
+      banner.hidden = false;
+
+      // "Since" hint — operator wants to know how long we've been
+      // blind so they can correlate with their own actions ("oh,
+      // I just plugged this in"). The state.lan_visibility.since
+      // is a unix timestamp; difference vs state.now is the dwell.
+      const sinceSecs = vis.since ? Math.max(0, state.now - vis.since) : 0;
+      $('#visibility-since').textContent = sinceSecs > 0
+        ? `flagged ${fmtAgo(sinceSecs)} ago`
+        : '';
+
+      // Summary line below the head — pulls the actual numbers so
+      // the operator sees concrete data ("you've seen 3 flows but
+      // none are from peers") and can decide whether the auto-
+      // detect is right.
+      const own = state.flows
+        ? state.flows.filter((f) => (state.local_ips || []).includes(f.src_ip) || (state.local_ips || []).includes(f.dst_ip)).length
+        : 0;
+      const peer = state.flows
+        ? state.flows.filter((f) => !((state.local_ips || []).includes(f.src_ip) || (state.local_ips || []).includes(f.dst_ip))).length
+        : 0;
+      $('#visibility-summary').innerHTML = `
+        Capture has been running for >30s and has seen <code>${own}</code>
+        flow${own === 1 ? '' : 's'} involving this Mac, but <code>${peer}</code>
+        flows from other devices. On a switched LAN that means the ATEM's
+        traffic isn't reaching this capture interface — modern Ethernet
+        switches don't broadcast unicast.
+      `;
+
+      // Wizard pre-fill — Step 1 takes the first sorted local IP,
+      // Step 2 takes the configured ATEM IP, Step 3 deep-links to
+      // the UDM web UI at the configured host.
+      const localIps = state.local_ips || [];
+      $('#visibility-local-ip').textContent = localIps.length > 0 ? localIps[0] : '(unknown)';
+      const cfg = state.config || {};
+      const atemIp = (cfg.atem && cfg.atem.ip) || '(not configured)';
+      $('#visibility-atem-ip').textContent = atemIp;
+      const unifiHost = cfg.unifi_host || 'https://192.168.20.1';
+      const unifiLink = $('#visibility-unifi-link');
+      unifiLink.textContent = unifiHost;
+      unifiLink.href = unifiHost;
+    }
+
+    // Wire the toggle button once at boot so click semantics survive
+    // re-renders (the button element itself doesn't get re-created
+    // each tick — only the banner is hidden/shown).
+    document.addEventListener('DOMContentLoaded', () => {
+      const toggle = document.querySelector('#visibility-toggle');
+      const wizard = document.querySelector('#visibility-wizard');
+      if (toggle && wizard) {
+        toggle.addEventListener('click', () => {
+          const isOpen = wizard.classList.toggle('open');
+          toggle.textContent = isOpen ? 'Hide steps ↑' : 'Set up port mirroring →';
+        });
+      }
+    });
+
     // Switch port utilization. One block per USW, with a port table
     // showing real-time tx/rx kbps, errors, link state. The ATEM's
     // port is highlighted with an orange dot.
@@ -1546,6 +1751,7 @@
       renderModeBanner(cfg.mode || 'live');
       renderPreshow(s);
       renderAlarms(s);
+      renderVisibility(s);
       renderWan(s);
       renderSwitches(s);
       renderAtem(s);

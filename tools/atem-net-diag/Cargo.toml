@@ -1,6 +1,6 @@
 [package]
 name = "atem-net-diag"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "ATEM network diagnostic — Live (passive UDM polling + tshark capture, default) or Standby (active SRT/RTMP probe). Per-key flow correlation via SRT HSv5 SID extension parsing. Designed for live broadcast monitoring without interfering with the production stream."
 license = "MIT"
@@ -28,3 +28,12 @@ serde_json = "1"
 # even with API-key auth it's harmless.
 ureq = { version = "2", default-features = false, features = ["native-tls", "json", "cookies"] }
 native-tls = "0.2"
+
+# Mirror-mode auto-detect: look up this machine's own IPs at startup
+# so the monitor loop can classify each captured flow's src_ip as
+# "ours" (we're seeing our own outbound, normal even on a switched
+# LAN) vs "peer" (we have visibility into other devices' traffic,
+# which means we're either on the streamer's machine or a SPAN port).
+# Used to surface the "you appear blind to ATEM traffic, set up port
+# mirroring" hint when only own-host flows are seen for >30s.
+local-ip-address = "0.6"

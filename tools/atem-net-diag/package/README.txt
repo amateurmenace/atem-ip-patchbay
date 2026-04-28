@@ -1,5 +1,20 @@
 atem-net-diag — ATEM network diagnostic tool
-v0.2.1  ·  arm64 macOS
+v0.2.2  ·  arm64 macOS
+
+WHAT'S NEW IN v0.2.2 (Session 8 — mirror-mode wizard)
+-----------------------------------------------------
+* MIRROR-MODE AUTO-DETECT — when capture has been running >30s and
+  has seen own-host flows but ZERO peer-host flows, the dashboard
+  surfaces a yellow "you appear blind to ATEM traffic" banner. Click
+  the banner's "Set up port mirroring" button to expand a 4-step
+  wizard that walks you through UDM SPAN configuration with the
+  steps pre-filled from your live data (this Mac's IP, the configured
+  ATEM IP, the UDM web UI URL).
+
+  This solves the most common "capture isn't seeing anything" failure
+  for peer-Mac operators on switched LANs: nothing was wrong with the
+  tool, the operator just needed to know that modern switches don't
+  broadcast unicast and that UDMs have a single-click SPAN feature.
 
 WHAT'S NEW IN v0.2.1 (Session 6 — monitor-first rework)
 -------------------------------------------------------
@@ -149,7 +164,49 @@ on:
 
 The UDM POLLING data source is independent and works from any machine
 that can reach the controller — that's why it's the default headline
-view in v0.2.0.
+view in v0.2.0+.
+
+PORT MIRRORING ON UDM (UNIFI DREAM MACHINE / UNIFI SWITCH)
+----------------------------------------------------------
+If you want option (c) — running atem-net-diag from a non-streamer Mac
+and still seeing the ATEM's stream traffic — set up SPAN/mirror on the
+switch the ATEM is connected to. The steps below match the recent
+UniFi Network UI (8.x); older versions live under different paths but
+the underlying feature is the same.
+
+  1. Open the UDM web UI (default https://192.168.20.1) and sign in.
+
+  2. Identify the ATEM's switch + port:
+     Insights → Clients → find the ATEM by its IP/MAC →
+     note the "Switch / Port" column (e.g. "USW Pro 24 / Port 7").
+
+  3. Identify this Mac's switch + port the same way (use the IP shown
+     under the "Network visibility" wizard in atem-net-diag).
+
+  4. Configure the mirror:
+     Settings → Ports → Port Mirroring (or, on older UniFi OS,
+     Devices → [your switch] → Settings → Port Profile → Mirror).
+     Click "Create Mirror".
+       Source ports:      the ATEM's port from step 2
+       Destination port:  this Mac's port from step 3
+       Direction:         All packets (or RX + TX)
+
+  5. Save. Within ~5 seconds the atem-net-diag dashboard's
+     "Network visibility" banner should disappear automatically as
+     peer flows start arriving on the capture interface.
+
+GOTCHA — MIRRORED-PORT INTERFACE NOTES:
+  - The destination port of a SPAN setup typically can't carry normal
+    LAN traffic at the same time. The Mac plugged into it loses its
+    DHCP lease + general internet. Solutions: (a) use a USB-C ethernet
+    adapter as a dedicated capture NIC and keep Wi-Fi for control,
+    (b) use a dedicated diagnostic Mac that's only ever on the SPAN
+    port, (c) set up the mirror only when troubleshooting and tear it
+    down for normal use.
+  - The "Direction" setting matters: "TX only" misses inbound traffic
+    to the ATEM (the actual stream); "RX only" misses ATEM-side ACKs
+    (SRT control packets). Always use "All packets" for streaming
+    diagnostics.
 
 WHAT TO LOOK FOR
 ----------------
