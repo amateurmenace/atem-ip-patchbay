@@ -406,34 +406,103 @@ jobs:
         shell: pwsh
         timeout-minutes: 5
         run: |
-          # NewTek's NDI 6 SDK Windows installer. Built with
-          # InstallShield (NOT Inno Setup), so the /S flag we
-          # initially tried hung the runner waiting on a UAC dialog
-          # — alpha.6's Windows job ran for 59 minutes on this step
-          # before being cancelled. /s /v"/qn" is the standard
-          # InstallShield silent install: /s skips the wrapper UI,
-          # /v"/qn" forwards "/qn" to msiexec for the underlying
-          # MSI. timeout-minutes caps the disaster radius if the
-          # installer changes idiom again — better to fail fast and
-          # iterate on alpha.N+1 than waste 6h of CI per botched run.
+          # NewTek's NDI 6 SDK Windows installer hangs in CI no matter
+          # what silent flag we pass — /S (NSIS), /SILENT, /VERYSILENT
+          # (Inno Setup), /s /v"/qn" (InstallShield wrapper around MSI),
+          # /quiet — all timeout. Best diagnosis: there's a
+          # EULA-acceptance dialog or a UAC elevation prompt that no
+          # flag bypasses on a non-interactive runner. Both alpha.6
+          # and alpha.7 burned the full 5-min step timeout here.
+          #
+          # Skip the installer entirely. 7-Zip can extract most
+          # Windows installer formats (NSIS, InstallShield SFX, MSI,
+          # WiX, raw .cab) directly from the .exe stub without running
+          # the install logic. We extract, locate the SDK tree by
+          # finding Processing.NDI.Lib.h, then point grafton-ndi at it
+          # via NDI_SDK_DIR. No EULA, no UAC, no hanging.
           $url = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20SDK.exe"
           $out = "$env:RUNNER_TEMP\ndi-sdk.exe"
           Invoke-WebRequest -Uri $url -OutFile $out
-          $proc = Start-Process -FilePath $out -ArgumentList @('/s', '/v"/qn"') -Wait -NoNewWindow -PassThru
-          if ($proc.ExitCode -ne 0) {
-            Write-Host "Installer exited with code $($proc.ExitCode)"
+          Write-Host "Downloaded $([math]::Round((Get-Item $out).Length / 1MB, 1)) MB installer to $out"
+
+          $extract = "$env:RUNNER_TEMP\ndi-sdk-extracted"
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) {
+            Write-Host "ERROR: 7-Zip not found at $sevenZip on this runner"
+            exit 1
           }
-          # The SDK lays out under either "C:\Program Files\NDI\NDI 6 SDK"
-          # or "C:\Program Files\NDI\NDI SDK for Windows" depending on
-          # version; surface whichever exists so the build sees the headers.
-          if (Test-Path "C:\Program Files\NDI\NDI 6 SDK\Include") {
-            Get-ChildItem "C:\Program Files\NDI\NDI 6 SDK\Include" | Select-Object -First 3
-          } elseif (Test-Path "C:\Program Files\NDI\NDI SDK for Windows\Include") {
-            Get-ChildItem "C:\Program Files\NDI\NDI SDK for Windows\Include" | Select-Object -First 3
+          Write-Host "Extracting installer with 7-Zip..."
+          & $sevenZip x $out "-o$extract" -y -bb0 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: 7-Zip extraction failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+
+          # Some installers wrap an inner MSI. If we find one,
+          # extract it too — that's where the SDK files live in
+          # the InstallShield case.
+          $msi = Get-ChildItem -Path $extract -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
+          if ($null -ne $msi) {
+            Write-Host "Found inner MSI: $($msi.FullName); extracting..."
+            $extractMsi = "$env:RUNNER_TEMP\ndi-sdk-msi-extract"
+            & $sevenZip x $msi.FullName "-o$extractMsi" -y -bb0 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              $extract = $extractMsi
+            }
+          }
+
+          # Find Processing.NDI.Lib.h — canonical marker of the SDK
+          # root. Its parent dir is Include/; the SDK base is the
+          # grandparent.
+          $header = Get-ChildItem -Path $extract -Filter "Processing.NDI.Lib.h" -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
+          if ($null -eq $header) {
+            Write-Host "ERROR: Processing.NDI.Lib.h not found in extracted SDK"
+            Write-Host "Top-level contents of $extract:"
+            Get-ChildItem -Path $extract | Format-Table
+            Write-Host "Recursing one level deeper:"
+            Get-ChildItem -Path $extract -Recurse -Depth 2 | Format-Table
+            exit 1
+          }
+          $sdkRoot = $header.Directory.Parent.FullName
+          Write-Host "Found SDK root at: $sdkRoot"
+          Get-ChildItem $sdkRoot | Format-Table
+
+          # Verify the .lib import library is present (grafton-ndi's
+          # build.rs links against this). Bail loudly if missing.
+          $libPath = Join-Path $sdkRoot "Lib\x64\Processing.NDI.Lib.x64.lib"
+          if (-not (Test-Path $libPath)) {
+            Write-Host "ERROR: $libPath not present — grafton-ndi link will fail"
+            Write-Host "Lib tree:"
+            if (Test-Path "$sdkRoot\Lib") {
+              Get-ChildItem "$sdkRoot\Lib" -Recurse | Format-Table
+            }
+            exit 1
+          }
+          Write-Host "Verified .lib at $libPath"
+
+          # Stage the .dll alongside ffmpeg.exe in the bundle's
+          # sidecar/ dir so end users don't need NDI Tools installed
+          # separately. tauri-bundler's resources glob picks it up
+          # via "sidecar/*" in tauri.conf.json. The grafton-ndi-
+          # produced .exe imports Processing.NDI.Lib.x64.dll at
+          # runtime; bundling it next to ffmpeg.exe means ffmpeg_path
+          # / NDI runtime resolution finds it via the same Resources/
+          # path lookup.
+          $dllPath = Join-Path $sdkRoot "Bin\x64\Processing.NDI.Lib.x64.dll"
+          if (Test-Path $dllPath) {
+            New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+            Copy-Item $dllPath -Destination "src-tauri\sidecar\Processing.NDI.Lib.x64.dll" -Force
+            Write-Host "Staged Processing.NDI.Lib.x64.dll into src-tauri\sidecar\ for bundling"
           } else {
-            Write-Host "WARNING: NDI SDK install completed but no Include directory found"
-            Get-ChildItem "C:\Program Files\NDI" -ErrorAction SilentlyContinue | Format-Table
+            Write-Host "WARNING: $dllPath not present — end users will need NDI Tools at runtime"
           }
+
+          # Export NDI_SDK_DIR so grafton-ndi's build.rs picks it up
+          # at link time. Build.rs honors this env var explicitly.
+          "NDI_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Exported NDI_SDK_DIR=$sdkRoot"
 
       - name: Download FFmpeg sidecar (BtbN GPL build, x64)
         shell: pwsh
