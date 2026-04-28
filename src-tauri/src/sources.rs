@@ -364,6 +364,28 @@ pub fn ndi(source_name: &str) -> Source {
     }
 }
 
+/// OMT (Open Media Transport) source — alpha.9 Phase C. Same shape
+/// as NDI: video frames pipe into FFmpeg's stdin via the OMT receiver
+/// thread, audio defaults to lavfi silence (libomt audio integration
+/// deferred to alpha.10). Available iff a source name has been
+/// selected AND the `omt` cargo feature is on (otherwise the streamer
+/// surface returns an error explaining the feature flag).
+pub fn omt(source_name: &str) -> Source {
+    Source {
+        id: "omt".into(),
+        label: source_name.to_string(),
+        description: format!("OMT direct: {source_name}"),
+        ffmpeg_input_args: Vec::new(), // filled in post-probe by streamer
+        available: !source_name.is_empty(),
+        notes: if source_name.is_empty() {
+            "Pick an OMT sender from the discovery list.".into()
+        } else {
+            String::new()
+        },
+        combined_av: false,
+    }
+}
+
 pub fn rtmp_listen(
     bind_host: &str,
     bind_port: u16,
@@ -405,6 +427,7 @@ pub fn resolve_source(state: &EncoderState) -> Result<Source, String> {
         "pipe" => Ok(pipe(&snap.pipe_path)),
         "avfoundation" => Ok(resolve_capture_device(&snap, width, height, fps)),
         "ndi" => Ok(ndi(&snap.ndi_source_name)),
+        "omt" => Ok(omt(&snap.omt_source_name)),
         "srt_listen" => Ok(srt_listen(
             &snap.relay_bind_host,
             snap.relay_srt_port,

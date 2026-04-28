@@ -122,6 +122,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/devices", get(api_devices))
         .route("/api/discover", get(api_discover))
         .route("/api/ndi-senders", get(api_ndi_senders))
+        .route("/api/omt-senders", get(api_omt_senders))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
         .route("/api/kill-orphans", post(api_kill_orphans))
@@ -322,9 +323,18 @@ struct LogResponse {
 /// available — the JS poll loop interprets that as "waiting" and
 /// shows the SMPTE bars / waiting hint.
 async fn api_preview(State(state): State<HttpAppState>) -> Response {
+    // Preview waterfall: streaming NDI capture > streaming OMT capture
+    // > pre-stream Preview backend. Whichever has fresh frames first
+    // wins. (OMT preview is no-op in alpha.9 — `OmtCapture::latest_preview`
+    // always returns None pending a libomt-rs API for stride accessors;
+    // the call is here so a future libomt-rs version slots in without
+    // touching this handler.)
     let jpeg = match state.streamer.current_ndi_preview().await {
         Some(j) => Some(j),
-        None => state.preview.latest_jpeg(),
+        None => match state.streamer.current_omt_preview().await {
+            Some(j) => Some(j),
+            None => state.preview.latest_jpeg(),
+        },
     };
     match jpeg {
         Some(jpeg) => Response::builder()
@@ -434,6 +444,26 @@ async fn api_ndi_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoR
     };
     let senders = crate::ndi_runtime::discover(wait);
     Json(NdiSendersResponse { senders })
+}
+
+/// OMT (Open Media Transport) sender list — same payload shape as
+/// /api/ndi-senders so the UI can render either with the same tile
+/// component. When the `omt` cargo feature is off (default for
+/// alpha.9), `omt_runtime::discover()` returns empty and the OMT
+/// section in the UI gallery is hidden.
+#[derive(Serialize)]
+struct OmtSendersResponse {
+    senders: Vec<crate::omt_runtime::OmtSource>,
+}
+
+async fn api_omt_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let senders = crate::omt_runtime::discover(wait);
+    Json(OmtSendersResponse { senders })
 }
 
 async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {
@@ -556,6 +586,7 @@ struct SettingsPayload {
     current_service_name: Option<String>,
     current_server_name: Option<String>,
     ndi_source_name: Option<String>,
+    omt_source_name: Option<String>,
     av_video_index: Option<i32>,
     av_video_name: Option<String>,
     av_audio_index: Option<i32>,
@@ -720,6 +751,7 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             current_service_name: p.current_service_name,
             current_server_name: p.current_server_name,
             ndi_source_name: p.ndi_source_name,
+            omt_source_name: p.omt_source_name,
             av_video_index: p.av_video_index,
             av_video_name: p.av_video_name,
             av_audio_index: p.av_audio_index,

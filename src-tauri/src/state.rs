@@ -156,6 +156,11 @@ struct Inner {
     /// Name of the selected NDI sender (for source_id="ndi"). Phase 4.
     /// Populated by the UI after the user picks one from /api/ndi-senders.
     ndi_source_name: String,
+    /// Name of the selected OMT sender (for source_id="omt"). alpha.9.
+    /// Populated by the UI after the user picks one from /api/omt-senders.
+    /// Held independently from ndi_source_name so flipping between OMT
+    /// and NDI tiles preserves both selections.
+    omt_source_name: String,
 
     relay_bind_host: String,
     relay_srt_port: u16,
@@ -212,6 +217,7 @@ impl EncoderState {
                 audio_pan_r: 2,
                 pipe_path: String::new(),
                 ndi_source_name: String::new(),
+                omt_source_name: String::new(),
                 relay_bind_host: "0.0.0.0".into(),
                 relay_srt_port: 9710,
                 relay_srt_latency_us: 200_000,
@@ -354,6 +360,7 @@ impl EncoderState {
             audio_mode: inner.audio_mode.clone(),
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
+            omt_source_name: inner.omt_source_name.clone(),
             relay_bind_host: inner.relay_bind_host.clone(),
             relay_srt_port: inner.relay_srt_port,
             relay_srt_latency_us: inner.relay_srt_latency_us,
@@ -454,6 +461,9 @@ impl EncoderState {
         }
         if let Some(v) = &update.ndi_source_name {
             inner.ndi_source_name = v.clone();
+        }
+        if let Some(v) = &update.omt_source_name {
+            inner.omt_source_name = v.clone();
         }
         if let Some(v) = update.av_video_index {
             inner.av_video_index = v;
@@ -606,6 +616,7 @@ impl EncoderState {
             audio_pan_r: inner.audio_pan_r,
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
+            omt_source_name: inner.omt_source_name.clone(),
             relay: RelaySnapshot {
                 bind_host: inner.relay_bind_host.clone(),
                 srt_port: inner.relay_srt_port,
@@ -756,6 +767,7 @@ pub struct SourceSelection {
     pub audio_mode: String,
     pub pipe_path: String,
     pub ndi_source_name: String,
+    pub omt_source_name: String,
     pub relay_bind_host: String,
     pub relay_srt_port: u16,
     pub relay_srt_latency_us: u32,
@@ -788,6 +800,7 @@ pub struct SettingsUpdate {
     pub current_service_name: Option<String>,
     pub current_server_name: Option<String>,
     pub ndi_source_name: Option<String>,
+    pub omt_source_name: Option<String>,
     // AVF / DirectShow device selection — Phase 8b fix.
     pub av_video_index: Option<i32>,
     pub av_video_name: Option<String>,
@@ -871,6 +884,7 @@ pub struct Snapshot {
     pub audio_pan_r: u8,
     pub pipe_path: String,
     pub ndi_source_name: String,
+    pub omt_source_name: String,
     pub relay: RelaySnapshot,
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,

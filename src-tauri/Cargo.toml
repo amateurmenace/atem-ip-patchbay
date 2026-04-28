@@ -52,3 +52,21 @@ libc = "0.2"
 # v0.2.0 Phase 6 — multi-instance launcher
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
+
+# v0.2.0-alpha.9 — OMT (Open Media Transport) support behind a
+# feature flag. The libomt crate vendors its own bindgen against
+# libomt.h but DOES need libomt.dylib at link time
+# (vendor/libomt/<os>/libomt.<ext> by default, override via
+# LIBOMT_PATH). Not all CI runners or end-user machines have that
+# yet, so OMT is opt-in for now: build with `--features omt` to
+# enable. The omt_runtime / omt_capture / omt_sender modules
+# always exist; their bodies cfg-out to no-ops when the feature is
+# off. Future alpha bundles libomt.dylib alongside libndi.dylib
+# once distribution is solidified.
+[dependencies.libomt]
+version = "0.1"
+optional = true
+
+[features]
+default = []
+omt = ["dep:libomt"]

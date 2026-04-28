@@ -5,6 +5,8 @@ mod http;
 mod instance;
 mod ndi_capture;
 mod ndi_runtime;
+mod omt_capture;
+mod omt_runtime;
 mod preview;
 mod protocol;
 mod sources;
@@ -91,6 +93,12 @@ pub fn run() {
             // works — discovery just stays empty.
             if let Err(err) = ndi_runtime::init() {
                 log::warn!("NDI runtime init failed (NDI features disabled): {err}");
+            }
+            // OMT runtime — same pattern, no-op when the omt cargo
+            // feature is off (default). Discovery will return empty
+            // and OMT tile gallery will be empty.
+            if let Err(err) = omt_runtime::init() {
+                log::warn!("OMT runtime init failed (OMT features disabled): {err}");
             }
 
             let static_dir = resolve_static_dir(app.handle());
