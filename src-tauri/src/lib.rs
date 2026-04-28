@@ -1,5 +1,6 @@
 mod device_scanner;
 mod ffmpeg_path;
+mod frame_pack;
 mod http;
 mod instance;
 mod ndi_capture;
