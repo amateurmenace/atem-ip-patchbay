@@ -570,11 +570,128 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------
+  # atem-net-diag companion tool — Mac arm64 tarball + .app.zip,
+  # signed with the same Developer ID + hardened runtime as the
+  # main app. Until alpha.9 this binary was distributed via iCloud
+  # Drive only; landing it as a release asset gives users on
+  # Ubiquiti networks a one-click download path for the operator
+  # dashboard. Windows / Linux builds intentionally deferred —
+  # tshark path discovery + signing differ enough on each platform
+  # to warrant their own pass.
+  # ---------------------------------------------------------------
+  build-atem-net-diag:
+    name: Build atem-net-diag (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/atem-net-diag/target
+          key: cargo-net-diag-macos-arm64-${{ hashFiles('tools/atem-net-diag/Cargo.lock') }}
+
+      - name: Import signing identity (if secrets are set)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KC_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+        run: |
+          # Same throwaway-keychain pattern as build-macos. When
+          # secrets aren't set, build-package.sh falls through to
+          # ad-hoc signing (still loadable on the user's own Mac
+          # but Gatekeeper challenges on download from elsewhere).
+          if [ -z "$CERT_P12" ]; then
+            echo "MACOS_CERTIFICATE_P12 not set — atem-net-diag will be ad-hoc signed."
+            exit 0
+          fi
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p "$KC_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PWD" build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm /tmp/cert.p12
+
+      - name: Build + sign + tarball + .app.zip
+        working-directory: tools/atem-net-diag
+        run: |
+          # build-package.sh produces three artifacts under dist/:
+          #   1. atem-net-diag-<version>-macos-arm64.tar.gz  (CLI users)
+          #   2. atem-net-diag.app/                          (raw bundle)
+          #   3. atem-net-diag-<version>-macos-arm64.app.zip (AirDrop)
+          # We upload (1) and (3); (2) is just an intermediate.
+          chmod +x build-package.sh
+          ./build-package.sh
+          ls -lh dist/
+
+      - name: Notarize + staple (if all Apple secrets are set)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Notarization is opt-in. With all three secrets set,
+          # submit the tarball + .app.zip to Apple's notary service
+          # so end users see no Gatekeeper prompt at all on first
+          # launch. Without secrets, this step skips and the
+          # binaries ship signed-but-not-notarized (Gatekeeper
+          # challenges once on first launch, recoverable).
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "Apple notarization secrets not all set — skipping notarization."
+            exit 0
+          fi
+          cd tools/atem-net-diag/dist
+          for f in *.tar.gz *.app.zip; do
+            if [ -f "$f" ]; then
+              echo "==> Submitting $f for notarization"
+              xcrun notarytool submit "$f" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --wait || echo "  (notarization failed for $f — continuing)"
+            fi
+          done
+          # Staple the .app.zip — tarballs of folders can't be
+          # stapled (the staple goes onto the .app, which the user
+          # extracts and ad-hoc trusts). For .app.zip we extract,
+          # staple the .app inside, and re-zip. For the tarball we
+          # rely on Apple's online notary check on first launch.
+          if [ -f atem-net-diag-*.app.zip ]; then
+            ZIP=$(ls atem-net-diag-*.app.zip | head -1)
+            unzip -q "$ZIP" -d /tmp/staple-extract
+            xcrun stapler staple /tmp/staple-extract/atem-net-diag.app || true
+            rm "$ZIP"
+            (cd /tmp/staple-extract && zip -qr "/tmp/$ZIP" atem-net-diag.app)
+            mv "/tmp/$ZIP" "$ZIP"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atem-net-diag-macos-arm64
+          path: |
+            tools/atem-net-diag/dist/*.tar.gz
+            tools/atem-net-diag/dist/*.app.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
   # Pull both artifacts together and create the GitHub Release.
   # ---------------------------------------------------------------
   release:
     name: Publish GitHub Release
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-atem-net-diag]
     # Release if the Mac build succeeded — even if Windows
     # failed/cancelled. Mac-only alphas are still useful, and
     # blocking the .dmg publish on a flaky Windows installer was
@@ -600,15 +717,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Build the file list dynamically — Windows artifact may
-          # be missing if its build failed (we still publish the
-          # Mac build alone).
+          # Build the file list dynamically — Windows + atem-net-diag
+          # artifacts may be missing if their builds failed (we still
+          # publish whatever Mac succeeded with). The release-job's
+          # gating (`if: always() && needs.build-macos.result == 'success'`)
+          # makes Mac the only required artifact; everything else is
+          # additive.
           FILES=()
           if compgen -G "artifacts/macos-arm64/*.dmg" > /dev/null; then
             FILES+=(artifacts/macos-arm64/*.dmg)
           fi
           if compgen -G "artifacts/windows-x64/*.exe" > /dev/null; then
             FILES+=(artifacts/windows-x64/*.exe)
+          fi
+          if compgen -G "artifacts/atem-net-diag-macos-arm64/*.tar.gz" > /dev/null; then
+            FILES+=(artifacts/atem-net-diag-macos-arm64/*.tar.gz)
+          fi
+          if compgen -G "artifacts/atem-net-diag-macos-arm64/*.app.zip" > /dev/null; then
+            FILES+=(artifacts/atem-net-diag-macos-arm64/*.app.zip)
           fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
