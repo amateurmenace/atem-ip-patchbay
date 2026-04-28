@@ -26,6 +26,13 @@ use crate::{
     DEFAULT_ATEM_PORT, DEFAULT_UDM_HOST,
 };
 
+/// Window the auto-detect waits before flagging "you appear blind."
+/// Short enough that the wizard surfaces during a normal session
+/// (operators routinely sit for >30s with the dashboard open while
+/// pre-show checks complete), long enough to ride out a quiet patch
+/// where ATEM traffic happens to pause briefly.
+const LAN_VISIBILITY_WINDOW_SECS: u64 = 30;
+
 const KEEP_LAST_PROBES: usize = 250;
 const FLOW_STALE_SECS: u64 = 60;
 
@@ -59,6 +66,41 @@ impl DiagMode {
             "standby" => Some(DiagMode::Standby),
             _ => None,
         }
+    }
+}
+
+/// Mirror-mode auto-detect state. Modern Ethernet switches don't
+/// broadcast unicast; a peer Mac plugged into the same switch as the
+/// ATEM can't see the streamer's traffic to the ATEM unless port
+/// mirroring (SPAN) is configured. This enum tracks whether we
+/// appear to be on a mirrored / streamer-side port (`SeesPeers`) or
+/// stuck on a normal port that only sees our own traffic
+/// (`PossiblyBlind`). The dashboard surfaces a wizard with UDM SPAN
+/// setup steps when `PossiblyBlind` is detected.
+///
+/// Only relevant when capture is enabled (tshark running). UDM
+/// polling is unaffected — that's the recommended primary data
+/// source precisely because it's topology-independent.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum LanVisibility {
+    /// Either capture isn't running yet, or it's been running less
+    /// than 30s — too early to call.
+    Unknown,
+    /// We've observed at least one flow with a src_ip that isn't ours.
+    /// Either we're on the streamer's machine (we see its outbound)
+    /// or a SPAN port is mirroring traffic to us. Either way, the
+    /// capture data source is healthy; no wizard needed.
+    SeesPeers,
+    /// Capture has been running >30s, we've seen our own outbound
+    /// (so capture itself is working) but ZERO peer flows. Almost
+    /// certainly a switched-LAN visibility problem — show the wizard.
+    PossiblyBlind { since: u64 },
+}
+
+impl Default for LanVisibility {
+    fn default() -> Self {
+        LanVisibility::Unknown
     }
 }
 
@@ -288,6 +330,30 @@ pub struct DashboardState {
     /// fresh. None when the capture thread isn't running (no
     /// tshark, missing dep, etc.).
     pub monitor_pid: Option<u32>,
+
+    /// This machine's own IPv4 addresses, gathered once at startup
+    /// via `local_ip_address::list_afinet_netifas`. Used by the
+    /// monitor loop to classify each captured flow as "ours" (src_ip
+    /// matches one of these) or "peer" (src_ip doesn't, indicating
+    /// we're on a SPAN port or the streamer's machine). The set is
+    /// frozen at startup; if the user changes Wi-Fi networks mid-
+    /// session we don't auto-refresh — they'd need to relaunch.
+    pub local_ips: HashSet<String>,
+    /// Auto-detect state for mirror-mode/SPAN visibility — see
+    /// `LanVisibility`. Updated by the monitor loop on each captured
+    /// packet (cheap atomic-ish updates) plus periodic 5s checks.
+    pub lan_visibility: LanVisibility,
+    /// Counts of own-host vs peer flows observed since capture
+    /// started. The 30s "are we blind?" check uses these to decide
+    /// PossiblyBlind: if `peer_flow_count == 0` AND
+    /// `own_flow_count > 0` AND >30s elapsed since capture started,
+    /// we conclude visibility is restricted.
+    pub own_flow_count: u64,
+    pub peer_flow_count: u64,
+    /// Wall-clock when the monitor's outer loop first started this
+    /// session — drives the 30s minimum window before flipping to
+    /// PossiblyBlind. None until the first tshark child spawns.
+    pub monitor_started_at: Option<u64>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -370,6 +436,13 @@ pub struct StateResponse<'a> {
     pub last_system_poll_at: u64,
     pub system_thread_alive: bool,
     pub rdns_cache: HashMap<String, Option<String>>,
+    /// Mirror-mode auto-detect — surfaces "you appear blind to ATEM
+    /// traffic, set up port mirroring" wizard when capture's been
+    /// running >30s and only own-host flows have been seen.
+    pub lan_visibility: LanVisibility,
+    /// This machine's own IPs. Sent to the UI so the wizard can
+    /// pre-fill Step 1 ("Identify the port the peer Mac is on").
+    pub local_ips: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -439,6 +512,29 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
     let unifi_credentials = unifi::read_credentials_from_env();
     let unifi_configured = unifi_credentials.is_some();
 
+    // Snapshot this machine's own IPv4 addresses once at startup.
+    // The monitor loop uses these to classify each captured flow's
+    // src_ip as "ours" (own outbound) vs "peer" (we have visibility
+    // into other devices' traffic — either we're on the streamer's
+    // machine OR a SPAN/mirror port is delivering traffic to us).
+    // Skipping IPv6 for now: the auto-detect is concerned with v4
+    // SRT/RTMP flows on the LAN, and tshark's flow_key.src_ip is
+    // emitted as a v4 dotted-quad in our parser.
+    let local_ips: HashSet<String> = local_ip_address::list_afinet_netifas()
+        .map(|nics| {
+            nics.into_iter()
+                .filter_map(|(_name, ip)| match ip {
+                    std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+                    std::net::IpAddr::V6(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "[dashboard] local IPs detected for visibility classification: {:?}",
+        local_ips
+    );
+
     let state = Arc::new(Mutex::new(DashboardState {
         started_at: now_secs(),
         config: ConfigSnapshot {
@@ -455,6 +551,7 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
             wan_download_cap_mbps: 0.0,
             source_labels: HashMap::new(),
         },
+        local_ips,
         ..Default::default()
     }));
 
@@ -720,6 +817,12 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
     let wan_upload_kbps_history: Vec<u64> = s.wan_upload_history.iter().map(|(_, kbps)| *kbps).collect();
     let wan_download_kbps_history: Vec<u64> = s.wan_download_history.iter().map(|(_, kbps)| *kbps).collect();
     let rdns_cache = s.rdns_cache.clone();
+    let lan_visibility = compute_lan_visibility(&s, now);
+    // Sort local IPs deterministically so the UI doesn't churn on
+    // every poll. Step 1 of the wizard pre-fills the first one as a
+    // hint, so stable ordering matters for keyboard-focus UX too.
+    let mut local_ips: Vec<String> = s.local_ips.iter().cloned().collect();
+    local_ips.sort();
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -747,6 +850,8 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         last_system_poll_at: s.last_system_poll_at,
         system_thread_alive: s.system_thread_alive,
         rdns_cache,
+        lan_visibility,
+        local_ips,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
 }
@@ -1071,7 +1176,20 @@ fn monitor_loop(default_iface: String, ports: Vec<u16>, state: Arc<Mutex<Dashboa
         };
         eprintln!("[monitor] tshark spawned on {iface} (pid {})", child.id());
         let spawn_time = Instant::now();
-        state.lock().unwrap().monitor_pid = Some(child.id());
+        {
+            // Reset visibility-classification counters on each fresh
+            // tshark spawn. Operator changing iface via /api/config
+            // should get a clean 30s window to evaluate the new
+            // capture surface, not be stuck with the previous iface's
+            // tally. The outer loop respawns tshark on any iface
+            // change, so this hits the right cadence automatically.
+            let mut s = state.lock().unwrap();
+            s.monitor_pid = Some(child.id());
+            s.monitor_started_at = Some(now_secs());
+            s.own_flow_count = 0;
+            s.peer_flow_count = 0;
+            s.lan_visibility = LanVisibility::Unknown;
+        }
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => continue,
@@ -1091,6 +1209,24 @@ fn monitor_loop(default_iface: String, ports: Vec<u16>, state: Arc<Mutex<Dashboa
                 && !s.rdns_pending.contains(&src)
             {
                 s.rdns_pending.insert(src);
+            }
+            // Mirror-mode auto-detect: classify this flow as own-
+            // host (we'd see this even on a non-mirrored switch port
+            // — it's our own outbound or response traffic) vs peer
+            // (we're seeing someone else's flow, which means a SPAN
+            // port or we're on the streamer's machine). Increment
+            // counters once per fresh flow (not per packet) by
+            // peeking the flows map BEFORE the entry()-or-default
+            // call below, so a flapping flow doesn't double-count.
+            let is_new_flow = !s.flows.contains_key(&flow_key);
+            if is_new_flow {
+                let src_is_local = s.local_ips.contains(&flow_key.src_ip);
+                let dst_is_local = s.local_ips.contains(&flow_key.dst_ip);
+                if src_is_local || dst_is_local {
+                    s.own_flow_count = s.own_flow_count.saturating_add(1);
+                } else {
+                    s.peer_flow_count = s.peer_flow_count.saturating_add(1);
+                }
             }
             let stats = s.flows.entry(flow_key.clone()).or_default();
             stats.record(packet.bytes);
@@ -1145,6 +1281,42 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Decide the LAN visibility state from the monitor loop's running
+/// counters. Called inline by `build_state_json` so the answer is
+/// always fresh (no separate timer thread, no stale state). The
+/// 30s window from `monitor_started_at` is the minimum dwell before
+/// we'll flip to `PossiblyBlind` — earlier evaluations are noisy
+/// (a quiet patch right after capture starts is normal, not
+/// indicative of a topology problem).
+fn compute_lan_visibility(s: &DashboardState, now: u64) -> LanVisibility {
+    let Some(started_at) = s.monitor_started_at else {
+        return LanVisibility::Unknown;
+    };
+    if s.peer_flow_count > 0 {
+        // Any peer flow at all means visibility is healthy. We
+        // intentionally don't rate-limit this — even a single
+        // observed peer flow is enough signal that we're not on
+        // an isolated switch port.
+        return LanVisibility::SeesPeers;
+    }
+    if now.saturating_sub(started_at) < LAN_VISIBILITY_WINDOW_SECS {
+        return LanVisibility::Unknown;
+    }
+    if s.own_flow_count == 0 {
+        // No flows of any kind in the window — capture might be
+        // running but on a totally idle iface, or tshark is
+        // misconfigured. Don't claim "blind" here; the operator
+        // would chase the wrong fix.
+        return LanVisibility::Unknown;
+    }
+    // >30s elapsed, own-host flows seen but no peer flows. This is
+    // the load-bearing case: capture works, but we're not seeing
+    // ATEM-side traffic. Surface the wizard.
+    LanVisibility::PossiblyBlind {
+        since: started_at + LAN_VISIBILITY_WINDOW_SECS,
+    }
 }
 
 /// Heuristic: skip reverse-DNS lookups for IPs that almost never have
