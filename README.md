@@ -43,6 +43,44 @@ Under the hood:
 | Direct connect | Type protocol + host + port + path right in the UI — builds a BMD-correct URL and overrides whatever's in the XML. |
 | Probe tool | `python3 probe.py` walks the XML's servers and classifies each as REFUSED / TIMEOUT / HANDSHAKE-OK-PUBLISH-REJECTED / OK. |
 
+## Companion tool — ATEM Net Diag
+
+If you run a **UniFi Dream Machine** (or any Ubiquiti gateway) on the
+production LAN, the companion **ATEM Net Diag** tool gives you a live
+operator dashboard that runs *alongside* this app without interfering:
+
+- **UDM polling** — per-client real-time bandwidth from the controller's
+  local API, with the ATEM highlighted. See "is the stream actually
+  reaching the ATEM right now?" without touching the production stream.
+- **WAN headroom** — current upload Mbps vs. your configured cap, with
+  a 60-second sparkline and color-coded warnings at 70 / 90 percent.
+- **Per-flow SRT health** — live RTT, bandwidth estimate, receiver
+  buffer, and (when the handshake is captured) the BMD stream-key
+  decoded from the SRT HSv5 SID extension.
+- **Active alarms + switch port utilization** — UDM-reported alarms
+  surfaced as a banner; per-port real-time tx/rx with the ATEM's
+  switch port pinned to the top of the list.
+- **Mirror-mode wizard** — when running from a peer Mac on a switched
+  LAN, the dashboard auto-detects "you appear blind to ATEM traffic"
+  and walks you through configuring a UDM SPAN port step-by-step
+  (with your local IP, the ATEM IP, and the UDM URL pre-filled).
+
+Pure passive monitoring by default — no outbound traffic to the ATEM,
+safe to run during a live show. Switch to STANDBY mode explicitly when
+you want active reachability probes.
+
+**Download** the latest `atem-net-diag-<version>-macos-arm64.app.zip`
+or `.tar.gz` on the [Releases page](https://github.com/amateurmenace/atem-ip-patchbay/releases)
+alongside the main app. macOS arm64 only for now; Windows/Linux builds
+on the roadmap. Source lives at `tools/atem-net-diag/` in this repo.
+
+**Use it when:**
+- Going on-air and want one screen showing UDM, ATEM, WAN, and capture.
+- Diagnosing why a remote contributor's stream is dropping (per-flow
+  RTT, bitrate dropouts, receiver buffer stats).
+- Running on a peer Mac that can reach the LAN but isn't the streamer
+  — set up port mirroring once and have global flow visibility.
+
 ## Use at your own risk
 
 Proof of concept. Use in real productions at your own risk. There is

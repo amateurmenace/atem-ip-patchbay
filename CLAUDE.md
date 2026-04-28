@@ -738,51 +738,184 @@ What landed:
    doesn't have to rediscover them. See the `udm_rate_kbps`
    doc-comment in `unifi.rs` for the inline version.
 
-### Open issues from Session 6
+### Open issues from Session 6 (all resolved or superseded — see Session 7 / 8 wins)
 
-- **`udm-live-fixes` branch is local-only.** The production-
-  LAN Mac doesn't have GitHub credentials configured (no
-  `gh`, no SSH key, no HTTPS cred helper). Commit `8a80b5d`
-  is on the branch locally but not pushed. **Must be pushed
-  and merged before any new tarball is built**, or the
-  bandwidth display will continue to be inverted + jumpy.
-  Easiest path: `brew install gh && gh auth login` on the
-  production-LAN Mac, then `git push -u origin udm-live-fixes`.
+- ~~**`udm-live-fixes` branch is local-only.**~~ MERGED. PR #1
+  against `tauri-rewrite` on 2026-04-27. Commit `8a80b5d` is
+  on the branch and shipped in alpha.7.
 
-- **The shipped v0.2.0 tarball in iCloud Drive is buggy.**
-  `~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`
-  predates the udm-live-fixes commit; it shows the ATEM's
-  inbound stream as `tx` (wrong direction) and the kbps is
-  3-5x inflated with frequent zeros. Rebuild + replace once
-  the branch merges.
+- ~~**The shipped v0.2.0 tarball in iCloud Drive is buggy.**~~
+  Will be superseded by GitHub Release artifacts in alpha.9
+  (Session 8 — Phase F adds the build-atem-net-diag CI job).
+  iCloud distribution will be retired once that's live.
 
-- **Per-key SID parsing still untested live.** Same Session 5
-  caveat: a peer Mac on a switched LAN can't see ATEM unicast
-  traffic. Direct tshark probes on both en0 and en34 over
-  5 seconds saw 0 packets matching the ATEM. The unit tests
-  pass against synthetic handshakes, but no real BMD encoder
-  has been observed end-to-end yet. To unblock this in
-  Session 7 the tool needs to either run on the streamer's
-  machine, or the production switch needs port-mirroring to
-  this Mac.
+- **Per-key SID parsing still untested live.** Carries over.
+  The Session 8 mirror-mode wizard (Phase E) gives operators
+  a path to fix the underlying topology problem (no SPAN port
+  on a peer Mac). Once an operator follows the wizard and
+  successfully sets up port mirroring, the SID parser will
+  finally see real BMD encoder traffic.
 
 - **Production-LAN Mac has dual NICs on the same /24.**
-  en0 (Wi-Fi) at `192.168.20.209` and en34 (USB-C virtual
-  ethernet to a *second* ATEM, the Mini Extreme ISO G2) at
-  `192.168.20.177`. Side-effect: ICMP "no route to host" to
-  same-subnet neighbors even when TCP/UDP works — `ping`
-  is a misleading reachability test on this machine; use
-  `nc -zv host port` instead. Also, the `monitor_iface`
-  auto-pick chose en0 unconditionally; for some setups
-  en34 might be the right pick. Better selection UX is in
-  Session 7 priorities.
+  Carries over. `monitor_iface` is now editable from the
+  dashboard (via PR #3 / live-iface-reload), so an operator
+  can flip between en0 / en34 without restarting. The auto-
+  pick still doesn't intelligently match the ATEM subnet —
+  remains in priorities.
 
 - **API key was pasted into the conversation again.** Same
   warning as Session 5: treat the key shared this session as
   compromised, rotate it, and prefer env-var-from-launcher
   flows for future sessions.
 
-### Session 7 priorities (next pickup)
+### Session 7 wins (post-Session-6 push, 2026-04-27 → 2026-04-28)
+
+What CLAUDE.md was about to claim was "still-pending" all
+shipped between Sessions 6 and 8. Documenting here so future
+sessions don't re-discover work that's already merged.
+
+* **`udm-live-fixes` is MERGED.** PR #1 against `tauri-rewrite`
+  on 2026-04-27 (from a freshly-credentialed production-LAN Mac).
+  The Session 6 warning that the branch was local-only is
+  obsolete; commit `8a80b5d` is now on `tauri-rewrite` and
+  shipped in alpha.7.
+
+* **alpha.7 + alpha.8 shipped Mac-only.** Both releases
+  succeeded on the macOS arm64 .dmg path; both Windows .exe
+  jobs failed for an unrelated reason (the `$extract:`
+  PowerShell parser bug — see Session 8 wins below). Mac
+  artifacts were published; Windows users are still on
+  alpha.6 from the official Releases page.
+
+* **atem-net-diag bumped to v0.2.1.** Session 7 follow-ups
+  to the Session 6 UDM fixes:
+  - PR #2 (`package-script`): reproducible build-package.sh
+    producing tarball + self-contained .app bundle + .app.zip.
+  - PR #3 (`live-iface-reload`): in-dashboard `monitor_iface`
+    change via `/api/config` without restarting the binary
+    (sends SIGTERM to tshark child; outer respawn loop picks
+    up the new iface from config).
+  - Plus inline UI work: switch port utilization (USW per-
+    port real-time tx/rx with the ATEM's port pinned to top),
+    active alarms banner from UDM `/list/alarm`, gateway
+    sysstats (CPU/mem/uptime) in the Process health card,
+    sticky source labels per IP, pre-show health banner,
+    quality alerts (bitrate dropouts, RTT spikes, idle
+    stalls), reverse-DNS for public-IP flow sources.
+
+* **iCloud tarball stale.** The `atem-net-diag-0.2.0-macos-arm64.tar.gz`
+  in iCloud Drive predates the udm-live-fixes merge. Will be
+  superseded by GitHub Release artifacts in alpha.9 (Session
+  8 work), at which point the iCloud distribution can be
+  retired.
+
+### Session 8 wins (alpha.9 — bring it all together, 2026-04-28)
+
+Multiple threads bundled into one coherent release. Phases
+A, E, F, G, H landed first (smaller surface, lower risk);
+Phases B, C, D (frame_pack refactor + OMT receive + OMT send)
+land in subsequent commits before the alpha.9 tag.
+
+1. **Windows release fix (Phase A).** The `release.yml:462`
+   PowerShell parser bug (`"...$extract:"` — invalid variable
+   reference because `:` is the scope-name delimiter) had killed
+   alpha.6, .7, and .8's Windows builds. Fix: `${extract}:` to
+   delimit the variable name explicitly. Audited the rest of
+   the inline pwsh block; only the one line was buggy. Plus:
+   - `add_windows_dll_search_path()` in `src-tauri/src/lib.rs`
+     calls `SetDllDirectoryW` pointing at the bundled
+     `resources\sidecar\` so grafton-ndi's runtime DLL load
+     finds `Processing.NDI.Lib.x64.dll`. macOS already had this
+     via @executable_path/../Frameworks rpath; Windows was
+     missing the equivalent — would have been the next
+     failure even after the parser fix landed.
+   - CI sanity-check verifies both required sidecar files (NDI
+     DLL + ffmpeg.exe) are staged before bundle, so missing
+     files fail the build loudly instead of producing a
+     runtime-broken .exe.
+
+2. **atem-net-diag mirror-mode wizard (Phase E).** New
+   `LanVisibility` enum (Unknown / SeesPeers / PossiblyBlind)
+   on DashboardState. Monitor loop classifies each new flow
+   as own-host (src_ip or dst_ip in our local IP set) vs
+   peer; counters reset on tshark respawn so iface changes
+   get a clean re-evaluation. `compute_lan_visibility` runs
+   inline in `build_state_json` so the answer is always
+   fresh. Yellow visibility-banner in dashboard.html surfaces
+   when capture has run >30s with own-host flows but zero
+   peer flows; expanded wizard pre-fills local IP, ATEM IP,
+   and UDM URL into a 4-step UDM SPAN setup walkthrough
+   (plus a 5th "Alternative — run on the streamer's Mac"
+   details card). README's NETWORK TOPOLOGY NOTES section
+   grew a click-by-click "PORT MIRRORING ON UDM" walkthrough
+   with the destination-port DHCP gotcha and the "Direction:
+   All packets" note. atem-net-diag bumped to v0.2.2.
+
+3. **atem-net-diag GitHub release artifact (Phase F).** New
+   `build-atem-net-diag` job in release.yml — runs on
+   macos-14, reuses the same MACOS_CERTIFICATE_P12 / _PWD /
+   _KEYCHAIN_PWD secrets as build-macos, runs the existing
+   `tools/atem-net-diag/build-package.sh`, uploads tarball
+   + .app.zip as release assets. Notarization opt-in via
+   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets (with
+   .app.zip stapled by extract → staple → re-zip; tarballs
+   of folders can't be stapled). Release-publish job's
+   `needs:` extends to include build-atem-net-diag but
+   gating stays on `build-macos.result == 'success'` so a
+   flaky net-diag build doesn't block the main release.
+   Two new compgen-guarded globs in the FILES list.
+
+4. **README "Companion tool" section (Phase G).** New
+   block after "What it does" promoting atem-net-diag for
+   Ubiquiti users with a feature list (UDM polling, WAN
+   headroom, per-flow SRT health, alarms, mirror-mode
+   wizard), a download link, and three "use it when"
+   scenarios. Surfaces the tool to anyone reading the
+   GitHub repo for the first time.
+
+5. **OMT support (Phases B, C, D — landing).** Receive AND
+   send. Headlined as the v0.2.0-alpha.9 feature on the
+   release page. In-progress at time of this Session 8
+   wins entry; final scope + behavior captured in
+   subsequent CLAUDE.md edits as the work commits.
+
+6. **CLAUDE.md catch-up (Phase H — this entry).** Sessions
+   7 + 8 wins added; stale "udm-live-fixes is local-only"
+   warning struck through with corrections. Open issues
+   from Session 6 mostly resolved or superseded by Session
+   8 work; the few that carry over are noted with current
+   status.
+
+### Open issues from Session 8
+
+- **OMT-out audio path deferred to alpha.10.** Video-only
+  in alpha.9. libomt has its own audio Send API but
+  integrating it cleanly into the FFmpeg-tee pipeline
+  (where do the audio frames come from?) is a separate
+  design conversation.
+
+- **OMT receive long-tail format coverage.** First alpha.9
+  user reports will exercise OMT senders we haven't tested
+  against (vMix-with-OMT, OBS-with-OMT-plugin). The
+  stride-strip + pixel-format mapping is generalized
+  enough that this should "just work" but expect surprises.
+
+- **atem-net-diag Windows + Linux builds deferred.**
+  alpha.9 ships net-diag Mac arm64 only. tshark path
+  discovery + signing differ enough on each platform to
+  warrant their own pass. Tracked in Session 9 priorities.
+
+- **alpha.9.1 hot-fix branch staged** in case the OMT-out
+  tee pipeline misbehaves under load. Phase D-only revert
+  prepared; Phases A + E + F + G + H all stay live.
+
+- **Mirror-mode wizard untested with actual operator.**
+  The 4-step UDM SPAN walkthrough is correct as documented
+  but has only been visually-verified — no production
+  operator has yet followed it end-to-end. First alpha.9
+  feedback will tell us if the steps need rewriting.
+
+### Session 9 priorities (next pickup)
 
 User-stated priorities, in roughly intended order. The first
 four came out of operator feedback during Session 6 — the
@@ -1378,20 +1511,27 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 6 priorities"** under the v0.2.0 direction
-section above for the full list. Quick summary:
+See **"Session 9 priorities"** under the v0.2.0 direction
+section above for the full list. Quick post-alpha.9 summary:
 
-1. **Live UDM/per-key validation** on the production-LAN Mac
-   — run the Session 5 v0.2.0 atem-net-diag tarball
-   (`~/Library/Mobile Documents/com~apple~CloudDocs/atem-net-diag-0.2.0-macos-arm64.tar.gz`),
-   verify UDM polling returns connected clients with the
-   ATEM highlighted, verify SID parser extracts the BMD
-   `u=KEY` from a real handshake. Iterate `unifi.rs` if
-   endpoint paths/field names need adjustment.
-2. **Auto mode** in atem-net-diag (third diag mode — probes
+1. **OMT live-test against real senders** — vMix-with-OMT,
+   OBS-with-OMT-plugin, Vizrt reference sender. Stride-strip
+   + pixel-format mapping from Phase B/C should be general
+   enough that this "just works", but expect the long tail.
+   First operator reports will surface gaps.
+2. **OMT-out audio path** (deferred from alpha.9). libomt's
+   audio Send API integrated into the FFmpeg-tee pipeline.
+3. **Mirror-mode wizard end-to-end with a real operator.**
+   Phase E's 4-step UDM SPAN walkthrough has only been
+   visually verified — first user feedback tells us if
+   step copy or screenshots need rewriting.
+4. **atem-net-diag Windows + Linux builds.** alpha.9 ships
+   the companion tool Mac arm64 only. tshark path discovery
+   + signing differ enough on each platform to warrant
+   their own pass.
+5. **Auto mode** in atem-net-diag (third diag mode — probes
    only after N seconds of no flow on the configured key).
-   Blocked on #1 being reliable.
-3. **Multi-source mode** in main app — both
+6. **Multi-source mode** in main app — both
    `--instance-name`-via-multiple-launches AND in-app 2x2
    multi-view + per-input config picker.
 4. **Test Windows .exe** on real Windows hardware (alpha.7
