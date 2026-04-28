@@ -124,6 +124,7 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         .route("/api/ndi-senders", get(api_ndi_senders))
         .route("/api/omt-senders", get(api_omt_senders))
         .route("/api/omt-output", post(api_omt_output))
+        .route("/api/open-net-diag", post(api_open_net_diag))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
         .route("/api/kill-orphans", post(api_kill_orphans))
@@ -487,6 +488,111 @@ async fn api_omt_output(
         ..Default::default()
     });
     Json(serde_json::json!(state.encoder.snapshot()))
+}
+
+/// Open the atem-net-diag operator dashboard. Tries to launch the
+/// .app bundle (macOS) or the binary (other platforms) — if installed,
+/// it boots its own dashboard on port 8092. Then opens that URL in
+/// the user's default browser regardless, so the user lands on the
+/// dashboard whether the launch worked or atem-net-diag was already
+/// running. If neither happens, the browser shows a connection error
+/// and the user knows to download net-diag from the Releases page.
+///
+/// Why an HTTP endpoint and not a Tauri command: the existing UI is
+/// served via Axum (Phase 1's port-Python-then-progressively-port-
+/// modules path). Tauri-specific commands would require wiring
+/// invoke handlers from JS, which we've otherwise skipped because
+/// the static UI is just talking to /api/* over fetch. Keeping the
+/// pattern consistent here means the button works the same way as
+/// every other UI action.
+async fn api_open_net_diag() -> impl IntoResponse {
+    let url = "http://localhost:8092";
+    let mut launched_app = false;
+    let mut opened_url = false;
+    let mut error: Option<String> = None;
+
+    #[cfg(target_os = "macos")]
+    {
+        // Try to launch the .app first. `open -a` matches against the
+        // CFBundleDisplayName ("ATEM Net Diag") OR CFBundleName
+        // ("atem-net-diag") — either resolves to the same bundle if
+        // it's installed at /Applications or ~/Applications. If
+        // it's not installed, this exits non-zero and we fall through
+        // to opening the URL anyway (in case net-diag is running via
+        // its tarball + start.command instead of the .app bundle).
+        match std::process::Command::new("open")
+            .args(["-a", "ATEM Net Diag"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => {
+                launched_app = true;
+                log::info!("net-diag .app launched via open -a");
+                // Brief pause so the .app's HTTP server is up before
+                // we open the URL — not strictly required (the URL
+                // open will retry on connection refused via the
+                // browser), but keeps the UX clean.
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            }
+            _ => {
+                log::info!("net-diag .app not installed (open -a non-zero); opening URL directly");
+            }
+        }
+        match std::process::Command::new("open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => {
+                opened_url = true;
+            }
+            Ok(s) => error = Some(format!("open <url> exited {s:?}")),
+            Err(e) => error = Some(format!("open <url> failed: {e}")),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows doesn't have a single registered "open by app name"
+        // story like macOS, so we just open the URL. If the user has
+        // net-diag for Windows installed (future alpha), we can add
+        // a registry-key lookup or known-path check here.
+        match std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => opened_url = true,
+            Ok(s) => error = Some(format!("cmd /c start exited {s:?}")),
+            Err(e) => error = Some(format!("cmd /c start failed: {e}")),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => opened_url = true,
+            Ok(s) => error = Some(format!("xdg-open exited {s:?}")),
+            Err(e) => error = Some(format!("xdg-open failed: {e}")),
+        }
+    }
+
+    let body = serde_json::json!({
+        "ok": opened_url,
+        "launched_app": launched_app,
+        "opened_url": opened_url,
+        "url": url,
+        "error": error,
+    });
+    Json(body)
 }
 
 async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {

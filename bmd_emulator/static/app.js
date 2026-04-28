@@ -17,6 +17,7 @@ const els = {
   duration:   $('#duration'),
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
+  openNetDiag: $('#open-net-diag'),
   omtOutputEnabled: $('#omt-output-enabled'),
   omtOutputName:    $('#omt-output-name'),
   omtOutputStatus:  $('#omt-output-status'),
@@ -1615,6 +1616,41 @@ function bind() {
         alert('Kill failed: ' + e.message);
       } finally {
         els.killOrphans.disabled = false;
+      }
+    });
+  }
+
+  // Open ATEM Net Diag (companion app). The backend tries to launch
+  // the .app bundle on macOS first (matches by display name), then
+  // opens http://localhost:8092 in the default browser regardless.
+  // If neither the .app nor a running net-diag binary is found, the
+  // browser shows a connection error and the user knows to grab the
+  // tarball from the Releases page. The brief disabled-state on the
+  // button gives visual feedback that the click fired.
+  if (els.openNetDiag) {
+    els.openNetDiag.addEventListener('click', async () => {
+      const orig = els.openNetDiag.textContent;
+      els.openNetDiag.disabled = true;
+      els.openNetDiag.textContent = 'Opening…';
+      try {
+        const r = await fetch('/api/open-net-diag', { method: 'POST' });
+        const j = await r.json();
+        if (j.error && !j.opened_url) {
+          // Hard failure — neither the .app nor the URL opened.
+          alert(
+            'Could not open ATEM Net Diag:\n\n' + j.error +
+            '\n\nDownload the latest build from:\n' +
+            'https://github.com/amateurmenace/atem-ip-patchbay/releases'
+          );
+        }
+        // Soft case (URL opened but .app wasn't installed) is fine —
+        // the browser shows the dashboard if net-diag was already
+        // running, or a connection error pointing at the right port.
+      } catch (e) {
+        alert('Could not reach the backend to open Net Diag: ' + e.message);
+      } finally {
+        els.openNetDiag.textContent = orig;
+        els.openNetDiag.disabled = false;
       }
     });
   }
