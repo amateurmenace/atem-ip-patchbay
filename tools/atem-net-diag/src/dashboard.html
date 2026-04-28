@@ -1987,16 +1987,20 @@
         `Target set: ${ip}:${port}${mac ? ' / ' + mac : ''}`);
     });
 
-    // Capture interface form.
+    // Capture interface form. Posts the new monitor_iface to
+    // /api/config; the Rust side sends SIGTERM to the running
+    // tshark child and the monitor_loop's outer wrapper respawns
+    // tshark on the new interface. Live, no restart needed.
     $('#iface-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const iface = $('#iface-input').value.trim();
-      // monitor_iface change requires a re-spawn of the tshark process, which
-      // the binary doesn't currently do — surface that limitation honestly.
-      $('#iface-status').className = 'config-status';
-      $('#iface-status').textContent = iface
-        ? `Interface "${iface}" noted. Restart the tool to take effect (capture thread does not hot-reload).`
-        : 'Cleared.';
+      if (!iface) {
+        $('#iface-status').className = 'config-status error';
+        $('#iface-status').textContent = 'Interface name is required.';
+        return;
+      }
+      await postConfig({ monitor_iface: iface }, $('#iface-status'), $('#iface-apply'),
+        `Switched to ${iface}. Capture restarting…`);
     });
 
     // WAN bandwidth caps form.
