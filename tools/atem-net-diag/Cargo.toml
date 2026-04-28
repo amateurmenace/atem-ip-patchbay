@@ -1,6 +1,6 @@
 [package]
 name = "atem-net-diag"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "ATEM network diagnostic — Live (passive UDM polling + tshark capture, default) or Standby (active SRT/RTMP probe). Per-key flow correlation via SRT HSv5 SID extension parsing. Designed for live broadcast monitoring without interfering with the production stream."
 license = "MIT"
