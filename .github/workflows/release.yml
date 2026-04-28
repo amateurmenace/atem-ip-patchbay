@@ -458,8 +458,15 @@ jobs:
           $header = Get-ChildItem -Path $extract -Filter "Processing.NDI.Lib.h" -Recurse -ErrorAction SilentlyContinue `
             | Select-Object -First 1
           if ($null -eq $header) {
+            # NOTE: PowerShell parses `$var:` as a (malformed) variable
+            # reference because `:` is the scope-name delimiter
+            # (e.g. `$env:PATH`). We need `${var}:` to delimit. This
+            # exact bug stranded alpha.6/.7/.8's Windows builds at this
+            # script line — the parser bailed before any extraction
+            # logic ran, so the failure looked like "SDK install hung"
+            # but was actually "script never ran past parse phase."
             Write-Host "ERROR: Processing.NDI.Lib.h not found in extracted SDK"
-            Write-Host "Top-level contents of $extract:"
+            Write-Host "Top-level contents of ${extract}:"
             Get-ChildItem -Path $extract | Format-Table
             Write-Host "Recursing one level deeper:"
             Get-ChildItem -Path $extract -Recurse -Depth 2 | Format-Table
@@ -529,7 +536,31 @@ jobs:
       - name: Sanity-check the artifacts
         shell: pwsh
         run: |
+          # NSIS installer present + sized
           Get-ChildItem src-tauri\target\release\bundle\nsis | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+
+          # Verify the staged sidecar contents — these are what get
+          # bundled into the NSIS installer's resources\sidecar\ subdir
+          # and what SetDllDirectoryW points at runtime in lib.rs.
+          # Without these the .exe launches but NDI features silently
+          # fail with "module not found" at first NDI use.
+          $sidecar = "src-tauri\sidecar"
+          $required = @("Processing.NDI.Lib.x64.dll", "ffmpeg.exe")
+          $missing = @()
+          foreach ($f in $required) {
+            $path = Join-Path $sidecar $f
+            if (Test-Path $path) {
+              $sizeMB = [math]::Round((Get-Item $path).Length / 1MB, 1)
+              Write-Host "  [OK] sidecar\$f ($sizeMB MB)"
+            } else {
+              Write-Host "  [MISSING] sidecar\$f"
+              $missing += $f
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "ERROR: required sidecar files missing — Windows .exe will not work end-to-end"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
