@@ -210,6 +210,45 @@
       </label>
     </section>
 
+    <!-- ---------- OMT OUTPUT (left column, above Recovery) ---- -->
+    <!-- alpha.9: when enabled and source is NDI/OMT, frames are
+         tee'd to a libomt OmtSend publisher in addition to the
+         primary FFmpeg encode that goes to ATEM. The card stays
+         visible regardless of the omt cargo feature; the toggle is
+         always settable but a streamer warning fires at start time
+         when the feature is off or the source isn't supported. -->
+    <section class="card omt-output-card" id="omt-output-card">
+      <div class="card-title"><span>OMT output</span></div>
+      <p class="recovery-lead">
+        Publish the source video as an Open Media Transport (OMT)
+        sender on the local network at the same time we're streaming
+        to your ATEM via SRT. OMT-aware multiviewers / switchers on
+        the LAN can pick it up live without disturbing the ATEM-bound
+        path.
+      </p>
+      <p class="recovery-lead" style="font-size:11px; color: var(--muted);">
+        <strong>alpha.9:</strong> works with NDI and OMT sources only
+        (frames are already raw at the source). AVF cameras / pipe /
+        relay sources fall through silently — full coverage lands in
+        alpha.10. Audio over OMT is also alpha.10. Pre-built
+        binaries ship with OMT compiled out (set
+        <code>--features omt</code> with libomt.dylib in your lib
+        path to enable).
+      </p>
+      <label style="display:flex; align-items:center; gap:8px; margin: 8px 0;">
+        <input type="checkbox" id="omt-output-enabled">
+        <span>Enable OMT output</span>
+      </label>
+      <label style="display:block; margin-bottom: 4px; color: var(--muted); font-size: 11px;">
+        Sender name <span style="color: var(--muted-2);">(what other OMT tools see in discovery)</span>
+      </label>
+      <input type="text" id="omt-output-name" placeholder="ATEM Patchbay"
+             style="width:100%; padding: 6px 8px; box-sizing: border-box;">
+      <p class="recovery-foot" id="omt-output-status">
+        Currently disabled.
+      </p>
+    </section>
+
     <!-- ---------- RECOVERY (left column, under Overlays) ----- -->
     <section class="card recovery-card">
       <div class="card-title"><span>Recovery</span></div>

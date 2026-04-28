@@ -161,6 +161,16 @@ struct Inner {
     /// Held independently from ndi_source_name so flipping between OMT
     /// and NDI tiles preserves both selections.
     omt_source_name: String,
+    /// When true, the streamer publishes the captured raw frames as an
+    /// OMT source on the LAN concurrently with the SRT stream to the
+    /// ATEM. alpha.9 only supports this when source_id == "ndi" (the
+    /// frame-tee happens at the writer task before FFmpeg's stdin);
+    /// other source types fall through to "OMT output unavailable for
+    /// this source" in the streamer. Default off.
+    omt_output_enabled: bool,
+    /// Public name of the OMT sender. Defaults to "ATEM Patchbay".
+    /// What other OMT-aware tools see in their discovery list.
+    omt_output_name: String,
 
     relay_bind_host: String,
     relay_srt_port: u16,
@@ -218,6 +228,8 @@ impl EncoderState {
                 pipe_path: String::new(),
                 ndi_source_name: String::new(),
                 omt_source_name: String::new(),
+                omt_output_enabled: false,
+                omt_output_name: "ATEM Patchbay".into(),
                 relay_bind_host: "0.0.0.0".into(),
                 relay_srt_port: 9710,
                 relay_srt_latency_us: 200_000,
@@ -465,6 +477,14 @@ impl EncoderState {
         if let Some(v) = &update.omt_source_name {
             inner.omt_source_name = v.clone();
         }
+        if let Some(v) = update.omt_output_enabled {
+            inner.omt_output_enabled = v;
+        }
+        if let Some(v) = &update.omt_output_name {
+            if !v.trim().is_empty() {
+                inner.omt_output_name = v.clone();
+            }
+        }
         if let Some(v) = update.av_video_index {
             inner.av_video_index = v;
         }
@@ -617,6 +637,8 @@ impl EncoderState {
             pipe_path: inner.pipe_path.clone(),
             ndi_source_name: inner.ndi_source_name.clone(),
             omt_source_name: inner.omt_source_name.clone(),
+            omt_output_enabled: inner.omt_output_enabled,
+            omt_output_name: inner.omt_output_name.clone(),
             relay: RelaySnapshot {
                 bind_host: inner.relay_bind_host.clone(),
                 srt_port: inner.relay_srt_port,
@@ -801,6 +823,8 @@ pub struct SettingsUpdate {
     pub current_server_name: Option<String>,
     pub ndi_source_name: Option<String>,
     pub omt_source_name: Option<String>,
+    pub omt_output_enabled: Option<bool>,
+    pub omt_output_name: Option<String>,
     // AVF / DirectShow device selection — Phase 8b fix.
     pub av_video_index: Option<i32>,
     pub av_video_name: Option<String>,
@@ -885,6 +909,8 @@ pub struct Snapshot {
     pub pipe_path: String,
     pub ndi_source_name: String,
     pub omt_source_name: String,
+    pub omt_output_enabled: bool,
+    pub omt_output_name: String,
     pub relay: RelaySnapshot,
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,

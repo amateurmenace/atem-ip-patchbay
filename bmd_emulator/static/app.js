@@ -17,6 +17,9 @@ const els = {
   duration:   $('#duration'),
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
+  omtOutputEnabled: $('#omt-output-enabled'),
+  omtOutputName:    $('#omt-output-name'),
+  omtOutputStatus:  $('#omt-output-status'),
   monitorAux: $('#monitor-aux'),
   destAux:    $('#dest-aux'),
   connAux:    $('#conn-aux'),
@@ -1131,6 +1134,7 @@ function render(snap) {
   els.ovlBitrate.textContent = `${Math.round((stats.bitrate || 0) / 1000)} kbps`;
 
   renderTelemetry(snap);
+  renderOmtOutput(snap);
 
   if (stats.error) {
     els.error.hidden = false;
@@ -1138,6 +1142,41 @@ function render(snap) {
   } else {
     els.error.hidden = true;
     els.error.textContent = '';
+  }
+}
+
+// Sync the OMT Output card's controls to backend state, plus render
+// a status line that tells the user what's actually happening:
+//  - "Currently disabled." (off)
+//  - "Currently enabled — will publish as <name>." (on, idle)
+//  - "Publishing as <name>." (on, streaming + source supports it)
+//  - "Enabled but won't fire — source <X> doesn't produce raw frames."
+//    (on, but source is AVF/pipe/relay)
+function renderOmtOutput(snap) {
+  if (!els.omtOutputEnabled) return;
+  const enabled = !!snap.omt_output_enabled;
+  if (els.omtOutputEnabled.checked !== enabled) {
+    els.omtOutputEnabled.checked = enabled;
+  }
+  if (document.activeElement !== els.omtOutputName) {
+    els.omtOutputName.value = snap.omt_output_name || 'ATEM Patchbay';
+  }
+  let msg;
+  if (!enabled) {
+    msg = 'Currently disabled.';
+  } else {
+    const sourceOk = snap.source_id === 'ndi' || snap.source_id === 'omt';
+    const isLive = (snap.stats && snap.stats.status === 'Streaming');
+    if (!sourceOk) {
+      msg = `Enabled, but won't fire — source "${snap.source_id || 'none'}" doesn't produce raw frames in alpha.9. Switch to an NDI/OMT source.`;
+    } else if (isLive) {
+      msg = `Publishing as "${snap.omt_output_name || 'ATEM Patchbay'}".`;
+    } else {
+      msg = `Currently enabled — will publish as "${snap.omt_output_name || 'ATEM Patchbay'}" once you start the stream.`;
+    }
+  }
+  if (els.omtOutputStatus) {
+    els.omtOutputStatus.textContent = msg;
   }
 }
 
@@ -1593,6 +1632,40 @@ function bind() {
   els.pipePath.addEventListener('change', () => applySettings({ pipe_path: els.pipePath.value }));
   els.rescanDevices.addEventListener('click', (e) => { e.preventDefault(); ensureDevicesLoaded(true); });
   els.ndiRescan.addEventListener('click', (e) => { e.preventDefault(); ensureNdiLoaded(true); });
+
+  // OMT output toggle + sender name. POSTs to /api/omt-output which
+  // updates state.omt_output_enabled / state.omt_output_name. The
+  // streamer reads these at start time and tees raw frames to an
+  // OmtSender concurrently with the main FFmpeg encode.
+  if (els.omtOutputEnabled) {
+    els.omtOutputEnabled.addEventListener('change', async () => {
+      const enabled = els.omtOutputEnabled.checked;
+      try {
+        const r = await fetch('/api/omt-output', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const j = await r.json();
+        render(j);
+      } catch (e) { console.error('omt-output toggle failed:', e); }
+    });
+  }
+  if (els.omtOutputName) {
+    els.omtOutputName.addEventListener('change', async () => {
+      const name = (els.omtOutputName.value || '').trim();
+      if (!name) return;
+      try {
+        const r = await fetch('/api/omt-output', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        const j = await r.json();
+        render(j);
+      } catch (e) { console.error('omt-output name update failed:', e); }
+    });
+  }
   els.videoMode.addEventListener('change', () => applySettings({ video_mode: els.videoMode.value }));
   els.quality.addEventListener('change', () => applySettings({ quality_level: els.quality.value }));
 
