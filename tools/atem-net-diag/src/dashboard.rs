@@ -1210,24 +1210,16 @@ fn monitor_loop(default_iface: String, ports: Vec<u16>, state: Arc<Mutex<Dashboa
             {
                 s.rdns_pending.insert(src);
             }
-            // Mirror-mode auto-detect: classify this flow as own-
-            // host (we'd see this even on a non-mirrored switch port
-            // — it's our own outbound or response traffic) vs peer
-            // (we're seeing someone else's flow, which means a SPAN
-            // port or we're on the streamer's machine). Increment
-            // counters once per fresh flow (not per packet) by
-            // peeking the flows map BEFORE the entry()-or-default
-            // call below, so a flapping flow doesn't double-count.
-            let is_new_flow = !s.flows.contains_key(&flow_key);
-            if is_new_flow {
-                let src_is_local = s.local_ips.contains(&flow_key.src_ip);
-                let dst_is_local = s.local_ips.contains(&flow_key.dst_ip);
-                if src_is_local || dst_is_local {
-                    s.own_flow_count = s.own_flow_count.saturating_add(1);
-                } else {
-                    s.peer_flow_count = s.peer_flow_count.saturating_add(1);
-                }
-            }
+            // alpha.11 simplified the auto-detect: we no longer
+            // pre-classify flows into own_flow_count vs peer_flow_count.
+            // The visibility check (compute_lan_visibility) now scans
+            // s.flows directly for the configured ATEM IP — which is
+            // a more reliable signal than local-vs-peer (the streamer's
+            // own outbound to the ATEM was being counted as "own" and
+            // tripping the wizard incorrectly). Counters preserved as
+            // dead state for one release in case downstream logging
+            // surfaces them; remove in alpha.12 if nothing reads them.
+            let _ = &flow_key; // silence warnings — flow_key still used below
             let stats = s.flows.entry(flow_key.clone()).or_default();
             stats.record(packet.bytes);
             if let Some(ack) = packet.srt {
@@ -1283,37 +1275,58 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Decide the LAN visibility state from the monitor loop's running
-/// counters. Called inline by `build_state_json` so the answer is
-/// always fresh (no separate timer thread, no stale state). The
-/// 30s window from `monitor_started_at` is the minimum dwell before
-/// we'll flip to `PossiblyBlind` — earlier evaluations are noisy
-/// (a quiet patch right after capture starts is normal, not
-/// indicative of a topology problem).
+/// Decide the LAN visibility state from the captured flows. Called
+/// inline by `build_state_json` so the answer is always fresh.
+///
+/// alpha.11 rewrote this heuristic. The original alpha.9 version
+/// used local-IP-vs-peer-IP classification (own_flow_count vs
+/// peer_flow_count), which was wrong in two directions:
+///
+/// - On the **streamer's own Mac**, all ATEM traffic has one local
+///   end (us → ATEM, ATEM → us) so everything got counted as
+///   "own_flow_count" and the wizard surfaced as a false positive
+///   ("you appear blind") even though the streamer has direct
+///   visibility.
+/// - On a **peer Mac without SPAN**, the tshark filter
+///   (`port 1935 or 9710 or ...`) sees zero traffic — neither
+///   counter increments — so the heuristic stayed Unknown and the
+///   wizard never fired in the case it was designed to catch.
+///
+/// New heuristic: visibility means "we can see ATEM-related flows
+/// regardless of who's the source." Direct test against the
+/// configured ATEM IP, no local-vs-peer ambiguity.
 fn compute_lan_visibility(s: &DashboardState, now: u64) -> LanVisibility {
     let Some(started_at) = s.monitor_started_at else {
         return LanVisibility::Unknown;
     };
-    if s.peer_flow_count > 0 {
-        // Any peer flow at all means visibility is healthy. We
-        // intentionally don't rate-limit this — even a single
-        // observed peer flow is enough signal that we're not on
-        // an isolated switch port.
+
+    let atem_ip = s.config.atem.ip.trim();
+    if atem_ip.is_empty() {
+        // No ATEM IP configured yet — operator hasn't set the target.
+        // Don't surface the wizard; they have to configure first.
+        return LanVisibility::Unknown;
+    }
+
+    // Have we captured any flow involving the ATEM? Either direction
+    // counts (streamer→ATEM AND ATEM→streamer-ack are both ATEM
+    // visibility). When this fires, capture is healthy — hide the
+    // wizard regardless of whether we're on the streamer's machine
+    // or a peer Mac on a SPAN port.
+    let saw_atem_flow = s.flows.keys().any(|k| k.src_ip == atem_ip || k.dst_ip == atem_ip);
+    if saw_atem_flow {
         return LanVisibility::SeesPeers;
     }
+
     if now.saturating_sub(started_at) < LAN_VISIBILITY_WINDOW_SECS {
+        // Too early to call. ATEM might be quiet, capture might be
+        // ramping up — give it the dwell window before alarming.
         return LanVisibility::Unknown;
     }
-    if s.own_flow_count == 0 {
-        // No flows of any kind in the window — capture might be
-        // running but on a totally idle iface, or tshark is
-        // misconfigured. Don't claim "blind" here; the operator
-        // would chase the wrong fix.
-        return LanVisibility::Unknown;
-    }
-    // >30s elapsed, own-host flows seen but no peer flows. This is
-    // the load-bearing case: capture works, but we're not seeing
-    // ATEM-side traffic. Surface the wizard.
+
+    // >30s elapsed and we haven't seen the ATEM in any captured
+    // flow. Surface the wizard. This correctly fires in BOTH the
+    // peer-Mac-no-SPAN case (s.flows is empty) AND the peer-Mac-on-
+    // wrong-iface case (s.flows has unrelated hosts but no ATEM).
     LanVisibility::PossiblyBlind {
         since: started_at + LAN_VISIBILITY_WINDOW_SECS,
     }
