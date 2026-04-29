@@ -1511,10 +1511,20 @@
     // we're stuck on a non-mirrored switch port — the wizard below
     // the banner walks the user through UDM port-mirror setup so
     // they can recover without leaving the dashboard.
+    // Preview escape hatch: ?force_visibility=1 in the URL forces the
+    // banner visible even when the auto-detect concludes we have
+    // visibility. Useful for demoing the wizard, verifying the
+    // pre-fill data is wired correctly, and (during alpha.10's known
+    // bug) showing it on the streamer's Mac where the heuristic
+    // gives a false negative. Set it once in the URL bar and the
+    // banner appears with whatever live data the dashboard has.
+    const FORCE_VISIBILITY = new URLSearchParams(window.location.search).has('force_visibility');
+
     function renderVisibility(state) {
       const banner = $('#visibility-banner');
       const vis = state.lan_visibility || { state: 'unknown' };
-      if (vis.state !== 'possibly_blind') {
+      const shouldShow = FORCE_VISIBILITY || vis.state === 'possibly_blind';
+      if (!shouldShow) {
         banner.hidden = true;
         return;
       }
@@ -1525,26 +1535,32 @@
       // I just plugged this in"). The state.lan_visibility.since
       // is a unix timestamp; difference vs state.now is the dwell.
       const sinceSecs = vis.since ? Math.max(0, state.now - vis.since) : 0;
-      $('#visibility-since').textContent = sinceSecs > 0
-        ? `flagged ${fmtAgo(sinceSecs)} ago`
-        : '';
+      $('#visibility-since').textContent = FORCE_VISIBILITY
+        ? '(forced visible via ?force_visibility=1)'
+        : sinceSecs > 0
+          ? `flagged ${fmtAgo(sinceSecs)} ago`
+          : '';
 
       // Summary line below the head — pulls the actual numbers so
-      // the operator sees concrete data ("you've seen 3 flows but
-      // none are from peers") and can decide whether the auto-
-      // detect is right.
-      const own = state.flows
-        ? state.flows.filter((f) => (state.local_ips || []).includes(f.src_ip) || (state.local_ips || []).includes(f.dst_ip)).length
-        : 0;
-      const peer = state.flows
-        ? state.flows.filter((f) => !((state.local_ips || []).includes(f.src_ip) || (state.local_ips || []).includes(f.dst_ip))).length
+      // the operator sees concrete data and can decide whether the
+      // auto-detect is right. alpha.11 changed the heuristic to
+      // ATEM-IP-aware matching: "we haven't seen any flow involving
+      // the ATEM at <IP>" rather than the previous local-vs-peer
+      // classification (which gave a false positive on the streamer's
+      // own Mac and a false negative on a peer Mac with no traffic).
+      const cfg = state.config || {};
+      const atemIp = (cfg.atem && cfg.atem.ip) || '(not configured)';
+      const allFlows = state.flows ? state.flows.length : 0;
+      const atemFlows = state.flows
+        ? state.flows.filter((f) => f.src_ip === atemIp || f.dst_ip === atemIp).length
         : 0;
       $('#visibility-summary').innerHTML = `
-        Capture has been running for >30s and has seen <code>${own}</code>
-        flow${own === 1 ? '' : 's'} involving this Mac, but <code>${peer}</code>
-        flows from other devices. On a switched LAN that means the ATEM's
-        traffic isn't reaching this capture interface — modern Ethernet
-        switches don't broadcast unicast.
+        Capture has been running for &gt;30s and hasn't seen any traffic
+        to or from the ATEM at <code>${atemIp}</code>
+        (<code>${atemFlows}</code> ATEM flow${atemFlows === 1 ? '' : 's'}
+        out of <code>${allFlows}</code> captured total). On a switched LAN
+        that usually means the ATEM's traffic isn't reaching this capture
+        interface — modern Ethernet switches don't broadcast unicast.
       `;
 
       // Wizard pre-fill — Step 1 takes the first sorted local IP,
