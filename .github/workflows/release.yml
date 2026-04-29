@@ -438,38 +438,80 @@ jobs:
             exit 1
           }
 
-          # Some installers wrap an inner MSI. If we find one,
-          # extract it too — that's where the SDK files live in
-          # the InstallShield case.
-          $msi = Get-ChildItem -Path $extract -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
-          if ($null -ne $msi) {
-            Write-Host "Found inner MSI: $($msi.FullName); extracting..."
-            $extractMsi = "$env:RUNNER_TEMP\ndi-sdk-msi-extract"
-            & $sevenZip x $msi.FullName "-o$extractMsi" -y -bb0 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-              $extract = $extractMsi
+          # InstallShield wraps the actual SDK payload one or two
+          # layers deep in the EXE. 7-Zip's first pass extracts the
+          # outer Win32 binary's PE sections (.text, .rsrc, .data,
+          # .idata...) plus an unnamed payload stream that 7-Zip
+          # surfaces as a file like `[0]` or `0` — that file IS the
+          # inner archive. Older NDI SDK installers stash an MSI
+          # there instead. Either way, recursively re-extract any
+          # large file in the top-level dump until we find the .h
+          # header, up to 3 nesting levels deep.
+          #
+          # The previous code only handled the *.msi case (NDI 5
+          # SDK), which is why alpha.9 cleared the parser bug but
+          # then bailed at "Processing.NDI.Lib.h not found" — NDI 6's
+          # InstallShield wrapper produces a [0] payload instead.
+          function Find-NdiSdkHeader {
+            param([string]$dir, [int]$depth)
+            # Already in the dir? Done.
+            $hit = Get-ChildItem -Path $dir -Filter "Processing.NDI.Lib.h" -Recurse -ErrorAction SilentlyContinue `
+              | Select-Object -First 1
+            if ($null -ne $hit) { return $hit }
+            if ($depth -le 0) { return $null }
+            # Otherwise, look for nested archives. InstallShield's
+            # unnamed payload looks like `[0]`, `0`, `1`, `2`...; some
+            # installers also have inner .msi or .cab files. Skip the
+            # PE section files (.bss, .data, .rdata, .text, .idata,
+            # .rsrc — already extracted as expected) and tiny files.
+            $candidates = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | Where-Object {
+              $_.Length -gt 1MB -and (
+                $_.Extension -in @('.msi', '.cab') -or
+                $_.Name -match '^\[?\d+\]?$' -or
+                $_.Name -eq 'CERTIFICATE'
+              ) -and $_.Name -notmatch '^\.(text|data|rdata|idata|edata|didata|rsrc|bss|tls|itext)'
             }
+            foreach ($c in $candidates) {
+              Write-Host "  Trying nested archive: $($c.FullName) ($([math]::Round($c.Length/1MB, 1)) MB)"
+              $nested = Join-Path $env:RUNNER_TEMP ("ndi-sdk-nested-" + [Guid]::NewGuid().ToString().Substring(0, 8))
+              & $sevenZip x $c.FullName "-o$nested" -y -bb0 2>&1 | Out-Null
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $nested)) {
+                $found = Find-NdiSdkHeader -dir $nested -depth ($depth - 1)
+                if ($null -ne $found) { return $found }
+              } else {
+                Write-Host "    7-Zip rejected $($c.Name) (likely not an archive); skipping"
+              }
+            }
+            return $null
           }
 
-          # Find Processing.NDI.Lib.h — canonical marker of the SDK
-          # root. Its parent dir is Include/; the SDK base is the
-          # grandparent.
-          $header = Get-ChildItem -Path $extract -Filter "Processing.NDI.Lib.h" -Recurse -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
+          Write-Host "Searching for Processing.NDI.Lib.h up to 3 levels deep..."
+          $header = Find-NdiSdkHeader -dir $extract -depth 3
           if ($null -eq $header) {
             # NOTE: PowerShell parses `$var:` as a (malformed) variable
             # reference because `:` is the scope-name delimiter
-            # (e.g. `$env:PATH`). We need `${var}:` to delimit. This
-            # exact bug stranded alpha.6/.7/.8's Windows builds at this
-            # script line — the parser bailed before any extraction
-            # logic ran, so the failure looked like "SDK install hung"
-            # but was actually "script never ran past parse phase."
-            Write-Host "ERROR: Processing.NDI.Lib.h not found in extracted SDK"
+            # (e.g. `$env:PATH`). We need `${var}:` to delimit. The
+            # alpha.6 -> alpha.8 Windows builds bailed here at the
+            # parser before extraction even ran. alpha.9 cleared
+            # parsing, then bailed at this not-found case because the
+            # NDI 6 SDK's payload is nested in an unnamed [0] file
+            # rather than a *.msi (which the script previously only
+            # knew about). alpha.10 added recursive extraction.
+            Write-Host "ERROR: Processing.NDI.Lib.h not found after 3-level recursive extract"
             Write-Host "Top-level contents of ${extract}:"
             Get-ChildItem -Path $extract | Format-Table
-            Write-Host "Recursing one level deeper:"
-            Get-ChildItem -Path $extract -Recurse -Depth 2 | Format-Table
+            Write-Host "Recursing one level deeper (filenames + sizes):"
+            Get-ChildItem -Path $extract -Recurse -Depth 2 -ErrorAction SilentlyContinue `
+              | Where-Object { -not $_.PSIsContainer } `
+              | Sort-Object Length -Descending `
+              | Select-Object -First 30 `
+              | Format-Table FullName, Length
+            Write-Host "All ndi-sdk-nested-* dirs that 7-Zip created:"
+            Get-ChildItem -Path $env:RUNNER_TEMP -Filter "ndi-sdk-nested-*" -Directory -ErrorAction SilentlyContinue `
+              | ForEach-Object {
+                Write-Host "  $($_.FullName)"
+                Get-ChildItem -Path $_.FullName -ErrorAction SilentlyContinue | Format-Table Name, Length
+              }
             exit 1
           }
           $sdkRoot = $header.Directory.Parent.FullName
