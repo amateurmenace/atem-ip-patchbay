@@ -915,145 +915,303 @@ land in subsequent commits before the alpha.9 tag.
   operator has yet followed it end-to-end. First alpha.9
   feedback will tell us if the steps need rewriting.
 
-### Session 9 priorities (next pickup)
+### Session 9 wins (alpha.10 + alpha.11, 2026-04-29)
 
-User-stated priorities, in roughly intended order. The first
-four came out of operator feedback during Session 6 — the
-v0.2.0 dashboard is "scattered" and needs to feel like a single
-coherent tool, not three loosely-coupled views. The remainder
-are carry-overs.
+The single-day session that finally cracked Windows. Five Mac-
+only alpha releases broke when alpha.11 shipped a working
+cross-platform pipeline. Plus a meaningful net-diag heuristic
+fix and a UI affordance.
 
-1. **Unify the dashboard around the client list with
-   drill-down.** The Session 5 layout has bandwidth, flows, and
-   probe controls living in separate cards — operator has to
-   mentally join them. Replace with: click any client row →
-   inline expand showing everything that's known about that
-   device (UDM bandwidth, captured flows touching it, probe
-   history if any, stream key if extracted, per-flow bitrate
-   sparkline). Pin the ATEM to the top of the list,
-   expanded-by-default. "Probe this destination" becomes a
-   button inside the expanded ATEM panel, not a separate card.
-   The Standby probe-history table goes inside the expanded
-   ATEM card so probe outcomes ("just timed out 3.3s ago, key
-   was empty, see why →") sit next to the live state.
+**alpha.10 (commit `d96e626`)** — recursive 7-Zip extraction
+for the InstallShield-nested `[0]` payload. Got past alpha.9's
+"Processing.NDI.Lib.h not found" bail by adding a
+`Find-NdiSdkHeader` function that re-extracts any nested
+archive candidate up to 3 levels deep. Mac shipped clean.
+Windows progressed past the parser fix BUT 7-Zip rejected the
+`[0]` blob as "not an archive" — the recursion logic worked,
+the format didn't yield to 7-Zip.
 
-2. **Stream identification fallback when SID extraction
-   fails.** Even without per-key correlation, tshark's
-   protocol dissectors can identify SRT vs RTMP vs RTMPS
-   handshakes per `(src_ip, src_port) → (dst_ip, dst_port)`
-   tuple. Count distinct active streams, show per-stream
-   protocol + bitrate + jitter + RTT + packet-loss-from-SRT-
-   control-packets. Reference: Speedify's VPN client surfaces
-   this view ("3 streams: SRT 6.1 Mbps from 1.2.3.4:50001,
-   RTMP 4.2 Mbps from 5.6.7.8:443, ..."). For port-forwarded
-   traffic this is the operator's "is the show actually live
-   right now?" pre-flight check. Most of the plumbing exists
-   (`flows` HashMap in `dashboard.rs`); needs a protocol-tag
-   field per flow + UI surfacing.
+**alpha.11 (commits `b012833` + `b8e21e2`)** — two threads:
 
-3. **Interface picker UX (dual-NIC handling).** When the
-   tool detects multiple interfaces on the configured ATEM's
-   subnet, expose a dropdown in the dashboard config form
-   (currently auto-picks `en0` blindly). Default to the one
-   whose default route handles the ATEM IP. Visually mark
-   which interface is actually carrying ATEM traffic
-   (correlate with `flows` non-empty). Surface a hint when
-   the user is on the "wrong" interface — currently the user
-   has to read the README's switched-LAN section and infer.
+1. **Windows finally lands** via `innoextract`. Confirmed
+   locally that the NDI 6 SDK installer is **Inno Setup 6.1.0
+   (unicode)**, not InstallShield — the Delphi section names
+   `.itext` / `.didata` in the wrapper EXE were the giveaway
+   (Delphi-compiled binaries; Inno Setup is the most common
+   Delphi installer in the wild). 7-Zip handles many installer
+   formats but not Inno Setup payloads natively. Switched the
+   release.yml install step to `choco install innoextract -y`
+   then `innoextract -d $extract -e --silent $out`. The SDK
+   lands at `app/Include/`, `app/Lib/x64/`, `app/Bin/x64/` —
+   exactly what grafton-ndi's build.rs needs. First Windows
+   .exe in the Releases page (`ATEM.IP.Patchbay_0.2.0-alpha.11_x64-setup.exe`,
+   48.3 MB).
 
-4. **Pre-show / during-show broadcast tooling.** The user's
-   actual production day involves port-forwarding streams from
-   the public internet into the ATEM. Useful additions:
-   - **Pre-show panel** with explicit checks: WAN IP detected,
-     port-forward live (try connecting back to your own WAN
-     IP:1935 from inside the LAN — round-trip via NAT-loopback
-     or via a remote helper if NAT-loopback is disabled),
-     ATEM input slots free, UDM polling healthy, "all green"
-     banner.
-   - **During-show health.** Per-stream jitter, loss,
-     retransmits from SRT NAK/ACK control packets (which
-     tshark exposes in its SRT dissector). "Stream went dark"
-     detection (last_seen aging). WAN-side bandwidth at the
-     UDM (separate `stat/dpi` or similar endpoint) so we can
-     show "WAN ingress is 6 Mbps, ATEM RX is 6 Mbps,
-     accounted for" vs "WAN says 12 Mbps but ATEM only sees
-     5 — check NAT/forwarding".
-   This is the largest piece — likely needs to break into
-   sub-tasks, but #1 of those is the pre-show panel since it
-   prevents the most operator pain.
+2. **Net-diag wizard heuristic rewrite.** alpha.9's auto-
+   detect was wrong in BOTH directions:
+   - **False positive on streamer's own Mac**: every captured
+     ATEM-bound flow had one local end → counted as `own_flow_count`
+     → after 30s, `peer_flow_count == 0` triggered PossiblyBlind
+     even though the streamer had perfect direct visibility.
+   - **False negative on peer Mac no SPAN**: the case the
+     wizard was DESIGNED for. Peer Mac sees zero traffic on
+     the filtered ports because the switch isolates unicast.
+     Both counters stayed at 0; heuristic stayed in Unknown
+     forever; wizard never fired.
 
-5. **Push `udm-live-fixes`, merge, rebuild tarball.**
-   Mechanical, carries over from Session 6. Until done, the
-   shipped binary has wrong-direction + jumpy bandwidth.
+   alpha.11 replaced the local-vs-peer counter logic with a
+   direct ATEM-IP match against captured flows: visibility =
+   "we've seen the ATEM in src or dst of any flow." Direct,
+   unambiguous, fires correctly in all four scenarios
+   (streamer's Mac, peer Mac with SPAN, peer Mac no SPAN,
+   ATEM's own Mac). `own_flow_count`/`peer_flow_count` fields
+   preserved as dead state for one release; remove in 0.2.5
+   if nothing else reads them.
 
-6. **Auto mode in atem-net-diag** (deferred from Session 5
-   spec, was Session 6 #2). Third diag mode where probes run
-   only after N seconds of no observed flow on the configured
-   key/port — combines the safety of Live with the proactive-
-   testing benefit of Standby. Needs per-key correlation to
-   be live + reliable, which depends on getting the tool onto
-   a machine that actually sees the traffic (Session 7 #2 +
-   #3 progress is a prerequisite).
+   Plus a `?force_visibility=1` URL query param on the
+   dashboard that bypasses the auto-detect and renders the
+   banner with whatever live data is available — useful for
+   demos, screenshots, and verifying the pre-fill data is
+   wired correctly. Indicator text shows
+   "(forced visible via ?force_visibility=1)" so a forced
+   preview can't be confused with a real detection.
 
-7. **Multi-source mode in the main app.** Goal: a single
-   user pushes 2-4 different sources to 2-4 different ATEM
-   inputs simultaneously. Two paths, both should ship:
-   - **Multiple instances** (already supported via
-     `--instance-name N` from Phase 6). Document in the FAQ:
-     "How do I run multiple streams to multiple destinations?"
-     with a step-by-step (open the .app multiple times,
-     each gets its own port pair + state directory).
-   - **In-app multi-source mode**. New toggle near the top
-     of the main window. When enabled:
-     - Opens a second window with a 2x2 multi-view (4
-       boxes, each rendering one source's preview JPEG)
-     - Main window grows a prominent "Input 1 / 2 / 3 / 4"
-       picker at the top
-     - User selects an input, configures destination /
-       source / audio / etc. for that input independently
-     - Each input has its own EncoderState, Streamer, port
-       pair (HTTP + BMD) — basically four parallel instance
-       managers inside one process
-     - "Start All" / "Stop All" controls in addition to
-       per-input start/stop
-   - UI placement for the multi-source toggle: **above the
-     Recovery card in the left column**, with title
-     "Multi-Source", a paragraph explanation of the two
-     paths (in-app multi-source vs multiple .app
-     instances), the in-app toggle, and an FAQ-style
-     expandable for "Can I run several streams at once?".
-   Architecture sketch:
-   - New module `multi.rs` with `MultiState` holding 4
-     `EncoderState` + 4 `Streamer` instances
-   - Window 2: opens via Tauri's `WebviewWindow::new`
-     pointed at `/static/multiview.html`
-   - HTTP API gets prefixed routes: `/api/i1/state`,
-     `/api/i2/state`, ... so the multiview page can poll
-     all four cheaply
-   - `/api/preview` becomes `/api/i1/preview` ... etc.
-   - Single FFmpeg per input → 4 FFmpeg processes total
-     (M-series Mac with VideoToolbox can sustain this
-     comfortably since each encode is ~5% CPU)
-   This is significant work — probably its own session.
+   atem-net-diag bumped to 0.2.4. Both the iCloud Drive
+   tarball AND the GitHub Release artifact are at this version.
 
-8. **Test the Windows .exe build on real Windows hardware.**
-   alpha.7 release pipeline (already configured) should
-   produce a working Windows installer once the NDI silent-
-   install fix lands. After that, drive the install through
-   real Windows: DirectShow device enumeration, FFmpeg path
-   resolver (sidecar/ffmpeg.exe), NDI dylib path
-   (Processing.NDI.Lib.x64.dll bundled? sidecar? PATH?),
-   Tauri's Windows window chrome.
+3. **"Net Diag" button in the topbar (alpha.9, commit
+   `11cbcc6`).** One-click jump from the streaming app to the
+   companion dashboard. Tries `open -a "ATEM Net Diag"` to
+   launch the .app bundle if installed, then opens
+   `http://localhost:8092` in the default browser regardless.
+   POST `/api/open-net-diag` endpoint in http.rs. Documented
+   here in retrospect — landed mid-alpha.9 push.
 
-9. **Custom audio for pipe / relay video sources.** Today
-   only AVF + NDI video sources support Custom audio mode.
-   Pipe (URL/RTSP) and relay (SRT/RTMP listener) video
-   sources still fall back to lavfi anullsrc when the user
-   picks Custom + an AVF audio device. The fix is structurally
-   the same as the NDI path: detect `audio_mode == "custom"`
-   in the source builder, append `-f avfoundation -i :NAME`
-   as the audio input, set `combined_av=false`. Each source
-   builder needs its own version of the conditional.
+**Cross-platform pipeline status**: Mac arm64 .dmg + Windows
+x64 .exe + atem-net-diag .tar.gz/.app.zip all publish from
+the same release.yml on each `v*` tag. The release-publish
+job's gating is still on `build-macos.result == 'success'`
+(Mac is the only required artifact); Windows + net-diag are
+additive.
+
+### Open issues from Session 9
+
+- **Windows .exe never tested on real Windows hardware.** The
+  installer builds and signs in CI; no operator has yet driven
+  it through install → launch → stream-to-ATEM. DirectShow
+  device enumeration, Windows DLL search path
+  (SetDllDirectoryW we added in alpha.9 should work, untested),
+  Tauri's Windows window chrome — all theoretically correct,
+  none verified. First Windows operator feedback will exercise
+  the long tail.
+
+- **Wizard heuristic untested live.** The alpha.9 banner
+  was misfiring; alpha.11 fixed the heuristic but a real
+  production operator hasn't yet been on a peer Mac without
+  SPAN long enough to see the wizard surface organically.
+  `?force_visibility=1` works for previewing the UI; the
+  end-to-end "operator notices banner, follows wizard, fixes
+  topology" loop is still aspirational.
+
+- **OMT-out audio still deferred** (carries from Session 8).
+  Session 10 priority #2.
+
+- **OMT-out from non-NDI sources still deferred** (carries
+  from Session 8). Session 10 priority #3.
+
+### Session 10 priorities (next pickup)
+
+The user wants all three batched into alpha.12. Roughly in
+intended order:
+
+1. **Pre-show checks panel in net-diag.** This is the largest
+   single operator-visible win remaining. Session 7 priority
+   #4 was flagged as "the largest piece — likely needs to
+   break into sub-tasks, but #1 of those is the pre-show
+   panel since it prevents the most operator pain."
+
+   What it is: a new full-width card in the dashboard, just
+   below the existing pre-show banner, with explicit checks
+   the operator can see + click into. Each check is a row
+   with a status icon (✓/⚠/✗), the check name, the current
+   value, and optional action.
+
+   Checks to implement (most are already in state, just need
+   surfacing):
+   - **WAN IP detected** — from `wan_snapshot.wan_ip` (already
+     in state). Status: pass if non-empty + non-private,
+     fail otherwise.
+   - **WAN headroom** — `current_upload_kbps / wan_upload_cap_mbps`
+     ratio. Pass if <70%, warn at 70-90%, fail >90%.
+   - **UDM polling healthy** — from `unifi_status`. Pass if
+     `Connected`, fail otherwise.
+   - **ATEM reachable** — from the unifi_clients list (look
+     for `is_atem: true` entry, check `last_seen_secs` < 60).
+   - **Capture visibility** — from `lan_visibility`. Pass if
+     `SeesPeers`, warn if `Unknown`, fail if `PossiblyBlind`
+     (with deep-link to the wizard).
+   - **Active stream count** — count flows where src_ip ==
+     atem.ip || dst_ip == atem.ip on ATEM ports. Just info,
+     not a pass/fail.
+   - **Stream key correlation** — count flows with non-empty
+     `stream_key` from the SID parser. Info-only.
+   - **WAN ingress vs ATEM RX consistency** — compare WAN
+     upload rate vs sum of ATEM-bound flow rates. Warn if
+     mismatch >2x suggests NAT/forwarding issue.
+
+   Aggregate verdict at the top: green / yellow / red, with
+   a one-line summary of the worst check.
+
+   Data model: `PreShowCheck { id, label, status, detail, hint }`,
+   `PreShowStatus { Pass, Warn, Fail, Skip }`. Add
+   `pre_show_checks: Vec<PreShowCheck>` to `StateResponse`,
+   build it in `build_state_json` from the existing snapshots.
+   No new polling threads needed — pure projection over
+   existing state.
+
+   UI: new `<section class="card full" id="preshow-checks-card">`
+   in `dashboard.html` between the existing
+   `.preshow-banner` and the `<main>` grid. Each check
+   row uses the same shape as alarm rows (icon | label |
+   detail | optional hint).
+
+   Files to touch:
+   - `tools/atem-net-diag/src/dashboard.rs` — new struct,
+     compute function, add to StateResponse.
+   - `tools/atem-net-diag/src/dashboard.html` — new card,
+     CSS for status icons, JS render function.
+   - `tools/atem-net-diag/Cargo.toml` — bump 0.2.4 → 0.2.5.
+
+   **Deferred to a follow-up**: port-forward verification
+   (NAT loopback OR remote helper service) and ATEM-input-
+   slots-free check. Those need outbound network probes
+   and/or ATEM-direct queries that we don't have plumbing
+   for yet.
+
+2. **OMT-out audio for NDI sources.** Currently OMT-out
+   publishes video-only. libomt has an audio Send API
+   (`OmtMediaFrame::set_type(Audio)` + matching codec).
+   For NDI sources, grafton-ndi exposes audio frames via
+   `Receiver::capture_audio`; we don't currently call it
+   because the alpha.4 audio path uses lavfi anullsrc OR
+   AVF custom audio routed through FFmpeg. To add OMT-out
+   audio:
+   - Extend `NdiCapture::run_capture_loop` to ALSO drain
+     audio frames from the receiver. Two-frame-types loop:
+     `capture_video` AND `capture_audio` interleaved with
+     a small timeout each.
+   - Add a parallel audio mpsc channel `mpsc::Receiver<Vec<u8>>`
+     where Vec<u8> is interleaved float32 PCM ready for OMT.
+   - `OmtSender::feed_audio_frame(samples: &[f32], num_channels, sample_rate)`
+     — wraps OMT_Send_SendAudio with OmtCodec::Fpa1 (Floating
+     Point Audio).
+   - Streamer's writer task fans audio out to OmtSender just
+     like video. (Note: the existing FFmpeg side audio
+     remains lavfi anullsrc unless `audio_mode == custom`;
+     OMT audio is independent of FFmpeg's audio path.)
+
+   Files to touch:
+   - `src-tauri/src/ndi_capture.rs` — add audio capture loop.
+   - `src-tauri/src/omt_sender.rs` — add `feed_audio_frame`.
+   - `src-tauri/src/streamer.rs` — wire audio channel.
+   - `src-tauri/Cargo.toml` — `grafton-ndi` may need
+     a feature flag or version bump for audio support;
+     check.
+
+   **Constraint**: only works for NDI sources (and OMT
+   sources, in theory). AVF/pipe/relay sources don't
+   produce raw frames at our layer — see priority #3.
+
+3. **OMT-out from non-raw sources via FFmpeg tee.** The big
+   missing piece. AVF webcams, pipe / RTSP / HLS, and SRT/
+   RTMP relay sources all enter through FFmpeg, not through
+   our raw frame channel. To OMT-publish their frames, we
+   need FFmpeg to emit raw video + raw audio alongside the
+   encoded SRT.
+
+   Approach: use FFmpeg's `-f tee` muxer with two outputs:
+   - The existing SRT/RTMP to ATEM (mpegts encoded).
+   - A `-f rawvideo -f s16le` pair piped to stdout (or a
+     UNIX socket) for OMT consumption.
+
+   On the Rust side:
+   - When OMT output is enabled AND source isn't NDI/OMT,
+     swap the FFmpeg cmdline to use `-f tee`.
+   - Read raw video bytes from FFmpeg's stdout, hand to
+     OmtSender::feed_frame.
+   - Audio: use a separate file descriptor (FFmpeg's
+     `pipe:N` syntax) — this gets tricky cross-platform.
+     Alternative: interleave audio into a custom container
+     muxed with rawvideo and demux on our side. Or use
+     two FFmpeg processes (one for SRT, one for raw output)
+     — simpler but doubles source consumption.
+
+   This was originally considered for alpha.9 (the Plan
+   agent flagged Option B vs Option C in the original
+   alpha.9 plan); Option C was deferred. alpha.12 should
+   land it.
+
+   Constraint: AVF source consumed twice (once for SRT
+   FFmpeg, once for OMT FFmpeg if we go the dual-process
+   route). May not work for all virtual cameras that
+   restrict to a single consumer. Document the limitation.
+
+4. **Carry-overs (deprioritized but still relevant)** — items
+   that have been sitting in the priorities list since
+   Sessions 6-8. Not in alpha.12's scope but documented here
+   so they don't get forgotten.
+
+   - **Real-Windows-hardware end-to-end test.** alpha.11
+     ships an installer that builds + signs in CI; nobody's
+     yet driven it through install → launch → stream-to-
+     ATEM on real Windows. DirectShow enumeration, the
+     SetDllDirectoryW NDI DLL path setup we added, Tauri's
+     Windows window chrome — all theoretically correct,
+     none verified.
+   - **Unified client-list drill-down dashboard.** Session 5
+     layout has bandwidth, flows, probe controls in separate
+     cards. Replace with click-row-to-expand showing
+     everything known about a device. Pin ATEM expanded-by-
+     default at top.
+   - **Stream identification fallback** when SID extraction
+     fails. tshark's protocol dissectors can tag SRT vs RTMP
+     vs RTMPS per flow tuple even without successful HSv5
+     parse. Speedify-style "3 streams: SRT 6.1 Mbps from X,
+     RTMP 4.2 Mbps from Y" view.
+   - **Interface picker UX** (dual-NIC handling). Auto-pick
+     currently chooses `en0` blindly. Should default to the
+     iface whose default route handles ATEM IP, mark which
+     iface actually carries ATEM traffic, surface a hint
+     when on the "wrong" iface.
+   - **Auto mode in net-diag.** Third diag mode (deferred
+     from Session 5): probes resume only after N seconds
+     of no observed flow on the configured key. Needs per-
+     key correlation to be live + reliable first.
+   - **Multi-source mode in the main app.** Goal: 2-4
+     sources to 2-4 ATEM inputs simultaneously. Two paths:
+     `--instance-name N` (already supported, just needs
+     docs) and in-app 2x2 multi-view + per-input config.
+     Architecture: `multi.rs` module with 4 EncoderState +
+     4 Streamer; `WebviewWindow::new` for the second
+     window pointed at `/static/multiview.html`; prefixed
+     HTTP routes `/api/i1/state` ... `/api/i4/state`. Single
+     FFmpeg per input (4 total; VideoToolbox handles it).
+   - **Custom audio for pipe / relay video sources.**
+     Currently only AVF + NDI video sources support Custom
+     audio mode. Pipe / RTSP / SRT-listen / RTMP-listen
+     fall back to lavfi anullsrc. Fix is structurally the
+     same as NDI: detect `audio_mode == custom` in the
+     source builder, append `-f avfoundation -i :NAME` as
+     the audio input, set `combined_av=false`. Each source
+     factory needs its own conditional.
+   - **net-diag Windows + Linux builds.** Mac arm64 only
+     today. tshark path discovery + signing differ enough
+     per platform that each warrants its own pass.
+
+   - ~~**Push `udm-live-fixes`, merge, rebuild tarball**~~ —
+     DONE in alpha.7 (Session 7 wins).
+   - ~~**Pre-show panel**~~ — top of Session 10 priorities
+     above (item #1).
 
 ### atem-net-diag tool architecture (Session 4)
 
@@ -1141,6 +1299,25 @@ Key implementation gotchas:
   binaries publish, **they'll crash on launch on end-user
   machines because of the NDI dylib bundling issue above** —
   any further v0.2.0-alpha tag should wait until that's fixed.
+- `v0.2.0-alpha.4` through `v0.2.0-alpha.8` (Sessions 4-7):
+  iterative Mac-only releases (Windows job blocked by the
+  `$extract:` PowerShell parser bug). See "Session 4 wins"
+  through "Session 7 wins" for the per-alpha details.
+- `v0.2.0-alpha.9` (commit `4272199`): "bring it all together."
+  Mac arm64 .dmg + atem-net-diag tarball/.app.zip shipped;
+  Windows still failed because alpha.9's 7-Zip extraction
+  only handled `*.msi` payloads (NDI 5 era), not the
+  unnamed `[0]` blob NDI 6 produces.
+- `v0.2.0-alpha.10` (commit `d96e626`): recursive 7-Zip
+  extraction up to 3 levels deep. Got further on Windows,
+  but 7-Zip rejected the Inno Setup `[0]` payload as "not
+  an archive."
+- `v0.2.0-alpha.11` (commit `b8e21e2`): switched to
+  `innoextract` (the NDI SDK installer is Inno Setup 6.1.0
+  unicode, not InstallShield). **First cross-platform release**
+  with both .dmg + .exe shipped. Plus net-diag wizard
+  heuristic rewrite (ATEM-IP-aware), `?force_visibility=1`
+  preview affordance, and net-diag bumped to 0.2.4.
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -1511,32 +1688,44 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 9 priorities"** under the v0.2.0 direction
-section above for the full list. Quick post-alpha.9 summary:
+See **"Session 10 priorities"** under the v0.2.0 direction
+section above for the full alpha.12 plan. Quick summary:
 
-1. **OMT live-test against real senders** — vMix-with-OMT,
-   OBS-with-OMT-plugin, Vizrt reference sender. Stride-strip
-   + pixel-format mapping from Phase B/C should be general
-   enough that this "just works", but expect the long tail.
-   First operator reports will surface gaps.
-2. **OMT-out audio path** (deferred from alpha.9). libomt's
-   audio Send API integrated into the FFmpeg-tee pipeline.
-3. **Mirror-mode wizard end-to-end with a real operator.**
-   Phase E's 4-step UDM SPAN walkthrough has only been
-   visually verified — first user feedback tells us if
-   step copy or screenshots need rewriting.
-4. **atem-net-diag Windows + Linux builds.** alpha.9 ships
-   the companion tool Mac arm64 only. tshark path discovery
-   + signing differ enough on each platform to warrant
-   their own pass.
-5. **Auto mode** in atem-net-diag (third diag mode — probes
-   only after N seconds of no flow on the configured key).
-6. **Multi-source mode** in main app — both
-   `--instance-name`-via-multiple-launches AND in-app 2x2
-   multi-view + per-input config picker.
-4. **Test Windows .exe** on real Windows hardware (alpha.7
-   tag once the NDI installer fix is verified by CI).
-5. **Custom audio for pipe / relay** video sources.
+1. **Pre-show checks panel in net-diag** (largest single
+   operator-visible win remaining). Full-width card under the
+   existing pre-show banner with explicit checks: WAN IP
+   detected, WAN headroom, UDM polling, ATEM reachable,
+   capture visibility, active stream count, stream-key
+   correlation, WAN-vs-ATEM-RX consistency. Aggregate verdict
+   at top. Pure projection over existing state — no new
+   polling threads. Files: `tools/atem-net-diag/src/dashboard.rs`,
+   `tools/atem-net-diag/src/dashboard.html`, version bump
+   to 0.2.5.
+
+2. **OMT-out audio for NDI sources.** Extend
+   `NdiCapture::run_capture_loop` to also call
+   `Receiver::capture_audio` on grafton-ndi; add a parallel
+   audio mpsc channel; new `OmtSender::feed_audio_frame`
+   wrapping OMT_Send_SendAudio with OmtCodec::Fpa1; streamer
+   fans audio out alongside video. Files: `src-tauri/src/ndi_capture.rs`,
+   `src-tauri/src/omt_sender.rs`, `src-tauri/src/streamer.rs`.
+
+3. **OMT-out from non-raw sources via FFmpeg tee.** When
+   source is AVF/pipe/relay AND OMT-out is enabled, swap
+   FFmpeg cmdline to use `-f tee` muxer with rawvideo +
+   raw audio pipes alongside the existing mpegts-to-SRT
+   output. Tokio task drains the raw pipes into OmtSender.
+   Cross-platform pipe handling (UNIX pipe FDs vs Windows
+   named pipes) is the main complexity — may end up using
+   two FFmpeg processes (one for SRT, one for raw out)
+   instead of tee, which is simpler but doubles source
+   consumption.
+
+4. **Carry-overs**: real-Windows-hardware test, unified
+   client-list dashboard, stream-protocol-tag fallback,
+   interface picker UX, net-diag auto mode, multi-source
+   mode, pipe/relay custom audio, net-diag W+L builds.
+   See Session 10 priorities #4 for details.
 
 ## v0.2.0 candidate features
 
