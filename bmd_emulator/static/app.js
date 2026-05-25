@@ -1137,6 +1137,18 @@ function render(snap) {
   renderTelemetry(snap);
   renderOmtOutput(snap);
 
+  // Wizard sync: lock/unlock the protocol radio + advanced inputs and
+  // pull initial values out of the snapshot. window.* bridges exist
+  // because the helpers are scoped inside bind(); calling them here
+  // gives users an instant reaction to receiver-state changes instead
+  // of waiting up to one second for the wizard's own poll tick.
+  if (typeof window.hydrateRwAdvancedFromSnapshot === 'function') {
+    window.hydrateRwAdvancedFromSnapshot(snap);
+  }
+  if (typeof window.syncRwProtocolWithSnapshot === 'function') {
+    window.syncRwProtocolWithSnapshot(snap);
+  }
+
   if (stats.error) {
     els.error.hidden = false;
     els.error.textContent = stats.error;
@@ -1878,6 +1890,33 @@ function bind() {
   const rwIpManual = $('#rw-ip-manual');
   const rwIpStatus = $('#rw-ip-status');
   const rwIpHint = $('#rw-ip-hint');
+  // Public-URL helper (Step 2, "Different network" sub-tab).
+  const rwWhere = $$('input[name="rw-where"]');
+  const rwLanBlock = $('#rw-lan-block');
+  const rwPublicBlock = $('#rw-public-block');
+  const rwPublicHost = $('#rw-public-host');
+  const rwPublicDetect = $('#rw-public-detect');
+  const rwPublicStatus = $('#rw-public-status');
+  const rwPublicUrl = $('#rw-public-publish-url');
+  const rwPublicCopy = $('#rw-public-copy');
+  const rwPfProtocol = $('#rw-pf-protocol');
+  const rwPfExtPort = $('#rw-pf-ext-port');
+  const rwPfIntIp = $('#rw-pf-int-ip');
+  const rwPfIntPort = $('#rw-pf-int-port');
+  const rwPfCopyTemplate = $('#rw-pf-copy-template');
+  const rwPfTemplateStatus = $('#rw-pf-template-status');
+  // Advanced settings — ports, RTMP app/key, SRT passphrase.
+  const rwAdvanced = $('#rw-advanced');
+  const rwAdvancedRows = $$('#rw-advanced .rw-advanced-row');
+  const rwSrtPortIn = $('#rw-srt-port');
+  const rwSrtPassphraseIn = $('#rw-srt-passphrase');
+  const rwRtmpPortIn = $('#rw-rtmp-port');
+  const rwRtmpAppIn = $('#rw-rtmp-app');
+  const rwRtmpKeyIn = $('#rw-rtmp-key');
+  const rwAdvancedApply = $('#rw-advanced-apply');
+  const rwAdvancedReset = $('#rw-advanced-reset');
+  const rwAdvancedStatus = $('#rw-advanced-status');
+  const rwAdvancedRunningHint = $('#rw-advanced-running-hint');
 
   // The active host for the publish URL. Empty means "we don't know
   // — user must type one in"; UI surfaces a yellow warning instead
@@ -1914,6 +1953,268 @@ function bind() {
     } else {
       rwUrl.value = `rtmp://${displayHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
     }
+    // The public-URL block reads the same protocol + port state, so
+    // keep it in sync any time the LAN URL refreshes (port changes,
+    // protocol toggle, snapshot updates).
+    refreshRwPublicUrl();
+    refreshPortForwardChecklist();
+  }
+
+  function getRwWhere() {
+    for (const r of rwWhere) if (r.checked) return r.value;
+    return 'lan';
+  }
+
+  function getActivePublicHost() {
+    return (rwPublicHost?.value || '').trim();
+  }
+
+  function refreshRwPublicUrl() {
+    if (!rwPublicUrl) return;
+    const proto = getRwProto();
+    const host = getActivePublicHost();
+    const r = lastSnapshot?.relay || {};
+    const displayHost = host || '<your-public-ip-or-hostname>';
+    if (proto === 'srt_listen') {
+      rwPublicUrl.value = `srt://${displayHost}:${r.srt_port ?? 9710}`;
+    } else {
+      rwPublicUrl.value = `rtmp://${displayHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    }
+  }
+
+  function refreshPortForwardChecklist() {
+    const proto = getRwProto();
+    const r = lastSnapshot?.relay || {};
+    const port = proto === 'srt_listen' ? (r.srt_port ?? 9710) : (r.rtmp_port ?? 1935);
+    const protoText = proto === 'srt_listen' ? 'UDP (SRT)' : 'TCP (RTMP)';
+    if (rwPfProtocol) rwPfProtocol.textContent = protoText;
+    if (rwPfExtPort) rwPfExtPort.textContent = String(port);
+    if (rwPfIntPort) rwPfIntPort.textContent = String(port);
+    if (rwPfIntIp) {
+      rwPfIntIp.textContent = rwSelectedIp || '(set your LAN IP in the "On my network" tab)';
+    }
+  }
+
+  function applyRwWhereState() {
+    if (!rwLanBlock || !rwPublicBlock) return;
+    const where = getRwWhere();
+    rwLanBlock.hidden = where === 'public';
+    rwPublicBlock.hidden = where !== 'public';
+    if (where === 'public') {
+      refreshRwPublicUrl();
+      refreshPortForwardChecklist();
+    }
+  }
+
+  // Show only the rows that apply to the currently-selected protocol.
+  // SRT picker → SRT row visible, RTMP row hidden, and vice versa.
+  function updateRwAdvancedRowVisibility() {
+    const proto = getRwProto();
+    rwAdvancedRows.forEach((row) => {
+      row.hidden = row.dataset.protocol !== proto;
+    });
+  }
+
+  // Populate the advanced inputs from the snapshot's relay block.
+  // Called on first snapshot and any time the receiver transitions
+  // off (so a port we just changed gets reflected back). Skipped if
+  // the user is mid-edit (rwAdvancedDirty true) — they own the field
+  // values until Apply or Reset.
+  let rwAdvancedDirty = false;
+  let rwAdvancedHydrated = false;
+  function hydrateRwAdvancedFromSnapshot(snap) {
+    const r = (snap && snap.relay) || {};
+    if (rwAdvancedDirty) return;
+    if (rwSrtPortIn) rwSrtPortIn.value = r.srt_port ?? 9710;
+    if (rwSrtPassphraseIn) rwSrtPassphraseIn.value = r.srt_passphrase ?? '';
+    if (rwRtmpPortIn) rwRtmpPortIn.value = r.rtmp_port ?? 1935;
+    if (rwRtmpAppIn) rwRtmpAppIn.value = r.rtmp_app ?? 'live';
+    if (rwRtmpKeyIn) rwRtmpKeyIn.value = r.rtmp_key ?? 'stream';
+    rwAdvancedHydrated = true;
+  }
+
+  function markRwAdvancedDirty() {
+    rwAdvancedDirty = true;
+    if (rwAdvancedStatus) {
+      rwAdvancedStatus.textContent = 'Unsaved changes — click Apply.';
+      rwAdvancedStatus.classList.remove('is-warning');
+    }
+  }
+
+  async function applyRwAdvanced() {
+    if (!rwAdvancedApply) return;
+    rwAdvancedApply.disabled = true;
+    if (rwAdvancedStatus) {
+      rwAdvancedStatus.textContent = 'Applying…';
+      rwAdvancedStatus.classList.remove('is-warning');
+    }
+    const srtPort = parseInt(rwSrtPortIn?.value || '0', 10);
+    const rtmpPort = parseInt(rwRtmpPortIn?.value || '0', 10);
+    // Light client-side validation — let the backend do the real
+    // check, but catch obvious nonsense locally so we don't paper
+    // over a typo with a misleading 200 OK.
+    if (!Number.isFinite(srtPort) || srtPort < 1 || srtPort > 65535) {
+      rwAdvancedStatus.textContent = 'SRT port must be 1-65535.';
+      rwAdvancedStatus.classList.add('is-warning');
+      rwAdvancedApply.disabled = false;
+      return;
+    }
+    if (!Number.isFinite(rtmpPort) || rtmpPort < 1 || rtmpPort > 65535) {
+      rwAdvancedStatus.textContent = 'RTMP port must be 1-65535.';
+      rwAdvancedStatus.classList.add('is-warning');
+      rwAdvancedApply.disabled = false;
+      return;
+    }
+    const payload = {
+      relay: {
+        srt_port: srtPort,
+        srt_passphrase: rwSrtPassphraseIn?.value || '',
+        rtmp_port: rtmpPort,
+        rtmp_app: rwRtmpAppIn?.value || 'live',
+        rtmp_key: rwRtmpKeyIn?.value || 'stream',
+      },
+    };
+    try {
+      // applySettings() POSTs the patch and internally calls render()
+      // with the response, so lastSnapshot is current by the time it
+      // resolves. It also swallows errors silently, so a missing
+      // network or 4xx won't throw — we read lastSnapshot.relay back
+      // and check whether the values stuck.
+      await applySettings(payload);
+      const newRelay = (lastSnapshot && lastSnapshot.relay) || {};
+      const stuck =
+        newRelay.srt_port === srtPort &&
+        newRelay.rtmp_port === rtmpPort &&
+        newRelay.rtmp_app === (rwRtmpAppIn?.value || 'live') &&
+        newRelay.rtmp_key === (rwRtmpKeyIn?.value || 'stream');
+      if (stuck) {
+        rwAdvancedDirty = false;
+        if (rwAdvancedStatus) {
+          rwAdvancedStatus.textContent = 'Saved.';
+          rwAdvancedStatus.classList.remove('is-warning');
+          setTimeout(() => {
+            if (rwAdvancedStatus && rwAdvancedStatus.textContent === 'Saved.') {
+              rwAdvancedStatus.textContent = '';
+            }
+          }, 2200);
+        }
+      } else if (rwAdvancedStatus) {
+        rwAdvancedStatus.textContent = 'Backend rejected one or more values — check the log panel.';
+        rwAdvancedStatus.classList.add('is-warning');
+      }
+      refreshRwUrl();
+      refreshPortForwardChecklist();
+    } catch (err) {
+      if (rwAdvancedStatus) {
+        rwAdvancedStatus.textContent = `Save failed (${err && err.message || err}).`;
+        rwAdvancedStatus.classList.add('is-warning');
+      }
+    } finally {
+      rwAdvancedApply.disabled = false;
+    }
+  }
+
+  function resetRwAdvancedDefaults() {
+    if (rwSrtPortIn) rwSrtPortIn.value = '9710';
+    if (rwSrtPassphraseIn) rwSrtPassphraseIn.value = '';
+    if (rwRtmpPortIn) rwRtmpPortIn.value = '1935';
+    if (rwRtmpAppIn) rwRtmpAppIn.value = 'live';
+    if (rwRtmpKeyIn) rwRtmpKeyIn.value = 'stream';
+    markRwAdvancedDirty();
+  }
+
+  // While the receiver is running, lock the protocol radio AND the
+  // advanced inputs so the displayed config can't drift from the
+  // running listener. Sync the radio to the snapshot's source_id so
+  // the user sees the actual protocol of the running listener — fix
+  // for the "I picked SRT but the banner says RTMP" UX bug.
+  function syncRwProtocolWithSnapshot(snap) {
+    const active = isReceiverActive(snap);
+    const running = (snap && snap.source_id) || '';
+    rwProto.forEach((r) => {
+      if (active) {
+        // Force the radio to match what the backend is actually
+        // running. Without this, a user who changed the radio after
+        // starting the receiver would see a SRT pill highlighted while
+        // an RTMP listener is bound. By syncing on every poll, the UI
+        // can't disagree with reality.
+        r.checked = (r.value === running);
+        r.disabled = true;
+      } else {
+        r.disabled = false;
+      }
+    });
+    const advancedDisabled = active;
+    [rwSrtPortIn, rwSrtPassphraseIn, rwRtmpPortIn, rwRtmpAppIn, rwRtmpKeyIn,
+     rwAdvancedApply, rwAdvancedReset].forEach((el) => {
+      if (el) el.disabled = advancedDisabled;
+    });
+    if (rwAdvancedRunningHint) rwAdvancedRunningHint.hidden = !active;
+    // When the receiver flips from off → on we may have shifted the
+    // radio above; reflect that in the URL + the active app's
+    // instructions (so the mismatch banner clears or appears as
+    // appropriate).
+    refreshRwUrl();
+    updateRwAdvancedRowVisibility();
+    if (rwAppPick && rwAppPick.value) {
+      renderRwApp(rwAppPick.value);
+    }
+  }
+
+  // Hit ipify.org from JS — single-purpose API that returns the
+  // requester's public IPv4. CORS-friendly so a webview fetch works.
+  // Deferred behind a user click rather than auto-detected on page
+  // load: spec'd that way so we never leak a third-party request
+  // unless the user explicitly opts into the public-URL flow.
+  async function detectPublicIp() {
+    if (!rwPublicHost || !rwPublicStatus) return;
+    rwPublicStatus.textContent = 'Detecting…';
+    rwPublicStatus.classList.remove('is-warning');
+    try {
+      const r = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (!j || !j.ip) throw new Error('no ip in response');
+      rwPublicHost.value = j.ip;
+      rwPublicStatus.textContent = `Detected: ${j.ip}`;
+      refreshRwPublicUrl();
+      if (getRwWhere() === 'public') {
+        renderRwApp(rwAppPick?.value || '');
+      }
+    } catch (err) {
+      const msg = (err && err.message) ? err.message : String(err);
+      rwPublicStatus.textContent = `Detection failed (${msg}). Type your public IP or hostname manually.`;
+      rwPublicStatus.classList.add('is-warning');
+    }
+  }
+
+  function buildPortForwardTemplate() {
+    const proto = getRwProto();
+    const r = lastSnapshot?.relay || {};
+    const port = proto === 'srt_listen' ? (r.srt_port ?? 9710) : (r.rtmp_port ?? 1935);
+    const protoText = proto === 'srt_listen' ? 'UDP' : 'TCP';
+    const scheme = proto === 'srt_listen' ? 'srt' : 'rtmp';
+    const lanIp = rwSelectedIp || "<this-machine's-LAN-IP>";
+    const publicHost = getActivePublicHost() || '<your-public-IP-or-hostname>';
+    const remotePath = proto === 'rtmp_listen'
+      ? `/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`
+      : '';
+    return [
+      `Hi,`,
+      ``,
+      `I need a port-forward rule on our router so a remote camera can push a`,
+      `${proto === 'srt_listen' ? 'SRT' : 'RTMP'} video stream into a streaming app running on my computer.`,
+      ``,
+      `  Protocol:       ${protoText}`,
+      `  External port:  ${port}`,
+      `  Internal IP:    ${lanIp}`,
+      `  Internal port:  ${port}`,
+      ``,
+      `Once it's live, the URL the remote camera/encoder needs is:`,
+      `  ${scheme}://${publicHost}:${port}${remotePath}`,
+      ``,
+      `Thanks!`,
+    ].join('\n');
   }
 
   function applyIpPickerState(interfaces, preferredIp) {
@@ -2080,13 +2381,76 @@ function bind() {
     }
   }
 
+  // Map: which protocol each app in the dropdown supports. Used to
+  // decide when to surface a mismatch warning + one-click switch.
+  // Apps that support both ('srt_listen','rtmp_listen') just render
+  // for whatever the user picked in step 1.
+  const RW_APP_PROTOCOLS = {
+    'obs': ['srt_listen', 'rtmp_listen'],
+    'larix': ['srt_listen', 'rtmp_listen'],
+    'ffmpeg': ['srt_listen', 'rtmp_listen'],
+    'dji-osmo-pocket3': ['rtmp_listen'],
+    'dji': ['rtmp_listen'],
+    'iphone-bm': ['rtmp_listen'],
+  };
+
   function renderRwApp(app) {
     if (!rwAppBody) return;
     if (!app) { rwAppBody.hidden = true; rwAppBody.innerHTML = ''; return; }
     const proto = getRwProto();
-    const url = rwUrl?.value || '';
+    // Protocol mismatch check: if the app only supports one protocol
+    // and the wizard's current selection is a different one, render a
+    // prominent warning + "Switch to <X>" button instead of letting
+    // the per-app URL silently disagree with the step 2 URL. The
+    // button is disabled when the receiver is running (matching the
+    // locked-radio policy in syncRwProtocolWithSnapshot).
+    const supported = RW_APP_PROTOCOLS[app] || ['srt_listen', 'rtmp_listen'];
+    const mismatched = !supported.includes(proto);
+    const targetProto = supported[0];
+    const targetLabel = targetProto === 'srt_listen' ? 'SRT' : 'RTMP';
+    const receiverRunning = isReceiverActive(lastSnapshot);
+    const switchDisabled = receiverRunning ? ' disabled' : '';
+    const switchHint = receiverRunning
+      ? `<span class="rw-app-mismatch-hint">Stop the receiver below first.</span>`
+      : '';
+    const mismatchBanner = mismatched
+      ? `<div class="rw-app-mismatch">
+           <span class="rw-app-mismatch-msg">⚠ This app only supports <strong>${targetLabel}</strong>.
+           The URL in step 2 above is the wrong protocol — switch to ${targetLabel}
+           so step 2 matches the URL shown here.</span>
+           <button type="button" class="rw-app-mismatch-btn" id="rw-app-mismatch-btn"${switchDisabled}>Switch to ${targetLabel}</button>
+           ${switchHint}
+         </div>`
+      : '';
+    // Effective protocol for rendering this app's instructions —
+    // ALWAYS use the app's required protocol when it's single-
+    // protocol, so the URLs in step 3 are correct regardless of
+    // what the user picked in step 1. The mismatch banner above
+    // explains the situation and offers the one-click fix.
+    const effectiveProto = mismatched ? targetProto : proto;
+    // Host + URL the user should paste into their encoder app. When the
+    // user is in "Different network" mode, switch to the public address
+    // so the per-app instructions are immediately correct without them
+    // having to mentally substitute the LAN IP for their public IP.
+    const where = getRwWhere();
+    const publicMode = where === 'public';
+    const host = publicMode
+      ? (getActivePublicHost() || '<your-public-ip>')
+      : (lanIp || '<your-lan-ip>');
+    // Build a URL string matching the EFFECTIVE protocol, not the
+    // step 2 URL field (which reflects the radio). This is the URL
+    // for the app's required protocol; the mismatch banner is what
+    // alerts the user that the step 2 field is the wrong protocol
+    // until they hit the Switch button.
+    const r = lastSnapshot?.relay || {};
+    const url = effectiveProto === 'srt_listen'
+      ? `srt://${host}:${r.srt_port ?? 9710}`
+      : `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    const networkBadge = publicMode
+      ? `<p class="rw-app-network-badge">Different network — URL uses your public address. Make sure the port-forward checklist above is set up first.</p>`
+      : '';
     let html = '';
-    if (app === 'obs' && proto === 'srt_listen') {
+    if (app === 'obs' && effectiveProto === 'srt_listen') {
       html = `<strong>OBS → Settings → Stream</strong>
         <ol>
           <li>Service: <code>Custom...</code></li>
@@ -2094,12 +2458,12 @@ function bind() {
           <li>Stream Key: leave blank</li>
           <li>Output → Encoder: x264 or HEVC, Keyframe Interval 2s, Bitrate to match what your network can carry</li>
         </ol>`;
-    } else if (app === 'obs' && proto === 'rtmp_listen') {
+    } else if (app === 'obs' && effectiveProto === 'rtmp_listen') {
       html = `<strong>OBS → Settings → Stream</strong>
         <ol>
           <li>Service: <code>Custom...</code></li>
-          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
-          <li>Stream Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
+          <li>Server: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}</code></li>
+          <li>Stream Key: <code>${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else if (app === 'larix') {
       html = `<strong>Larix Broadcaster (iPhone / Android)</strong>
@@ -2111,16 +2475,8 @@ function bind() {
           <li>Encoder: H.264 or HEVC, Keyframe interval 2s</li>
         </ol>`;
     } else if (app === 'dji-osmo-pocket3') {
-      // The Osmo Pocket 3's Live Streaming flow lives inside the
-      // Mimo app (it streams via the phone, not directly from the
-      // Pocket itself). Mimo only does RTMP — no SRT path — so we
-      // hard-code RTMP examples even when the user has SRT selected
-      // in the wizard, with a hint about why.
-      const rtmpServer = `rtmp://${escapeHtml(lanIp || '<your-lan-ip>')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}`;
-      const rtmpKey = escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream');
-      const protoNote = proto === 'srt_listen'
-        ? `<p style="margin:6px 0 0;color:#ffc452;font-size:11px;">⚠ The Osmo Pocket 3 / Mimo app only speaks RTMP — switch the protocol toggle above to <strong>RTMP</strong> before starting the receiver.</p>`
-        : '';
+      const rtmpServer = `rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}`;
+      const rtmpKey = escapeHtml(r.rtmp_key || 'stream');
       html = `<strong>DJI Osmo Pocket 3 (via Mimo app on phone)</strong>
         <ol>
           <li>Pair the Pocket 3 to the <em>DJI Mimo</em> app on your phone.</li>
@@ -2128,18 +2484,16 @@ function bind() {
           <li>Pick <em>RTMP</em> as the platform.</li>
           <li>Server URL: <code>${rtmpServer}</code></li>
           <li>Stream Key: <code>${rtmpKey}</code></li>
-          <li>Tap <em>Start Live</em> in Mimo. The Pocket sends video over the phone's connection — make sure the phone is on the same Wi-Fi as this computer.</li>
-        </ol>
-        ${protoNote}`;
+          <li>Tap <em>Start Live</em> in Mimo. ${publicMode ? 'The Pocket pushes via the phone\'s data connection — works from anywhere with cellular signal.' : 'The Pocket sends video over the phone\'s connection — make sure the phone is on the same Wi-Fi as this computer.'}</li>
+        </ol>`;
     } else if (app === 'dji') {
       html = `<strong>DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</strong>
         <ol>
           <li>In the Fly app: <em>Camera View → Transmission → Live Streaming Platform → RTMP Custom</em></li>
-          <li>RTMP URL: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}/${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
-          <li>(SRT isn't supported natively on most DJI consumer drones — pick RTMP above for these)</li>
+          <li>RTMP URL: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}/${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else if (app === 'ffmpeg') {
-      const cmd = proto === 'srt_listen'
+      const cmd = effectiveProto === 'srt_listen'
         ? `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f mpegts '${url}'`
         : `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f flv '${url}'`;
       html = `<strong>FFmpeg from a file or device</strong>
@@ -2149,23 +2503,93 @@ function bind() {
         <ol>
           <li>Tap the gear icon → <em>Stream</em></li>
           <li>Service: <code>Custom RTMP</code> (the BMD app speaks RTMP only)</li>
-          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
-          <li>Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
-          <li>Pick RTMP above (Blackmagic Camera doesn't do SRT yet)</li>
+          <li>Server: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}</code></li>
+          <li>Key: <code>${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else {
       html = `<em>Pick your encoder app above for tailored instructions.</em>`;
     }
-    rwAppBody.innerHTML = html;
+    // Order: mismatch banner first (most important — warns about the
+    // step 2 URL being the wrong protocol), then network-mode badge
+    // (public-IP reminder), then the app-specific instructions.
+    rwAppBody.innerHTML = mismatchBanner + networkBadge + html;
     rwAppBody.hidden = false;
+    // The mismatch banner contains a button — wire its click handler
+    // after the innerHTML assignment since the button is freshly
+    // created on every render.
+    const mismatchBtn = document.getElementById('rw-app-mismatch-btn');
+    if (mismatchBtn && !receiverRunning) {
+      mismatchBtn.addEventListener('click', () => {
+        // Find the radio for the target protocol and check it.
+        for (const r of rwProto) {
+          r.checked = (r.value === targetProto);
+        }
+        // Mirror the same refresh chain the radio's change handler
+        // does — but the radios were updated programmatically here,
+        // which doesn't fire 'change' events, so call directly.
+        refreshRwUrl();
+        updateRwAdvancedRowVisibility();
+        renderRwApp(app);
+      });
+    }
   }
 
   rwProto.forEach((r) => r.addEventListener('change', () => {
     refreshRwUrl();
+    updateRwAdvancedRowVisibility();
     renderRwApp(rwAppPick?.value || '');
   }));
   if (rwAppPick) rwAppPick.addEventListener('change', () => renderRwApp(rwAppPick.value));
   if (rwCopy) rwCopy.addEventListener('click', () => copyToClipboard(rwUrl.value, rwCopy));
+
+  // Advanced settings wiring — mark dirty on edit, Apply POSTs to
+  // /api/settings, Reset wipes to spec defaults.
+  [rwSrtPortIn, rwSrtPassphraseIn, rwRtmpPortIn, rwRtmpAppIn, rwRtmpKeyIn]
+    .forEach((el) => {
+      if (el) el.addEventListener('input', markRwAdvancedDirty);
+    });
+  if (rwAdvancedApply) rwAdvancedApply.addEventListener('click', applyRwAdvanced);
+  if (rwAdvancedReset) rwAdvancedReset.addEventListener('click', resetRwAdvancedDefaults);
+
+  // Public-URL helper wiring.
+  rwWhere.forEach((r) => r.addEventListener('change', () => {
+    applyRwWhereState();
+    // Re-render per-app instructions with the new host (LAN ↔ public).
+    renderRwApp(rwAppPick?.value || '');
+  }));
+  if (rwPublicHost) {
+    rwPublicHost.addEventListener('input', () => {
+      refreshRwPublicUrl();
+      // Per-app instructions show the public URL inline when in
+      // "different network" mode — re-render as the host changes.
+      if (getRwWhere() === 'public') {
+        renderRwApp(rwAppPick?.value || '');
+      }
+    });
+  }
+  if (rwPublicDetect) {
+    rwPublicDetect.addEventListener('click', () => {
+      rwPublicDetect.disabled = true;
+      detectPublicIp().finally(() => {
+        rwPublicDetect.disabled = false;
+      });
+    });
+  }
+  if (rwPublicCopy) {
+    rwPublicCopy.addEventListener('click', () => copyToClipboard(rwPublicUrl.value, rwPublicCopy));
+  }
+  if (rwPfCopyTemplate) {
+    rwPfCopyTemplate.addEventListener('click', () => {
+      copyToClipboard(buildPortForwardTemplate(), rwPfCopyTemplate);
+    });
+  }
+  // Initial paint so the public-URL field is populated even before
+  // the user toggles into the public sub-tab. Also primes the
+  // port-forward checklist's "internal IP" with whatever LAN IP
+  // detection lands on first poll.
+  applyRwWhereState();
+  refreshRwPublicUrl();
+  refreshPortForwardChecklist();
 
   if (rwIpPick) rwIpPick.addEventListener('change', () => {
     if (rwIpPick.value === '__manual__') {
@@ -2266,6 +2690,14 @@ function bind() {
   // The poll loop already calls render(snap) on every tick; we just
   // need to re-render the URL when the wizard is open.
   const urlRefreshTimer = setInterval(() => {
+    // Hydrate advanced fields on first valid snapshot. Skipped on
+    // subsequent ticks unless the user hits Reset (which marks dirty
+    // → Apply clears dirty → next snapshot re-hydration is safe but
+    // gated by !dirty).
+    if (lastSnapshot && !rwAdvancedHydrated) {
+      hydrateRwAdvancedFromSnapshot(lastSnapshot);
+    }
+    syncRwProtocolWithSnapshot(lastSnapshot);
     refreshRwUrl();
     updateReceiverButtons();
   }, 1000);
@@ -2278,6 +2710,14 @@ function bind() {
   // live inside bind() — exposing on window is the cheapest bridge.
   window.applyIpPickerState = applyIpPickerState;
   window.updateReceiverButtons = updateReceiverButtons;
+  // Expose the wizard sync helpers too so render() can call them
+  // synchronously after applying a snapshot (avoids waiting up to a
+  // second for the next interval tick to redraw the locked-radio
+  // state when the receiver flips active).
+  window.syncRwProtocolWithSnapshot = syncRwProtocolWithSnapshot;
+  window.hydrateRwAdvancedFromSnapshot = (snap) => {
+    if (!rwAdvancedHydrated) hydrateRwAdvancedFromSnapshot(snap);
+  };
 }
 
 bind();

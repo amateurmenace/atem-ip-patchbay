@@ -67,18 +67,19 @@ static AVF_DEVICE_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[[^\]]+\]\s*\[(\d+)\]\s*(.+)$").unwrap());
 
 fn scan_avfoundation() -> (Vec<Device>, Vec<Device>) {
-    let output = Command::new(ffmpeg_path())
-        .args([
-            "-hide_banner",
-            "-f",
-            "avfoundation",
-            "-list_devices",
-            "true",
-            "-i",
-            "",
-        ])
-        .stdout(std::process::Stdio::null())
-        .output();
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args([
+        "-hide_banner",
+        "-f",
+        "avfoundation",
+        "-list_devices",
+        "true",
+        "-i",
+        "",
+    ])
+    .stdout(std::process::Stdio::null());
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let output = cmd.output();
     let stderr = match output {
         Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
         Err(err) => {
@@ -133,18 +134,19 @@ static DSHOW_DEVICE_LINE: Lazy<Regex> = Lazy::new(|| {
 });
 
 fn scan_dshow() -> (Vec<Device>, Vec<Device>) {
-    let output = Command::new(ffmpeg_path())
-        .args([
-            "-hide_banner",
-            "-f",
-            "dshow",
-            "-list_devices",
-            "true",
-            "-i",
-            "dummy",
-        ])
-        .stdout(std::process::Stdio::null())
-        .output();
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args([
+        "-hide_banner",
+        "-f",
+        "dshow",
+        "-list_devices",
+        "true",
+        "-i",
+        "dummy",
+    ])
+    .stdout(std::process::Stdio::null());
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let output = cmd.output();
     let stderr = match output {
         Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
         Err(err) => {
@@ -325,22 +327,23 @@ static AVF_MODE_LINE: Lazy<Regex> =
 /// resulting "Selected framerate not supported, supported modes are…"
 /// listing.
 pub fn probe_avf_modes(device_index: i32) -> Vec<AvfMode> {
-    let output = Command::new(ffmpeg_path())
-        .args([
-            "-hide_banner",
-            "-f",
-            "avfoundation",
-            "-framerate",
-            "1",
-            "-i",
-            &device_index.to_string(),
-            "-t",
-            "0",
-            "-f",
-            "null",
-            "-",
-        ])
-        .output();
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args([
+        "-hide_banner",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "1",
+        "-i",
+        &device_index.to_string(),
+        "-t",
+        "0",
+        "-f",
+        "null",
+        "-",
+    ]);
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let output = cmd.output();
     let stderr = match output {
         Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
         Err(err) => {

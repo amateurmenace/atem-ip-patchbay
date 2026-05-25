@@ -54,3 +54,31 @@ pub fn ffmpeg_path() -> String {
 
     "ffmpeg".into()
 }
+
+/// Suppress the console window Windows spawns for any console
+/// subprocess (FFmpeg, FFprobe, `cmd /c …`). Passes `CREATE_NO_WINDOW`
+/// (0x0800_0000) to `CreateProcess` so the child inherits no console.
+/// Without this, a black terminal window pops up next to the Tauri
+/// window every time we shell out — the user-visible "ffmpeg.exe
+/// console" complaint from the alpha.11 Windows test.
+///
+/// No-op on macOS/Linux.
+#[cfg(windows)]
+pub fn hide_console_std(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+pub fn hide_console_std(_cmd: &mut std::process::Command) {}
+
+/// Tokio variant of [`hide_console_std`]. `tokio::process::Command`
+/// exposes `creation_flags` as an inherent method on Windows so no
+/// trait import is needed.
+#[cfg(windows)]
+pub fn hide_console_tokio(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+pub fn hide_console_tokio(_cmd: &mut tokio::process::Command) {}

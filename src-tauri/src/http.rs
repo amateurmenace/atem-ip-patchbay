@@ -559,12 +559,12 @@ async fn api_open_net_diag() -> impl IntoResponse {
         // story like macOS, so we just open the URL. If the user has
         // net-diag for Windows installed (future alpha), we can add
         // a registry-key lookup or known-path check here.
-        match std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "start", "", url])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-        {
+            .stderr(std::process::Stdio::null());
+        crate::ffmpeg_path::hide_console_std(&mut cmd);
+        match cmd.status() {
             Ok(s) if s.success() => opened_url = true,
             Ok(s) => error = Some(format!("cmd /c start exited {s:?}")),
             Err(e) => error = Some(format!("cmd /c start failed: {e}")),

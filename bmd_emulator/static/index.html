@@ -619,19 +619,142 @@
               <span class="rw-step">2</span>
               <div class="rw-step-content">
                 <span class="rw-step-label">Copy this URL into your camera, drone, or encoder app</span>
-                <div class="rw-ip-row" id="rw-ip-row">
-                  <label for="rw-ip-pick" class="rw-ip-label">This machine's LAN IP:</label>
-                  <select id="rw-ip-pick" class="rw-ip-pick" hidden></select>
-                  <input id="rw-ip-manual" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" inputmode="decimal" />
-                  <span id="rw-ip-status" class="rw-ip-status" aria-live="polite"></span>
+
+                <!-- Sub-toggle: is the publisher on the same LAN as this
+                     app, or pushing in from outside (cellular, a venue,
+                     a remote home)? "Different network" expands a public-
+                     URL helper + port-forwarding checklist below. -->
+                <div class="rw-where" role="radiogroup" aria-label="Where is the publisher">
+                  <label class="seg"><input type="radio" name="rw-where" value="lan" checked /><span>On my network</span></label>
+                  <label class="seg"><input type="radio" name="rw-where" value="public" /><span>Different network (remote / cellular)</span></label>
                 </div>
-                <div class="rw-url-row">
-                  <input id="rw-publish-url" type="text" readonly />
-                  <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+
+                <!-- LAN flow (default, original wizard behavior). -->
+                <div class="rw-lan-block" id="rw-lan-block">
+                  <div class="rw-ip-row" id="rw-ip-row">
+                    <label for="rw-ip-pick" class="rw-ip-label">This machine's LAN IP:</label>
+                    <select id="rw-ip-pick" class="rw-ip-pick" hidden></select>
+                    <input id="rw-ip-manual" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" inputmode="decimal" />
+                    <span id="rw-ip-status" class="rw-ip-status" aria-live="polite"></span>
+                  </div>
+                  <div class="rw-url-row">
+                    <input id="rw-publish-url" type="text" readonly />
+                    <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+                  </div>
+                  <p class="rw-hint" id="rw-ip-hint">
+                    Default port is 9710 for SRT, 1935 for RTMP. Expand
+                    <em>Advanced settings</em> below to change ports, the
+                    RTMP app/key, or the SRT passphrase if you already have
+                    something listening on the default.
+                  </p>
                 </div>
-                <p class="rw-hint" id="rw-ip-hint">
-                  Default port is 9710 for SRT, 1935 for RTMP — change them in the panel below if needed.
-                </p>
+
+                <!-- Advanced settings — ports, RTMP app/key, SRT
+                     passphrase. Settable while the receiver is idle;
+                     locked (disabled) while the receiver is running so
+                     a port change doesn't desync the running listener
+                     from the displayed URL. Changes are persisted via
+                     PATCH /api/settings { relay: {...} }. -->
+                <details class="rw-advanced" id="rw-advanced">
+                  <summary>Advanced settings — ports, app name, stream key</summary>
+                  <div class="rw-advanced-body">
+                    <div class="rw-advanced-row" data-protocol="srt_listen">
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">SRT port</span>
+                        <input id="rw-srt-port" type="number" min="1" max="65535" inputmode="numeric" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">SRT passphrase <span class="rw-advanced-opt">(optional)</span></span>
+                        <input id="rw-srt-passphrase" type="text" placeholder="leave blank for no encryption" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="rw-advanced-row" data-protocol="rtmp_listen">
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">RTMP port</span>
+                        <input id="rw-rtmp-port" type="number" min="1" max="65535" inputmode="numeric" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">RTMP app</span>
+                        <input id="rw-rtmp-app" type="text" autocomplete="off" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">Stream key</span>
+                        <input id="rw-rtmp-key" type="text" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="rw-advanced-actions">
+                      <button id="rw-advanced-apply" type="button" class="btn-secondary">Apply</button>
+                      <button id="rw-advanced-reset" type="button" class="btn-tertiary">Reset to defaults</button>
+                      <span id="rw-advanced-status" class="rw-ip-status" aria-live="polite"></span>
+                    </div>
+                    <p class="rw-hint" id="rw-advanced-running-hint" hidden>
+                      <strong>Receiver is running.</strong> Stop the receiver below before changing
+                      ports or keys — otherwise the new values won't take effect until the next start.
+                    </p>
+                  </div>
+                </details>
+
+                <!-- Public-network flow. WAN IP detect via ipify (the
+                     user clicks Detect — no third-party request until
+                     they opt in), or user types a hostname (DDNS like
+                     duckdns / a static IP / a colocated host). Generated
+                     URL gets a Copy button. The port-forward checklist
+                     below it gives the operator everything they need
+                     to either configure their own router OR forward to
+                     IT — including a copy-pasteable "send to IT"
+                     template. -->
+                <div class="rw-public-block" id="rw-public-block" hidden>
+                  <div class="rw-ip-row">
+                    <label for="rw-public-host" class="rw-ip-label">Public address:</label>
+                    <input id="rw-public-host" type="text" placeholder="e.g. 203.0.113.45 or myhome.duckdns.org" autocomplete="off" />
+                    <button id="rw-public-detect" type="button" class="btn-secondary rw-public-detect">Detect WAN IP</button>
+                    <span id="rw-public-status" class="rw-ip-status" aria-live="polite"></span>
+                  </div>
+                  <div class="rw-url-row">
+                    <input id="rw-public-publish-url" type="text" readonly />
+                    <button id="rw-public-copy" type="button" class="btn-secondary">Copy</button>
+                  </div>
+                  <p class="rw-hint">
+                    <strong>You also need a port-forward rule on your router</strong> so the
+                    publisher's connection from the Internet reaches this machine. Expand the
+                    checklist below — or copy the "send to IT" template if someone else manages
+                    your network.
+                  </p>
+                  <details class="rw-portforward">
+                    <summary>Port-forward checklist</summary>
+                    <div class="rw-portforward-body">
+                      <ul class="rw-portforward-checklist">
+                        <li><span class="rw-pf-key">Protocol</span> <code id="rw-pf-protocol">UDP (SRT)</code></li>
+                        <li><span class="rw-pf-key">External port</span> <code id="rw-pf-ext-port">9710</code></li>
+                        <li><span class="rw-pf-key">Internal IP</span> <code id="rw-pf-int-ip">(set your LAN IP in the "On my network" tab)</code></li>
+                        <li><span class="rw-pf-key">Internal port</span> <code id="rw-pf-int-port">9710</code></li>
+                      </ul>
+                      <p class="rw-hint">
+                        On a UniFi gateway: <em>Settings → Routing &amp; Firewall → Port Forwarding → Create New Forward</em>.
+                        On most home routers: <em>Advanced → Port Forwarding</em> (sometimes "Virtual Server" or "NAT").
+                        SRT uses <strong>UDP</strong> (not TCP — most operators get this wrong); RTMP uses <strong>TCP</strong>.
+                      </p>
+                      <p class="rw-hint">
+                        <strong>Carrier-grade NAT gotcha:</strong> some ISPs (especially cellular / 5G home internet,
+                        a lot of fiber resellers, and most apartment-building ISPs) use CGN — your "public" IP
+                        from ipify is actually shared with hundreds of other customers and port-forwards
+                        won't work no matter what your router says. If forwarding doesn't connect after a few
+                        retries, you'll need an SRT relay service (srt.live, OvenMediaEngine on a VPS, Cloudflare
+                        Stream) instead of a direct push.
+                      </p>
+                      <p class="rw-hint">
+                        <strong>Quick test:</strong> from your phone on <em>cellular</em> (NOT Wi-Fi), try
+                        <code>nc -uvz &lt;your-public-ip&gt; &lt;port&gt;</code> from a terminal, or just point a test
+                        stream at the URL above. If the receiver shows "listener bound — waiting for encoder"
+                        but never flips to "connected," the port-forward isn't routing traffic through yet.
+                      </p>
+                      <div class="rw-pf-template-row">
+                        <button id="rw-pf-copy-template" type="button" class="btn-secondary">Copy "send to IT" template</button>
+                        <span id="rw-pf-template-status" class="rw-ip-status" aria-live="polite"></span>
+                      </div>
+                    </div>
+                  </details>
+                </div>
               </div>
             </div>
 

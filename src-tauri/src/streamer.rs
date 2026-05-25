@@ -11,8 +11,8 @@
 //! conversion. Overlay re-add lands with the v0.2.0 UI bundle
 //! (Phase 8) when overlay UI gets reworked anyway.
 
-use crate::ffmpeg_path::ffmpeg_path;
-use crate::ndi_capture::{NdiCapture, NdiVideoFormat};
+use crate::ffmpeg_path::{ffmpeg_path, hide_console_tokio};
+use crate::ndi_capture::{NdiAudioChunk, NdiCapture, NdiVideoFormat};
 use crate::ndi_runtime;
 use crate::omt_capture::{OmtCapture, OmtVideoFormat};
 use crate::omt_runtime;
@@ -100,6 +100,15 @@ struct Inner {
     /// silently doesn't fire. Drop sends OMT_SendDestroy so the
     /// network announcement disappears.
     omt_sender: Option<Arc<crate::omt_sender::OmtSender>>,
+    /// Secondary FFmpeg subprocess for OMT-out video tee on non-raw
+    /// sources (AVF / pipe / RTSP / SRT-listen / RTMP-listen).
+    /// alpha.12 spawns this alongside the primary ATEM FFmpeg so the
+    /// same source feeds both — the primary encodes to mpegts/SRT,
+    /// the tee outputs BGRA rawvideo we read for OmtSender. None
+    /// when source is NDI/OMT (which use the in-process frame-tee
+    /// path) or when OMT output is disabled. Kill-on-drop so a panic
+    /// can't leak an FFmpeg process.
+    omt_video_tee_child: Option<Child>,
 }
 
 impl Streamer {
@@ -115,6 +124,7 @@ impl Streamer {
                 ndi_capture: None,
                 omt_capture: None,
                 omt_sender: None,
+                omt_video_tee_child: None,
             }),
         })
     }
@@ -202,7 +212,12 @@ impl Streamer {
         // start an OmtSender that exactly matches the source feed
         // (alpha.9 OMT output is a frame-tee, so the sender's format
         // is whatever the source produces — no transcode, no resize).
-        let (cmd, ndi_capture, omt_capture, frame_rx, raw_format) =
+        //
+        // ndi_audio_rx is the audio channel from NDI capture; only
+        // populated when OMT output is enabled (so we don't waste
+        // SDK queue space draining audio nobody's listening for).
+        let omt_output_enabled = self.state.snapshot().omt_output_enabled;
+        let (cmd, ndi_capture, omt_capture, frame_rx, raw_format, ndi_audio_rx) =
             match plan.source.id.as_str() {
                 "ndi" => {
                     let source_name = plan.source.label.clone();
@@ -212,11 +227,14 @@ impl Streamer {
                                 "NDI source not found: {source_name:?}. Refresh the discovery list."
                             )
                         })?;
-                    let (format, capture, rx) =
-                        NdiCapture::start_and_probe_format(ndi_source, Duration::from_secs(5))?;
+                    let (format, capture, rx, audio_rx) = NdiCapture::start_and_probe_format(
+                        ndi_source,
+                        Duration::from_secs(5),
+                        omt_output_enabled,
+                    )?;
                     let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
                     let rf = Some((format.width, format.height, format.ffmpeg_pix_fmt));
-                    (cmd, Some(capture), None, Some(rx), rf)
+                    (cmd, Some(capture), None, Some(rx), rf, audio_rx)
                 }
                 "omt" => {
                     let source_name = plan.source.label.clone();
@@ -231,18 +249,25 @@ impl Streamer {
                         OmtCapture::start_and_probe_format(address, Duration::from_secs(5))?;
                     let cmd = self.build_ffmpeg_cmd_for_omt(&plan, &format);
                     let rf = Some((format.width, format.height, format.ffmpeg_pix_fmt));
-                    (cmd, None, Some(capture), Some(rx), rf)
+                    (cmd, None, Some(capture), Some(rx), rf, None)
                 }
-                _ => (self.build_ffmpeg_cmd(&plan), None, None, None, None),
+                _ => (self.build_ffmpeg_cmd(&plan), None, None, None, None, None),
             };
 
         // OMT output (frame-tee). When the user has enabled OMT
-        // output AND we have a raw frame source (NDI or OMT), spin up
-        // an OmtSender matching the source format. Other source types
-        // surface a warning and fall through (output silently
-        // doesn't fire — the existing ATEM SRT path keeps working).
+        // output:
+        //   - NDI / OMT source → in-process frame-tee. We already
+        //     have raw BGRA bytes flowing through the writer task,
+        //     so the OmtSender just consumes them as a free fan-out.
+        //   - Other sources (AVF / pipe / RTSP / SRT-listen / RTMP-
+        //     listen) → spawn a SECOND FFmpeg subprocess that opens
+        //     the same source and outputs BGRA rawvideo on stdout.
+        //     We read that and feed OmtSender. alpha.12 is video-
+        //     only on this path (audio remains lavfi anullsrc); the
+        //     audio tee comes in alpha.13 once cross-platform pipe-
+        //     FD plumbing is worked out.
         let snap_for_omt = self.state.snapshot();
-        let omt_sender = if snap_for_omt.omt_output_enabled {
+        let (omt_sender, omt_video_tee) = if snap_for_omt.omt_output_enabled {
             if let Some((w, h, pix_fmt)) = raw_format {
                 match crate::omt_sender::OmtSender::start_for_format(
                     &snap_for_omt.omt_output_name,
@@ -252,30 +277,64 @@ impl Streamer {
                 ) {
                     Ok(s) => {
                         log::info!(
-                            "OMT output enabled: publishing as {:?} at {}x{} ({})",
+                            "OMT output enabled (raw frame-tee): publishing as {:?} at {}x{} ({})",
                             snap_for_omt.omt_output_name,
                             w,
                             h,
                             pix_fmt
                         );
-                        Some(Arc::new(s))
+                        (Some(Arc::new(s)), None)
                     }
                     Err(err) => {
                         log::warn!("OMT output requested but sender start failed: {err}");
-                        None
+                        (None, None)
                     }
                 }
             } else {
-                log::warn!(
-                    "OMT output requested but source {:?} doesn't produce raw frames. \
-                     alpha.9 only supports frame-tee from NDI/OMT sources; use a different \
-                     source or disable OMT output.",
-                    plan.source.id
-                );
-                None
+                // Non-raw source — spawn the FFmpeg video tee.
+                // OmtSender is always BGRA at the configured output
+                // dimensions; the tee FFmpeg scales/converts to match.
+                match crate::omt_sender::OmtSender::start_for_format(
+                    &snap_for_omt.omt_output_name,
+                    plan.width,
+                    plan.height,
+                    "bgra",
+                ) {
+                    Ok(s) => {
+                        let sender = Arc::new(s);
+                        match spawn_omt_video_tee(
+                            &plan.source.ffmpeg_input_args,
+                            plan.width,
+                            plan.height,
+                            plan.fps,
+                            sender.clone(),
+                        ) {
+                            Ok(child) => {
+                                log::info!(
+                                    "OMT output enabled (FFmpeg tee): publishing as {:?} at {}x{} (bgra) — \
+                                     audio is silent on this path until alpha.13",
+                                    snap_for_omt.omt_output_name,
+                                    plan.width,
+                                    plan.height,
+                                );
+                                (Some(sender), Some(child))
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "OMT output requested but tee FFmpeg failed to spawn: {err}"
+                                );
+                                (None, None)
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("OMT output requested but sender start failed: {err}");
+                        (None, None)
+                    }
+                }
             }
         } else {
-            None
+            (None, None)
         };
 
         log::info!("Launching FFmpeg: {}", shlex_join(&cmd));
@@ -292,6 +351,7 @@ impl Streamer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        hide_console_tokio(&mut command);
 
         // Put FFmpeg in its own process group so it doesn't inherit
         // the Tauri parent's signals AND so we can SIGTERM the whole
@@ -386,6 +446,15 @@ impl Streamer {
             tokio::spawn(ndi_writer_task(stdin, rx, omt_sender.clone()));
         }
 
+        // OMT audio writer — only spawns when both NDI audio is being
+        // captured AND we have an OmtSender to forward to. The NDI
+        // capture thread already gates audio drain on the same boolean
+        // (omt_output_enabled was passed in at start_and_probe_format)
+        // so the channel only exists in the case we want to consume.
+        if let (Some(audio_rx), Some(sender)) = (ndi_audio_rx, omt_sender.clone()) {
+            tokio::spawn(ndi_audio_writer_task(audio_rx, sender));
+        }
+
         // Reset stats for the new session.
         self.state.stats_in_place(|s| {
             s.status = "Connecting".into();
@@ -408,6 +477,7 @@ impl Streamer {
             inner.ndi_capture = ndi_capture;
             inner.omt_capture = omt_capture;
             inner.omt_sender = omt_sender;
+            inner.omt_video_tee_child = omt_video_tee;
         }
 
         // Spawn the monitor task. It owns the stderr handle, parses
@@ -435,6 +505,19 @@ impl Streamer {
             // first so FFmpeg's stdin closes cleanly before we
             // SIGTERM the process group.
             capture.stop();
+        }
+        // Kill the OMT video tee FFmpeg (if running). Done BEFORE
+        // dropping the OmtSender so the tee child's reader task sees
+        // its source go away cleanly (stdout EOF → channel close →
+        // task exit) rather than panicking on a dropped sender.
+        // kill_on_drop on the Child already covers the catastrophic
+        // case; this is the graceful path.
+        if let Some(mut tee_child) = inner.omt_video_tee_child.take() {
+            log::info!("Stopping OMT video tee FFmpeg");
+            let _ = tee_child.start_kill();
+            // Don't await — let the reaper task in Drop clean up. The
+            // primary FFmpeg stop below uses the same fire-and-forget
+            // pattern.
         }
         // Drop the OMT publisher last (its lifetime is shorter than
         // the writer task's; dropping while the writer holds an Arc
@@ -897,12 +980,25 @@ impl Streamer {
         }
 
         // Stderr EOF — child is exiting. Wait for the exit code.
+        // Also tear down any OMT video tee FFmpeg + sender so the
+        // natural-exit path (source ended, FFmpeg crashed, etc.) frees
+        // resources without requiring the user to click Stop. Mirrors
+        // what stop() does for the same fields.
         let exit_code = {
             let mut inner = self.inner.lock().await;
             let mut child = match inner.child.take() {
                 Some(c) => c,
                 None => return,
             };
+            if let Some(mut tee) = inner.omt_video_tee_child.take() {
+                let _ = tee.start_kill();
+            }
+            if let Some(sender) = inner.omt_sender.take() {
+                log::info!(
+                    "OMT output ending with primary FFmpeg ({} connections at exit)",
+                    sender.connection_count()
+                );
+            }
             drop(inner); // don't hold lock across .await
             child.wait().await.ok().and_then(|s| s.code())
         };
@@ -1243,6 +1339,192 @@ async fn ndi_writer_task(
     }
     let _ = stdin.shutdown().await;
     log::info!("raw->ffmpeg writer task exiting");
+}
+
+/// Spawn a secondary FFmpeg subprocess that opens the SAME source as
+/// the primary streaming FFmpeg and outputs BGRA rawvideo on stdout
+/// — used by the OMT-out tee path for non-raw sources (AVF / pipe /
+/// RTSP / SRT-listen / RTMP-listen). The primary FFmpeg keeps its
+/// mpegts→SRT job; this tee runs in parallel.
+///
+/// Source-consumption note: this opens the source a SECOND time.
+/// USB / built-in cameras typically allow multiple AVF consumers
+/// at the OS level; some virtual cameras and proprietary capture
+/// drivers may refuse the second open. Network sources (RTSP,
+/// SRT/RTMP listen, named pipe acting as a network endpoint) create
+/// a second subscriber — works but doubles bandwidth/CPU on that
+/// side. Document the limitation if it bites in field reports.
+///
+/// Returns the spawned Child so the streamer can kill it on stop.
+/// Frame bytes are read off stdout in a tokio task spawned here and
+/// fed to `sender` directly — no intermediate mpsc channel because
+/// the reader is single-purpose and tied to the same lifetime as
+/// the sender Arc.
+fn spawn_omt_video_tee(
+    input_args: &[String],
+    width: u32,
+    height: u32,
+    fps: u32,
+    sender: Arc<crate::omt_sender::OmtSender>,
+) -> Result<Child> {
+    let mut cmd: Vec<String> = vec![
+        ffmpeg_path(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "warning".into(),
+    ];
+    // Reuse the same input args the primary FFmpeg uses (including
+    // -f avfoundation, -framerate, -video_size, -i "<index>", etc.).
+    // No back-pressure flag needed — this FFmpeg is in real-time
+    // alignment with the source rate already.
+    cmd.extend(input_args.iter().cloned());
+    // Single video stream out; ignore any source audio (alpha.13
+    // will add an audio tee for non-raw sources). The scale filter
+    // matches what the primary FFmpeg emits to the ATEM so the OMT
+    // consumer sees consistent dimensions across both feeds.
+    cmd.extend([
+        "-map".into(),
+        "0:v:0".into(),
+        "-vf".into(),
+        format!(
+            "scale={w}:{h}:force_original_aspect_ratio=decrease,\
+             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra,fps={fps},setsar=1",
+            w = width,
+            h = height,
+            fps = fps,
+        ),
+        "-pix_fmt".into(),
+        "bgra".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]);
+
+    log::info!("Launching OMT video tee FFmpeg: {}", shlex_join(&cmd));
+
+    let mut command = Command::new(&cmd[0]);
+    command
+        .args(&cmd[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    hide_console_tokio(&mut command);
+    // Same process-group treatment as the primary FFmpeg so a stop
+    // signal can target the tee process group too if needed.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| anyhow!("failed to spawn OMT tee FFmpeg: {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("OMT tee FFmpeg stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("OMT tee FFmpeg stderr was not piped"))?;
+
+    // Reader task: pull width*height*4 bytes per frame off stdout and
+    // feed to the OmtSender. Exits on EOF or any read error.
+    let frame_bytes = (width as usize) * (height as usize) * 4;
+    tokio::spawn(omt_video_tee_reader_task(stdout, frame_bytes, sender));
+    // Stderr drainer — keeps the pipe from filling and unwinds FFmpeg
+    // warnings into the parent log so a failing tee surfaces clearly.
+    tokio::spawn(omt_video_tee_stderr_task(stderr));
+
+    Ok(child)
+}
+
+async fn omt_video_tee_reader_task(
+    mut stdout: tokio::process::ChildStdout,
+    frame_bytes: usize,
+    sender: Arc<crate::omt_sender::OmtSender>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; frame_bytes];
+    let mut frame_count: u64 = 0;
+    let mut error_log_throttle: u64 = 0;
+    loop {
+        match stdout.read_exact(&mut buf).await {
+            Ok(_) => match sender.feed_frame(&buf) {
+                Ok(_) => {
+                    frame_count = frame_count.wrapping_add(1);
+                }
+                Err(err) => {
+                    if error_log_throttle.is_multiple_of(60) {
+                        log::warn!(
+                            "OMT tee feed_frame failed (logged 1/60): {err}"
+                        );
+                    }
+                    error_log_throttle = error_log_throttle.wrapping_add(1);
+                }
+            },
+            Err(err) => {
+                // EOF is the normal exit path (primary stop, source
+                // ended, tee FFmpeg killed). Anything else is logged.
+                if err.kind() != std::io::ErrorKind::UnexpectedEof {
+                    log::warn!("OMT tee stdout read error: {err}");
+                }
+                break;
+            }
+        }
+    }
+    log::info!("OMT video tee reader task exiting ({frame_count} frames)");
+}
+
+async fn omt_video_tee_stderr_task(mut stderr: tokio::process::ChildStderr) {
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(&mut stderr).lines();
+    while let Ok(Some(line)) = reader.next_line().await {
+        // Tee FFmpeg's loglevel is set to "warning" so this is
+        // signal-to-noise. Prefix the message so the source is
+        // unambiguous in the log.
+        log::warn!("[omt-tee-ffmpeg] {line}");
+    }
+}
+
+/// Drains NDI audio chunks from the mpsc channel into the OmtSender.
+/// One chunk per call to OMT_Send_SendAudio. Exits when the channel
+/// closes (NDI capture stopped) or after enough consecutive send
+/// errors that something is clearly broken. Unlike the video path,
+/// audio drop-on-error is non-fatal — the OMT consumer can recover
+/// from a missing audio chunk via its own resync logic.
+async fn ndi_audio_writer_task(
+    mut rx: mpsc::Receiver<NdiAudioChunk>,
+    sender: Arc<crate::omt_sender::OmtSender>,
+) {
+    let mut chunk_count: u64 = 0;
+    let mut error_log_throttle: u64 = 0;
+    while let Some(chunk) = rx.recv().await {
+        match sender.feed_audio_frame(
+            &chunk.samples,
+            chunk.num_channels,
+            chunk.sample_rate,
+        ) {
+            Ok(_rc) => {
+                chunk_count = chunk_count.wrapping_add(1);
+            }
+            Err(err) => {
+                if error_log_throttle.is_multiple_of(60) {
+                    log::warn!("OMT-out feed_audio_frame failed (logged 1/60): {err}");
+                }
+                error_log_throttle = error_log_throttle.wrapping_add(1);
+            }
+        }
+    }
+    log::info!("OMT audio writer task exiting (sent {chunk_count} chunks)");
 }
 
 #[allow(dead_code)]

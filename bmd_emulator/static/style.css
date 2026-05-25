@@ -1629,6 +1629,257 @@ pre {
 }
 .rw-app-body ol { margin: 0; padding-left: 20px; }
 .rw-app-body li { margin-bottom: 5px; }
+
+/* Step 2 sub-toggle: "On my network" vs "Different network". Reuses
+   the existing .seg-control look but is its own row so it sits above
+   either the LAN or public-URL block. */
+.rw-where {
+  display: inline-flex; gap: 6px;
+  margin: 0 0 10px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 8px;
+}
+.rw-where .seg {
+  display: inline-flex; align-items: center;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--muted, #9aa1ad);
+  transition: background 0.15s, color 0.15s;
+}
+.rw-where .seg input { display: none; }
+.rw-where .seg:has(input:checked) {
+  background: rgba(98, 184, 255, 0.18);
+  color: #e6f1ff;
+  border: 1px solid rgba(98, 184, 255, 0.45);
+  margin: -1px;
+}
+.rw-where .seg:hover:not(:has(input:checked)) {
+  color: var(--text, #e6e6ea);
+}
+
+/* Public-URL block (Different network sub-tab). Mostly inherits from
+   the LAN block — the IP row uses the same .rw-ip-row treatment — but
+   the Detect button needs a slight accent so it reads as the
+   primary action. */
+.rw-public-block { margin-top: 4px; }
+.rw-public-detect {
+  white-space: nowrap;
+}
+
+/* Port-forward checklist disclosed under the public URL. The
+   <details> shell is intentionally plain so the contained checklist
+   reads as a configuration document, not a UI panel. */
+.rw-portforward {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 200, 100, 0.05);
+  border: 1px solid rgba(255, 200, 100, 0.22);
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+.rw-portforward > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #ffd28a;
+  list-style: none;
+  user-select: none;
+}
+.rw-portforward > summary::-webkit-details-marker { display: none; }
+.rw-portforward > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.rw-portforward[open] > summary::before {
+  transform: rotate(90deg);
+}
+.rw-portforward-body {
+  margin-top: 10px;
+}
+.rw-portforward-checklist {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 11.5px;
+}
+.rw-portforward-checklist li {
+  display: contents;
+}
+.rw-portforward-checklist .rw-pf-key {
+  color: var(--muted, #9aa1ad);
+  font-weight: 600;
+  text-align: right;
+}
+.rw-portforward-checklist code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #b6e1c1;
+  font-size: 11px;
+  word-break: break-all;
+}
+.rw-pf-template-row {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 8px;
+}
+
+/* Advanced settings disclosure under step 2's LAN URL row. Holds the
+   port + key + passphrase inputs. Visually similar to .rw-portforward
+   so the two disclosures read as a pair. */
+.rw-advanced {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(98, 184, 255, 0.04);
+  border: 1px solid rgba(98, 184, 255, 0.18);
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+.rw-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #cfe3ff;
+  list-style: none;
+  user-select: none;
+}
+.rw-advanced > summary::-webkit-details-marker { display: none; }
+.rw-advanced > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.rw-advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+.rw-advanced-body {
+  margin-top: 10px;
+}
+.rw-advanced-row {
+  display: flex; gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rw-advanced-field {
+  display: flex; flex-direction: column;
+  gap: 3px;
+  min-width: 130px;
+}
+.rw-advanced-key {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted, #9aa1ad);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rw-advanced-opt {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-style: italic;
+  opacity: 0.7;
+}
+.rw-advanced-field input {
+  padding: 6px 9px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--text, #e6e6ea);
+  font-family: monospace;
+  font-size: 12px;
+}
+.rw-advanced-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rw-advanced-actions {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 6px;
+}
+.btn-tertiary {
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--muted, #9aa1ad);
+  font-size: 11px;
+  cursor: pointer;
+}
+.btn-tertiary:hover:not(:disabled) {
+  color: var(--text, #e6e6ea);
+  border-color: var(--muted, #9aa1ad);
+}
+.btn-tertiary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Protocol-mismatch alert at top of step 3 — fires when the user
+   picks an RTMP-only app (BMD Camera, DJI) while SRT is selected in
+   step 1. The button switches the wizard protocol so step 2's URL
+   matches the URL shown in the app instructions below. */
+.rw-app-mismatch {
+  display: flex; flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  background: rgba(255, 200, 100, 0.10);
+  border: 1px solid rgba(255, 200, 100, 0.45);
+  border-radius: 6px;
+  color: #ffd28a;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.rw-app-mismatch-msg {
+  flex: 1 1 280px;
+}
+.rw-app-mismatch-btn {
+  padding: 6px 14px;
+  background: #ffc452;
+  border: none;
+  border-radius: 5px;
+  color: #1a1814;
+  font-weight: 600;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rw-app-mismatch-btn:hover:not(:disabled) {
+  background: #ffd066;
+}
+.rw-app-mismatch-btn:disabled {
+  background: rgba(255, 200, 100, 0.35);
+  color: rgba(26, 24, 20, 0.55);
+  cursor: not-allowed;
+}
+.rw-app-mismatch-hint {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+
+/* Inline alert at the top of the per-app instruction body — surfaces
+   when the user is in "Different network" mode so they remember the
+   pasted URL goes via their public IP + needs port-forwarding done. */
+.rw-app-network-badge {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  background: rgba(255, 200, 100, 0.10);
+  border-left: 3px solid rgba(255, 200, 100, 0.55);
+  border-radius: 4px;
+  color: #ffd28a;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 /* Top-of-monitor banner that announces an active RTMP/SRT receiver.
    Sits between the preview frame and the main Start/Stop controls so
    it's literally the first thing the user sees when looking at the

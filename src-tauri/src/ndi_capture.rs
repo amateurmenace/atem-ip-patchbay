@@ -18,14 +18,20 @@
 //!    exits and drops the channel sender, closing the writer task,
 //!    closing FFmpeg's stdin, and triggering FFmpeg's clean shutdown.
 //!
-//! Audio is intentionally not piped here — Phase 4 routes audio
-//! through FFmpeg's `lavfi anullsrc` (silent). NDI audio support
-//! lands in a follow-up.
+//! Audio is captured on the same thread as video — alpha.12 adds an
+//! audio drain (`capture_audio_timeout(0)` after each video poll) and
+//! ships the resulting planar f32 PCM through a parallel mpsc channel
+//! to the streamer's OMT audio writer task. The FFmpeg-bound audio
+//! path is still separate (lavfi anullsrc / AVF custom) — this audio
+//! channel exists only to feed OMT-out. When the streamer doesn't
+//! enable OMT output, `start_and_probe_format` is called with
+//! `audio_wanted = false` and the capture loop skips audio drain
+//! entirely.
 
 use anyhow::{anyhow, Result};
 use grafton_ndi::{
-    LineStrideOrSize, PixelFormat, Receiver, ReceiverBandwidth, ReceiverColorFormat,
-    ReceiverOptions, Source, VideoFrame, NDI,
+    AudioFrame, LineStrideOrSize, PixelFormat, Receiver, ReceiverBandwidth,
+    ReceiverColorFormat, ReceiverOptions, Source, VideoFrame, NDI,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,6 +45,12 @@ use tokio::sync::mpsc;
 /// the channel within a frame or two, so the buffer just absorbs the
 /// occasional encoder spike.
 const FRAME_CHANNEL_CAPACITY: usize = 64;
+
+/// Audio chunk buffer size. NDI delivers audio in batches of ~10ms
+/// at 48kHz stereo (~960 samples per channel = ~7.5 KB per chunk).
+/// 128 chunks ≈ 1.3 seconds of headroom — plenty to absorb OMT
+/// consumer hiccups without growing memory unbounded.
+const AUDIO_CHANNEL_CAPACITY: usize = 128;
 
 /// One JPEG preview snapshot per N captured frames. At 30 FPS source
 /// rate a stride of 15 -> ~2 FPS preview, which is plenty for the
@@ -71,6 +83,20 @@ impl NdiVideoFormat {
     }
 }
 
+/// One chunk of NDI audio in the layout OMT expects (planar f32 PCM —
+/// channel 0's samples first, then channel 1's, etc.). grafton-ndi
+/// already stores audio planar internally, so we just clone the
+/// `data()` slice into an owned Vec for cross-thread transfer.
+/// `samples.len() / num_channels` recovers the samples-per-channel
+/// count — kept implicit rather than stored to avoid carrying a
+/// redundant field through the channel.
+#[derive(Debug)]
+pub struct NdiAudioChunk {
+    pub samples: Vec<f32>,
+    pub sample_rate: i32,
+    pub num_channels: i32,
+}
+
 pub struct NdiCapture {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -96,10 +122,24 @@ impl NdiCapture {
     /// rate before launching FFmpeg. Returns the format plus the
     /// receiving end of an mpsc channel — the caller drains that
     /// into FFmpeg's stdin.
+    ///
+    /// When `audio_wanted` is true, also returns an audio receiver
+    /// channel; the capture loop interleaves `capture_audio_timeout(0)`
+    /// calls after each video poll and forwards owned `NdiAudioChunk`s.
+    /// When false, the loop never polls audio and the returned audio
+    /// channel is `None`. Setting it false keeps the SDK's internal
+    /// audio queue from growing for streams the user isn't OMT-
+    /// publishing.
     pub fn start_and_probe_format(
         source: Source,
         format_timeout: Duration,
-    ) -> Result<(NdiVideoFormat, Self, mpsc::Receiver<Vec<u8>>)> {
+        audio_wanted: bool,
+    ) -> Result<(
+        NdiVideoFormat,
+        Self,
+        mpsc::Receiver<Vec<u8>>,
+        Option<mpsc::Receiver<NdiAudioChunk>>,
+    )> {
         // Each capture session gets its own NDI handle. (The
         // discovery Finder lives on its own NDI handle in
         // [`crate::ndi_runtime`]; receivers and finders are
@@ -169,6 +209,17 @@ impl NdiCapture {
         );
         let _ = tx.try_send(first_packed);
 
+        // Audio channel — only allocated when the caller plans to
+        // consume audio (OMT-out enabled). When `audio_wanted` is
+        // false, the capture loop receives `None` for its audio tx
+        // and skips audio drain entirely.
+        let (audio_tx, audio_rx) = if audio_wanted {
+            let (atx, arx) = mpsc::channel::<NdiAudioChunk>(AUDIO_CHANNEL_CAPACITY);
+            (Some(atx), Some(arx))
+        } else {
+            (None, None)
+        };
+
         let stop = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(std::sync::Mutex::new(None));
         let stop_w = stop.clone();
@@ -177,7 +228,7 @@ impl NdiCapture {
             .name("ndi-capture".into())
             .spawn(move || {
                 let _ndi = ndi; // keep handle alive for the receiver's lifetime
-                run_capture_loop(receiver, stop_w, tx, preview_w);
+                run_capture_loop(receiver, stop_w, tx, audio_tx, preview_w);
             })?;
 
         Ok((
@@ -188,6 +239,7 @@ impl NdiCapture {
                 preview,
             },
             rx,
+            audio_rx,
         ))
     }
 
@@ -212,6 +264,7 @@ fn run_capture_loop(
     receiver: Receiver,
     stop: Arc<AtomicBool>,
     tx: mpsc::Sender<Vec<u8>>,
+    audio_tx: Option<mpsc::Sender<NdiAudioChunk>>,
     preview: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 ) {
     let mut frame_counter: u64 = 0;
@@ -222,6 +275,8 @@ fn run_capture_loop(
     let mut window_frames: u32 = 0;
     let mut window_empty: u32 = 0;
     let mut window_errors: u32 = 0;
+    let mut window_audio_sent: u32 = 0;
+    let mut window_audio_dropped: u32 = 0;
     let mut window_start = Instant::now();
     while !stop.load(Ordering::Acquire) {
         match receiver.capture_video(Duration::from_millis(500)) {
@@ -266,22 +321,69 @@ fn run_capture_loop(
             }
         }
 
+        // Audio drain — only fires when the streamer wants audio
+        // (OMT-out enabled at start). Non-blocking with a 0ms timeout
+        // so we never block the video loop on audio. Each video poll
+        // pulls every audio frame the SDK has queued since last time.
+        // try_send drops chunks quietly if the consumer is slow; OMT
+        // audio is best-effort, not a hard requirement.
+        if let Some(atx) = audio_tx.as_ref() {
+            loop {
+                match receiver.capture_audio_timeout(Duration::from_millis(0)) {
+                    Ok(Some(af)) => match build_audio_chunk(&af) {
+                        Some(chunk) => match atx.try_send(chunk) {
+                            Ok(()) => window_audio_sent += 1,
+                            Err(_) => window_audio_dropped += 1,
+                        },
+                        None => window_audio_dropped += 1,
+                    },
+                    Ok(None) => break, // queue empty
+                    Err(err) => {
+                        log::debug!("NDI capture_audio error: {err}");
+                        break;
+                    }
+                }
+            }
+        }
+
         let now = Instant::now();
         if now.duration_since(window_start) >= Duration::from_secs(1) {
             log::info!(
-                "NDI capture 1s: sent={} empty={} errors={} ch_cap_remaining={}",
+                "NDI capture 1s: sent={} empty={} errors={} ch_cap_remaining={} \
+                 audio_sent={} audio_dropped={}",
                 window_frames,
                 window_empty,
                 window_errors,
                 tx.capacity(),
+                window_audio_sent,
+                window_audio_dropped,
             );
             window_frames = 0;
             window_empty = 0;
             window_errors = 0;
+            window_audio_sent = 0;
+            window_audio_dropped = 0;
             window_start = now;
         }
     }
     log::info!("NDI capture thread exiting (total frames: {frame_counter})");
+}
+
+/// Convert a grafton-ndi `AudioFrame` into a transportable chunk.
+/// Returns None if the frame has invalid layout (zero channels /
+/// zero samples). The samples Vec is a planar f32 PCM copy — same
+/// layout OMT expects (channel-major), so the OMT sender can pass it
+/// straight through without re-interleaving.
+fn build_audio_chunk(frame: &AudioFrame) -> Option<NdiAudioChunk> {
+    if frame.num_channels <= 0 || frame.num_samples <= 0 {
+        return None;
+    }
+    let samples = frame.data().to_vec();
+    Some(NdiAudioChunk {
+        samples,
+        sample_rate: frame.sample_rate,
+        num_channels: frame.num_channels,
+    })
 }
 
 fn pix_fmt_for_ffmpeg(pf: PixelFormat) -> &'static str {
