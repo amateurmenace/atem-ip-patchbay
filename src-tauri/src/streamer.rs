@@ -660,9 +660,38 @@ impl Streamer {
                     "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
                 ]);
             }
+        } else if cfg!(target_os = "windows") {
+            // DirectShow audio-only input. FFmpeg's dshow demuxer
+            // accepts an `audio=<DeviceName>` URI for an audio-only
+            // device; same role as the AVF `:<name>` form on macOS.
+            // Dante Virtual Soundcard for Windows exposes via WDM/
+            // Core Audio and shows up in `-f dshow -list_devices` —
+            // its name typically includes parens (e.g.
+            // "Dante Virtual Soundcard (Dante Virtual Soundcard
+            // 64ch x64)"), passed verbatim through the Command
+            // argument so FFmpeg's parser sees the whole string.
+            //
+            // The pan filter in build_audio_filter() is platform-
+            // agnostic — it fires off the device NAME, so picking a
+            // device whose name contains "dante" or "aggregate" gets
+            // the same L/R channel-pair routing as macOS Dante.
+            if let Some(audio_name) = custom_audio_name.as_deref() {
+                log::info!("NDI + custom dshow audio: routing through {audio_name:?}");
+                input_args.extend([
+                    "-f".into(), "dshow".into(),
+                    "-i".into(), format!("audio={audio_name}"),
+                ]);
+            } else {
+                input_args.extend([
+                    "-f".into(), "lavfi".into(),
+                    "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+                ]);
+            }
         } else {
-            // Non-Mac path stays on lavfi — DirectShow audio injection
-            // for an NDI video source is a separate piece of work.
+            // Linux — PulseAudio / ALSA wiring lands as a follow-up
+            // when there's a real Linux production use case to test
+            // against. Stay on lavfi for now so the stream still
+            // works (silent audio).
             input_args.extend([
                 "-f".into(), "lavfi".into(),
                 "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
