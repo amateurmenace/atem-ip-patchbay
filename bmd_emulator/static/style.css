@@ -194,6 +194,37 @@ body.is-streaming .title-block h1 {
 }
 .net-diag-btn:active { transform: translateY(1px); }
 
+/* Monitor jump-button. Opens a small companion window per instance
+   showing live preview + stats. Operator positions one of these per
+   running stream on screen to compose a multiview-style layout.
+   Cyan-tinted to distinguish from Net Diag's orange so a fast scan
+   tells which button is which. */
+.monitor-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #7fc8ff;
+  background: rgba(98, 184, 255, 0.06);
+  border: 1px solid rgba(98, 184, 255, 0.30);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.monitor-btn:hover {
+  color: #cfe3ff;
+  border-color: rgba(98, 184, 255, 0.6);
+  background: rgba(98, 184, 255, 0.16);
+}
+.monitor-btn:active { transform: translateY(1px); }
+.monitor-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .duration { font-family: "SF Mono", monospace; font-size: 22px; letter-spacing: 0.05em; color: var(--text); }
 
 /* ============= HERO ====================================== */

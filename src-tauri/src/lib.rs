@@ -117,10 +117,91 @@ async fn spawn_instance(name: String) -> Result<(), String> {
         .map_err(|e| format!("failed to spawn instance: {e}"))
 }
 
+/// Tauri command that opens (or focuses, if already open) a small
+/// companion window pointed at /static/monitor.html. The monitor
+/// shows live preview + condensed stats — designed to be positioned
+/// on screen alongside others like a video-switcher multiview
+/// output. Each instance (process) has its own main window + one
+/// monitor; operators run multiple instances via `spawn_instance`
+/// to drive multi-source workflows.
+///
+/// The label "monitor" is fixed (only one per instance). Clicking
+/// "Open Monitor" again when the monitor is already open just
+/// focuses the existing window — no duplicates.
+#[tauri::command]
+async fn open_monitor_window(handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewUrl;
+    // The monitor is served from our embedded Axum HTTP server — the
+    // main window was navigated to http://127.0.0.1:PORT/ at boot
+    // (see setup()), and the monitor lives at /static/monitor.html
+    // on the same origin. Resolve the main window's URL so we know
+    // which port to target.
+    let main_url = match handle.get_webview_window("main") {
+        Some(win) => win
+            .url()
+            .map_err(|e| format!("could not read main window URL: {e}"))?,
+        None => return Err("main window not found".into()),
+    };
+    let scheme = main_url.scheme();
+    let host = main_url.host_str().unwrap_or("127.0.0.1");
+    let port = main_url
+        .port_or_known_default()
+        .ok_or_else(|| "main window URL has no port".to_string())?;
+    let monitor_url_str = format!("{scheme}://{host}:{port}/static/monitor.html");
+    let monitor_url = tauri::Url::parse(&monitor_url_str)
+        .map_err(|e| format!("invalid monitor URL {monitor_url_str:?}: {e}"))?;
+
+    // If a monitor window is already open, just bring it to front
+    // instead of spawning a second one.
+    if let Some(existing) = handle.get_webview_window("monitor") {
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        let _ = existing.show();
+        return Ok(());
+    }
+
+    // Otherwise spawn a fresh monitor window. Default size is small
+    // enough to drop into a corner; resizable so the user can scale
+    // up if they want to read the preview at higher resolution.
+    tauri::WebviewWindowBuilder::new(
+        &handle,
+        "monitor",
+        WebviewUrl::External(monitor_url),
+    )
+    .title("ATEM Patchbay — Monitor")
+    .inner_size(360.0, 320.0)
+    .min_inner_size(220.0, 200.0)
+    .resizable(true)
+    .always_on_top(false)
+    .build()
+    .map_err(|e| format!("failed to open monitor window: {e}"))?;
+    Ok(())
+}
+
+/// Tauri command that brings the main configuration window back to
+/// front. Wired to the monitor window's "Expand ↗" button so the
+/// operator can jump back to the full UI without having to navigate
+/// the OS window list. Leaves the monitor window open — the
+/// operator can close it manually when done.
+#[tauri::command]
+async fn focus_main_window(handle: tauri::AppHandle) -> Result<(), String> {
+    let main = handle
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let _ = main.unminimize();
+    main.show().map_err(|e| format!("show failed: {e}"))?;
+    main.set_focus().map_err(|e| format!("set_focus failed: {e}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![spawn_instance])
+        .invoke_handler(tauri::generate_handler![
+            spawn_instance,
+            open_monitor_window,
+            focus_main_window,
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

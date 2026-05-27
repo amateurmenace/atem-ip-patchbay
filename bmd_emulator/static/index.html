@@ -34,6 +34,15 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
+      <button id="open-monitor" type="button" class="monitor-btn"
+              title="Open a small companion window showing live preview + stream stats — position one per running instance like a video-switcher multiview"
+              aria-label="Open Monitor Window">
+        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
+          <rect x="1.5" y="3" width="13" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        Monitor
+      </button>
       <button id="open-net-diag" type="button" class="net-diag-btn"
               title="Open the ATEM Net Diag operator dashboard (separate companion app — download from Releases if not installed)"
               aria-label="Open ATEM Net Diag">

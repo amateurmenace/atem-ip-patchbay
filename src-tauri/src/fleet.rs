@@ -1,33 +1,34 @@
-//! Multi-source fleet — Phase B of multi-source mode (alpha.15).
+//! Encoder fleet — minimal post-alpha.15-pivot wrapper.
 //!
-//! Holds N independent EncoderState + Streamer + Preview triples,
-//! each one a self-contained streaming pipeline. The fleet itself is
-//! a thin wrapper; per-tile lifecycle (start, stop, settings, etc.)
-//! goes through the tile's individual Arc'd components.
+//! Originally built for alpha.15's in-app 2x2 multi-tile grid; the
+//! iframe-based grid was too cramped to be operationally useful and
+//! got pulled in alpha.16. The new multi-source story is multi-
+//! INSTANCE via the existing `--instance-name` CLI flag (each
+//! instance = its own OS process / Tauri window / state dir), plus
+//! a small monitor window per instance that the operator positions
+//! on their screen like a video-switcher multiview output.
 //!
-//! TILE_COUNT is hard-capped at 4 because:
-//! - macOS VideoToolbox tops out at ~4 parallel HEVC encoder sessions
-//!   on M-series silicon (kVTCouldNotFindVideoEncoderErr above that)
-//! - 2x2 is the most natural grid layout for the multiview UI
-//! - 4 BMD ports walk cleanly from 9977 with no realistic chance of
-//!   a port-collision dragging the whole boot into failure
+//! With one tile per process, TILE_COUNT is back to 1 — the fleet
+//! is a thin wrapper around the singleton encoder + streamer +
+//! preview. We keep the abstraction around because:
+//!   - the /api/i/0/* routes still work (alongside /api/* aliases),
+//!     so a future multi-tile UI could light them up without ripping
+//!     out routing again
+//!   - the shutdown_all() hook in RunEvent::Exit still does the
+//!     right thing whether N is 1 or 4
 //!
-//! Construction is synchronous and infallible — the BMD ports are
-//! pre-resolved by the caller (lib.rs runs the port-walk async then
-//! hands us a fixed [u16; 4] block). HTTP handler resolution is via
-//! `tile(idx) -> Option<&TileSlot>`; out-of-range returns None and
-//! the handler surfaces a 404.
+//! If we never go back to multi-tile-per-process this whole module
+//! could be deleted in favor of the original single-Arc pattern.
+//! Cost of keeping it: ~30 bytes of struct overhead per process.
 
 use crate::preview::Preview;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
 use std::sync::Arc;
 
-/// Maximum number of simultaneous source→destination tiles. Fixed at
-/// 4 by hardware/UX constraints; see module docs. If a future macOS
-/// generation lifts the VideoToolbox encoder cap meaningfully, bump
-/// this AND the multiview.html grid CSS together.
-pub const TILE_COUNT: usize = 4;
+/// Number of tiles in this Tauri process. Back to 1 in alpha.16 —
+/// see module docs.
+pub const TILE_COUNT: usize = 1;
 
 /// One tile slot — a complete self-contained pipeline. Every field
 /// is Arc'd so axum handlers can grab them by reference without

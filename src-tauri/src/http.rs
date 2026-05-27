@@ -149,20 +149,15 @@ pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
     )
     .layer(ServeDir::new(&static_dir));
-    // alpha.15: root `/` serves multiview.html (the new 2x2 grid
-    // shell). The legacy single-source UI is still accessible at
-    // /static/index.html — that's what each multiview iframe loads,
-    // with `?tile=N` appended so app.js's fetch shim scopes API
-    // calls to that tile. If multiview.html is missing (e.g. an
-    // old static-dir bundle), we fall back to index.html so the
-    // single-source UI is still served at the root.
-    let multiview_path = static_dir.join("multiview.html");
-    let index_path = static_dir.join("index.html");
-    let root_path = if multiview_path.exists() {
-        multiview_path
-    } else {
-        index_path.clone()
-    };
+    // alpha.16: the 2x2 grid multiview experiment (alpha.15) was
+    // pulled — iframes were too cramped to be operationally useful.
+    // The new multi-source story is multi-instance (Phase A via
+    // spawn_instance) + a small monitor window per instance that
+    // shows preview + bitrate / status in a tile the operator
+    // positions manually like a video-switcher multiview. Root `/`
+    // serves the full single-source UI; the monitor window opens
+    // at /static/monitor.html via a Tauri command.
+    let root_path = static_dir.join("index.html");
 
     // Build the tile-scoped API sub-router once; clone + mount per-
     // tile below. The sub-router has no state baked in yet — each
