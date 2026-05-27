@@ -1,5 +1,6 @@
 mod device_scanner;
 mod ffmpeg_path;
+mod fleet;
 mod frame_pack;
 mod http;
 mod instance;
@@ -21,8 +22,8 @@ use std::sync::Arc;
 
 use tauri::{Manager, RunEvent};
 
+use crate::fleet::{EncoderFleet, TILE_COUNT};
 use crate::http::HttpAppState;
-use crate::preview::Preview;
 use crate::protocol::ProtocolServer;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
@@ -65,7 +66,41 @@ pub fn run() {
                 instance_dir.display()
             );
 
-            let encoder = Arc::new(EncoderState::new());
+            // alpha.15 multi-source: the fleet holds N independent
+            // tiles, each one a self-contained source→destination
+            // pipeline. For this phase, only tile 0 is wired through
+            // the existing HTTP API + BMD protocol server; tiles 1-3
+            // exist in memory but are dormant until later commits
+            // expose them via /api/i/:idx/* routes and start
+            // additional protocol servers. Cost of the dormant tiles
+            // is ~a few KB of struct overhead each — no FFmpeg, no
+            // SDK threads.
+            let bmd_start = cli.bmd_port.unwrap_or(BMD_START_PORT);
+            // Per-tile BMD port plan: each tile gets a 4-port range
+            // starting at BMD_START_PORT + idx*4 (so tile 0 walks
+            // 9977-9980, tile 1 walks 9981-9984, etc.). For Phase 1
+            // only tile 0 is bound; tiles 1-3 carry the planned
+            // start ports as a forward-looking marker.
+            let bmd_ports: [u16; TILE_COUNT] = std::array::from_fn(|i| {
+                bmd_start.saturating_add((i * 4) as u16)
+            });
+            let fleet = EncoderFleet::new(bmd_ports);
+            log::info!(
+                "encoder fleet: {} tiles, BMD start ports {:?}",
+                TILE_COUNT,
+                bmd_ports
+            );
+
+            // Tile 0 is the "default" tile that the existing single-
+            // source UI talks to. XML configs + default device
+            // selection apply to it; future commits will replay the
+            // same boot work per-tile when each loads its own
+            // state-N.json.
+            let tile0 = fleet
+                .tile(0)
+                .expect("fleet must always have at least tile 0");
+            let encoder = tile0.encoder.clone();
+            let streamer = tile0.streamer.clone();
 
             // Tell the FFmpeg path resolver where the bundled sidecar
             // lives. Phase 9 adds bundle.externalBin; for now this just
@@ -105,13 +140,10 @@ pub fn run() {
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
 
-            let preview = Preview::new();
-            let streamer = Streamer::new(encoder.clone(), preview.clone());
-            let http_state = HttpAppState {
-                encoder: encoder.clone(),
-                streamer: streamer.clone(),
-                preview: preview.clone(),
-            };
+            // HttpAppState.encoder/streamer/preview are tile-0
+            // aliases for now; future commits will retire them in
+            // favor of route-extracted tile indexes.
+            let http_state = HttpAppState::from_fleet(fleet.clone());
 
             // Bind synchronously so we know the port before creating
             // the webview. The Axum server itself runs in a tokio task.
@@ -142,12 +174,15 @@ pub fn run() {
                 })?;
             log::info!("BMD control protocol bound on TCP {bmd_port}");
 
-            // Manage encoder + streamer + protocol server so future
-            // Tauri commands / event handlers can grab them via
-            // app.state().
+            // Manage fleet (the new shared multi-tile state) +
+            // tile-0 aliases (used by the legacy single-source flows)
+            // + the protocol server. The fleet is the long-term home;
+            // legacy fields stay around so existing Tauri commands
+            // grabbing Arc<Streamer> via app.state() still resolve.
+            app.manage(fleet.clone());
             app.manage(encoder);
             app.manage(streamer);
-            app.manage(preview);
+            app.manage(tile0.preview.clone());
             app.manage(proto);
             app.manage(http_state_marker(port));
             app.manage(BmdPort(bmd_port));
@@ -180,16 +215,25 @@ pub fn run() {
             // On Cmd-Q / window-close-causes-app-quit, Tauri fires
             // ExitRequested then Exit. We hook BOTH because some
             // platforms emit only one — and we synchronously stop
-            // the streamer + NDI capture before the parent process
-            // dies, otherwise FFmpeg orphans to launchd and keeps
-            // streaming to the destination forever.
+            // every tile's streamer before the parent process dies,
+            // otherwise FFmpeg orphans to launchd and keeps streaming
+            // to the destination forever.
+            //
+            // alpha.15 multi-source: shutdown_all iterates every
+            // tile, not just the singleton, so spawning N FFmpegs
+            // across 4 tiles cleans up uniformly. Phase 1 only ever
+            // has tile 0 running, but the iteration cost is
+            // negligible and the hook is correct for future phases.
             match event {
                 RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-                    if let Some(streamer) = app_handle.try_state::<Arc<Streamer>>() {
+                    if let Some(fleet) = app_handle.try_state::<Arc<EncoderFleet>>() {
+                        let f = fleet.inner().clone();
+                        let runtime = tauri::async_runtime::handle();
+                        runtime.block_on(f.shutdown_all());
+                    } else if let Some(streamer) = app_handle.try_state::<Arc<Streamer>>() {
+                        // Fallback in case fleet management hasn't
+                        // landed (test harness / partial init).
                         let s = streamer.inner().clone();
-                        // block_on inside the Tauri run-loop is fine
-                        // here; we want a hard sync barrier before the
-                        // process exits so all child cleanup completes.
                         let runtime = tauri::async_runtime::handle();
                         let _ = runtime.block_on(s.stop());
                     }

@@ -16,15 +16,48 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::fleet::EncoderFleet;
 use crate::preview::Preview;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
 
+/// Shared application state handed to every Axum route. Holds the
+/// EncoderFleet (the new multi-tile abstraction added in alpha.15)
+/// AND tile-0 aliases of its components for backward compatibility
+/// with the existing handler bodies — every handler today reads
+/// `state.encoder`, `state.streamer`, `state.preview` as if they
+/// were singletons, which they effectively still are when only
+/// tile 0 is active.
+///
+/// Future commits will progressively rewrite handlers to take a
+/// `Path(idx): Path<u8>` and use `state.fleet.tile(idx)` directly
+/// — at which point the legacy fields can be removed. For now the
+/// dual representation keeps the diff small and the existing UI
+/// flow unchanged.
 #[derive(Clone)]
 pub struct HttpAppState {
+    pub fleet: Arc<EncoderFleet>,
     pub encoder: Arc<EncoderState>,
     pub streamer: Arc<Streamer>,
     pub preview: Arc<Preview>,
+}
+
+impl HttpAppState {
+    /// Construct from a freshly-built fleet — populates the legacy
+    /// tile-0-alias fields automatically. Panics if the fleet has
+    /// zero tiles (which the fleet constructor guarantees never
+    /// happens — TILE_COUNT is a compile-time const ≥ 1).
+    pub fn from_fleet(fleet: Arc<EncoderFleet>) -> Self {
+        let tile0 = fleet
+            .tile(0)
+            .expect("fleet must always have at least one tile");
+        HttpAppState {
+            encoder: tile0.encoder.clone(),
+            streamer: tile0.streamer.clone(),
+            preview: tile0.preview.clone(),
+            fleet,
+        }
+    }
 }
 
 /// Bind a TCP listener on the requested port, walking forward up to nine
