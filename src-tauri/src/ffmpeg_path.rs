@@ -55,6 +55,46 @@ pub fn ffmpeg_path() -> String {
     "ffmpeg".into()
 }
 
+/// Resolve the atem-net-diag binary to invoke. alpha.17 bundles this
+/// in the main app's `sidecar/` resources on Windows so the Net Diag
+/// topbar button just works without a separate install. On macOS the
+/// existing flow (the standalone `.app` installed at /Applications)
+/// is the primary path; this resolver is mostly Windows-facing.
+///
+/// Search order mirrors [`ffmpeg_path`]:
+///   1. `ATEM_NET_DIAG_PATH` env var (testing / dev override).
+///   2. Bundled binary in `<resource-root>/sidecar/atem-net-diag{.exe}`.
+///   3. Plain `atem-net-diag` on PATH (CLI users who installed
+///      separately).
+///   4. Returns None — caller decides whether to surface an error
+///      or fall through to a different launch strategy.
+pub fn net_diag_path() -> Option<String> {
+    if let Ok(override_path) = std::env::var("ATEM_NET_DIAG_PATH") {
+        if !override_path.is_empty() && std::path::Path::new(&override_path).exists() {
+            return Some(override_path);
+        }
+    }
+
+    if let Some(root) = RESOURCE_ROOT.get() {
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        for relative in [
+            format!("sidecar/atem-net-diag{suffix}"),
+            format!("atem-net-diag{suffix}"),
+        ] {
+            let candidate = root.join(&relative);
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    if let Ok(found) = which::which("atem-net-diag") {
+        return Some(found.to_string_lossy().into_owned());
+    }
+
+    None
+}
+
 /// Suppress the console window Windows spawns for any console
 /// subprocess (FFmpeg, FFprobe, `cmd /c …`). Passes `CREATE_NO_WINDOW`
 /// (0x0800_0000) to `CreateProcess` so the child inherits no console.

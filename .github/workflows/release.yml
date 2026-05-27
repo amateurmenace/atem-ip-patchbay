@@ -538,6 +538,37 @@ jobs:
           Get-ChildItem src-tauri\sidecar
           & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
 
+      - name: Build atem-net-diag.exe + stage into sidecar
+        shell: pwsh
+        run: |
+          # alpha.17: bundle the net-diag CLI into the Windows installer
+          # so the Net Diag topbar button actually works on Windows.
+          # Builds the same companion tool that's been Mac-arm64-only
+          # since alpha.4 and stages it next to ffmpeg.exe so the main
+          # app's runtime path resolver can find it.
+          #
+          # tshark is NOT bundled — the capture (--monitor) feature
+          # needs Wireshark installed separately on Windows. UDM
+          # polling + active probe + dashboard UI work without it,
+          # which is most of net-diag's value for the operator.
+          Write-Host "Building atem-net-diag.exe..."
+          Push-Location tools\atem-net-diag
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: atem-net-diag build failed"
+            exit 1
+          }
+          Pop-Location
+
+          $netdiag = "tools\atem-net-diag\target\release\atem-net-diag.exe"
+          if (-not (Test-Path $netdiag)) {
+            Write-Host "ERROR: atem-net-diag.exe not found at $netdiag"
+            exit 1
+          }
+          Copy-Item $netdiag -Destination "src-tauri\sidecar\atem-net-diag.exe"
+          $sizeMB = [math]::Round((Get-Item "src-tauri\sidecar\atem-net-diag.exe").Length / 1MB, 1)
+          Write-Host "Staged atem-net-diag.exe ($sizeMB MB) into src-tauri\sidecar\"
+
       - name: Build .exe + NSIS installer
         working-directory: src-tauri
         run: cargo tauri build
@@ -554,7 +585,7 @@ jobs:
           # Without these the .exe launches but NDI features silently
           # fail with "module not found" at first NDI use.
           $sidecar = "src-tauri\sidecar"
-          $required = @("Processing.NDI.Lib.x64.dll", "ffmpeg.exe")
+          $required = @("Processing.NDI.Lib.x64.dll", "ffmpeg.exe", "atem-net-diag.exe")
           $missing = @()
           foreach ($f in $required) {
             $path = Join-Path $sidecar $f

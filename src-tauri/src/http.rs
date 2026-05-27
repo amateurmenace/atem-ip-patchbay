@@ -649,10 +649,58 @@ async fn api_open_net_diag() -> impl IntoResponse {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows doesn't have a single registered "open by app name"
-        // story like macOS, so we just open the URL. If the user has
-        // net-diag for Windows installed (future alpha), we can add
-        // a registry-key lookup or known-path check here.
+        // alpha.17: spawn the bundled atem-net-diag.exe (staged into
+        // resources\sidecar\ by the CI Windows build) so the Net Diag
+        // topbar button actually works on Windows. Detached + no
+        // console so the process survives our exit and doesn't pop
+        // a black terminal window next to the main UI.
+        //
+        // If a net-diag is already running (port 8092 taken), the
+        // spawn fails fast and the existing instance keeps serving;
+        // either way we still open the URL below so the browser
+        // lands on whichever dashboard is alive.
+        if let Some(diag_bin) = crate::ffmpeg_path::net_diag_path() {
+            log::info!("net-diag spawn: {diag_bin}");
+            let mut spawn = std::process::Command::new(&diag_bin);
+            spawn.args(["--ui", "8092"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: same
+            // detachment pattern as spawn_instance, so closing the
+            // main app doesn't kill net-diag (and ditto in reverse).
+            // The hide-console helper isn't strictly needed with
+            // DETACHED_PROCESS but layered defenses keep stray
+            // consoles from flashing on edge-case launch paths.
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                spawn.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+            }
+            match spawn.spawn() {
+                Ok(child) => {
+                    log::info!("net-diag spawned pid={}", child.id());
+                    launched_app = true;
+                    // Brief settle so the embedded HTTP server is
+                    // listening on 8092 before the browser tries to
+                    // connect — saves one retry round-trip.
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                }
+                Err(e) => {
+                    log::warn!("net-diag spawn failed: {e} (will still open URL — existing instance may serve)");
+                }
+            }
+        } else {
+            log::warn!(
+                "atem-net-diag.exe not found in sidecar/ — Net Diag button will open the URL only. \
+                 If you're running a dev build, set ATEM_NET_DIAG_PATH to your local atem-net-diag.exe."
+            );
+        }
+        // Open the dashboard URL in the default browser regardless
+        // of whether the spawn succeeded — if net-diag is already
+        // running this lands on its dashboard; if neither path
+        // worked, the browser shows a clear connection error.
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/c", "start", "", url])
             .stdout(std::process::Stdio::null())
