@@ -1019,10 +1019,210 @@ additive.
 - **OMT-out from non-NDI sources still deferred** (carries
   from Session 8). Session 10 priority #3.
 
-### Session 10 priorities (next pickup)
+### Session 10 wins (alpha.13 + alpha.14, 2026-05-25)
 
-The user wants all three batched into alpha.12. Roughly in
-intended order:
+Shipped most of Session 10's planned scope (OMT audio + OMT tee
+from the alpha.12 plan) plus a parallel "polish the receive-
+stream wizard" thread that came up during the session as the
+user reported gaps in the alpha.12 production experience.
+Pre-show checks panel (the original Session 10 priority #1)
+deferred to Session 11 — the OMT and receive-wizard work
+consumed the session.
+
+**alpha.13 (commit `ed7616e`) — seven headline changes:**
+
+1. **Windows console window suppression.** Alpha.11 was the
+   first Windows release; users immediately reported a black
+   "ffmpeg.exe console" terminal popping up next to the Tauri
+   window every time they started a stream, plus brief flashes
+   on every device scan and Net Diag launch. Fix:
+   CREATE_NO_WINDOW (0x0800_0000) applied to every console
+   subprocess spawn via new `hide_console_std` /
+   `hide_console_tokio` helpers in `ffmpeg_path.rs`. No-op on
+   macOS/Linux. Covers streamer's FFmpeg + 3 device_scanner
+   FFmpeg probes (avfoundation list / dshow list / AVF mode
+   probe) + http.rs's `cmd /c start` URL launcher. Verified
+   working on Windows in the alpha.13 test pass.
+
+2. **Receive-wizard advanced settings.** Operators reported
+   the default ports (9710 SRT, 1935 RTMP) collided with
+   existing listeners and there was no in-UI way to change
+   them — they'd have to edit JSON state by hand. New
+   "Advanced settings" disclosure inside step 2 of the
+   wizard with inputs for SRT port + passphrase, RTMP port
+   + app + stream key. Apply / Reset buttons. Backed by the
+   already-existing `relay_*` state fields in state.rs —
+   alpha.13 just surfaces them. Inputs disabled while the
+   receiver is running so displayed config can't drift from
+   the bound listener.
+
+3. **Receive-wizard protocol consistency.** Bug from an
+   alpha.12 screenshot report: user picked SRT in step 1 of
+   the wizard, started the receiver, then changed the radio.
+   Result: radio = SRT, step 2 URL = SRT, step 4 banner =
+   "RTMP listener bound" with rtmp:// URL. Cause: the
+   wizard's protocol radio was independent of the actually-
+   running receiver. Fix: new `syncRwProtocolWithSnapshot()`
+   forces the radio to match the running listener whenever
+   `isReceiverActive(snap)` is true, and disables radios +
+   advanced inputs in that state. Inconsistent state is now
+   impossible.
+
+4. **App-instruction mismatch banner.** When a user picked
+   an RTMP-only app (Blackmagic Camera, DJI Osmo Pocket 3,
+   DJI drone) while SRT was selected, step 3 silently
+   rendered an rtmp:// URL that disagreed with step 2's
+   srt:// URL. The bottom-of-block "Pick RTMP above"
+   footnote was easy to miss. Replaced with a prominent
+   yellow banner at the TOP of step 3 with a "Switch to
+   RTMP" button that flips the wizard in one click. New
+   `RW_APP_PROTOCOLS` map drives which apps support which
+   protocols. Per-app URLs in step 3 now always render for
+   the app's REQUIRED protocol regardless of radio state,
+   with the banner explaining the mismatch.
+
+5. **Receive-wizard public-URL helper.** New "On my network"
+   / "Different network" sub-toggle in step 2. Public mode
+   expands a card with WAN-IP detection via `api.ipify.org`
+   (deferred behind a user click so no third-party request
+   fires until opt-in), public-address override field
+   accepting DDNS hostnames, computed public URL with Copy
+   button, port-forward checklist tailored per protocol (UDP
+   for SRT, TCP for RTMP) with the most-common ports already
+   filled in, CGN warning hint for cellular / 5G / apartment
+   ISP scenarios where forwarding won't work no matter what,
+   and a "Copy 'send to IT' template" button that builds a
+   pre-filled message with all the forwarding details. Per-
+   app instructions auto-switch host between LAN IP and
+   public address based on which mode is active.
+
+6. **OMT-out audio for NDI sources.** alpha.9 shipped OMT
+   video publishing for NDI/OMT sources; audio was always
+   deferred ("Audio over OMT is also alpha.10" — never
+   landed). Now: `NdiCapture::run_capture_loop` drains audio
+   via `capture_audio_timeout(Duration::from_millis(0))`
+   after each video poll, ships chunks through a parallel
+   mpsc channel. New `OmtSender::feed_audio_frame` uses
+   libomt's FPA1 codec (32-bit floating-point planar — the
+   only audio codec OMT defines). Audio fields set via
+   `as_raw_mut()` since libomt 0.1.3 doesn't expose audio
+   setters on its safe wrapper; field names verified
+   against `vendor/libomt/libomt.h`. `audio_wanted: bool`
+   plumbed through `start_and_probe_format` so audio drain
+   only fires when OMT-out is enabled.
+
+7. **OMT-out video tee for non-raw sources.** alpha.9 only
+   supported OMT publishing for NDI/OMT sources (in-process
+   frame-tee at the writer task). AVF webcams, pipe / RTSP /
+   HLS, SRT/RTMP relay listeners silently fell through with
+   a "OMT output unavailable for this source" warning. Now:
+   when source isn't NDI/OMT AND `omt_output_enabled` is on,
+   `spawn_omt_video_tee` starts a SECOND FFmpeg subprocess
+   that opens the same source and outputs BGRA rawvideo on
+   stdout. Reader task feeds OmtSender frame-by-frame. Scale
+   filter normalizes to the configured output geometry so
+   OMT consumers see consistent dimensions across both
+   feeds. `omt_video_tee_child` in `Inner` for kill-on-drop
+   + explicit cleanup from both `stop()` and the natural-
+   exit path in `run_monitor`.
+
+   Limitation documented: tee opens the source twice. USB
+   / built-in webcams allow it; some virtual cameras and
+   proprietary capture drivers refuse the second open.
+   Network sources (RTSP, SRT/RTMP listen) work but double
+   the bandwidth in. Audio on this path is video-only —
+   still lavfi anullsrc until cross-platform pipe-FD
+   plumbing lands.
+
+**alpha.14 (commit `c042771`) — single-bug-fix release:**
+
+8. **NDI + Custom audio on Windows.** Surfaced during the
+   alpha.13 Windows test. Picking NDI source + Audio Mixer
+   Custom mode + Dante Virtual Soundcard produced a stream
+   with silent audio at the ATEM. Root cause:
+   `build_ffmpeg_cmd_for_ndi`'s non-macOS branch had always
+   emitted lavfi anullsrc, with a Session 4 comment
+   flagging the DirectShow audio gap that was never
+   followed up. So Windows NDI + Custom audio has been
+   silent since the feature shipped. Fix: explicit
+   `cfg(target_os = "windows")` arm emitting `-f dshow -i
+   "audio=<DeviceName>"` — the Windows equivalent of macOS
+   AVF's `:<name>` form. Pan filter in `build_audio_filter`
+   is platform-agnostic so the L/R channel-pair routing for
+   Dante carries over for free. Verified working with
+   Dante Virtual Soundcard on Windows by the user.
+
+### Open issues from Session 10
+
+- **Pre-show checks panel in net-diag deferred.** Originally
+  Session 10's priority #1 — full-width card under the
+  existing pre-show banner with explicit checks for WAN IP /
+  headroom / UDM polling / ATEM reachable / capture
+  visibility / active streams / WAN-vs-ATEM consistency,
+  aggregate verdict at top. Bumped to Session 11. Detail
+  still applies (see priorities below).
+
+- **alpha.13 receive-wizard work not yet field-tested.**
+  alpha.14 verified the Dante fix in production; the wizard
+  improvements (advanced settings, protocol lock, mismatch
+  banner, public-URL helper) compile and look right but
+  haven't been exercised against a real remote publisher
+  (Larix on cellular, OBS over WAN, BMD Camera over RTMP)
+  yet. First alpha.14 operator feedback will tell us what
+  edge cases the wizard misses.
+
+- **OMT-out audio for non-raw sources still deferred.**
+  alpha.13's OMT tee is video-only; non-raw audio remains
+  lavfi anullsrc. The clean fix needs cross-platform pipe-
+  FD plumbing (UNIX fd 3/4 vs Windows named pipes) which
+  is its own design conversation. Tracked for Session 11.
+
+- **Multi-source mode never started.** The conversation
+  that produced alpha.13 originally proposed a four-phase
+  plan that ended in an in-app 2x2 grid for running
+  multiple source→destination pipelines simultaneously. The
+  OMT and receive-wizard work consumed the session; multi-
+  source remains the largest still-pending architectural
+  change. User decided on a two-phase rollout: a small
+  "Launch another instance" launcher button polishing the
+  existing `--instance-name` CLI flag first, then the in-
+  app 2x2 grid as a separate alpha.
+
+- **OMT receivers in production not yet exercised.**
+  alpha.13's OMT audio + tee compile and would activate
+  with `--features omt` + libomt at link time. CI doesn't
+  bundle libomt yet, so the GitHub Release alpha.13/14
+  builds DON'T have OMT enabled. A test pass against a
+  real OMT consumer (Bluefish OMT receiver, etc.) is
+  still needed once libomt is bundled.
+
+- **Pipe / relay custom audio still uses anullsrc.** The
+  alpha.14 Windows fix only covered NDI sources. Pipe /
+  RTSP / SRT-listen / RTMP-listen video sources with
+  Custom audio mode still fall back to lavfi anullsrc on
+  every platform — the same comment that flagged the NDI
+  Windows gap also flagged this. Fix shape would mirror
+  the alpha.14 approach in each source factory.
+
+- **alpha.13/14 other Windows tests pending.** User
+  verified Dante audio in alpha.14; the console-window
+  fix, receive-wizard port config, app-instruction
+  mismatch banner, public-URL helper haven't been
+  individually verified yet. They should all "just work"
+  but the alpha.14 install is fresh enough that a quick
+  test pass against the full alpha.13 feature list is
+  worth doing.
+
+- **net-diag Windows + Linux builds still deferred.**
+  Mac arm64 only today. Carries from Session 8.
+
+### Session 11 priorities (next pickup)
+
+After alpha.13 + alpha.14 cleared most of Session 10's plan,
+the biggest still-pending pieces are the architectural
+multi-source work + the operator-visible net-diag pre-show
+panel that originally headlined Session 10. Priority order
+below.
 
 1. **Pre-show checks panel in net-diag.** This is the largest
    single operator-visible win remaining. Session 7 priority
@@ -1088,86 +1288,127 @@ intended order:
    and/or ATEM-direct queries that we don't have plumbing
    for yet.
 
-2. **OMT-out audio for NDI sources.** Currently OMT-out
-   publishes video-only. libomt has an audio Send API
-   (`OmtMediaFrame::set_type(Audio)` + matching codec).
-   For NDI sources, grafton-ndi exposes audio frames via
-   `Receiver::capture_audio`; we don't currently call it
-   because the alpha.4 audio path uses lavfi anullsrc OR
-   AVF custom audio routed through FFmpeg. To add OMT-out
-   audio:
-   - Extend `NdiCapture::run_capture_loop` to ALSO drain
-     audio frames from the receiver. Two-frame-types loop:
-     `capture_video` AND `capture_audio` interleaved with
-     a small timeout each.
-   - Add a parallel audio mpsc channel `mpsc::Receiver<Vec<u8>>`
-     where Vec<u8> is interleaved float32 PCM ready for OMT.
-   - `OmtSender::feed_audio_frame(samples: &[f32], num_channels, sample_rate)`
-     — wraps OMT_Send_SendAudio with OmtCodec::Fpa1 (Floating
-     Point Audio).
-   - Streamer's writer task fans audio out to OmtSender just
-     like video. (Note: the existing FFmpeg side audio
-     remains lavfi anullsrc unless `audio_mode == custom`;
-     OMT audio is independent of FFmpeg's audio path.)
+2. **Multi-source mode — Phase A (launcher polish).** User
+   asked for "a way to run multiple stream instances at
+   once, ie convert multiple NDI sources to multiple SRT
+   destinations" during the alpha.13 planning conversation
+   and chose a two-phase rollout. Phase A is the small,
+   fast-ship change: polish the existing `--instance-name`
+   CLI flag into a one-click experience.
 
-   Files to touch:
-   - `src-tauri/src/ndi_capture.rs` — add audio capture loop.
-   - `src-tauri/src/omt_sender.rs` — add `feed_audio_frame`.
-   - `src-tauri/src/streamer.rs` — wire audio channel.
-   - `src-tauri/Cargo.toml` — `grafton-ndi` may need
-     a feature flag or version bump for audio support;
-     check.
+   What it is:
+   - Tauri command `spawn_instance(name)` that runs
+     `Command::new(current_exe()).args(["--instance-name",
+     &name])` and detaches as an independent process.
+   - Topbar "+ New Instance" button with a small modal
+     prompt for the instance name (default `instance-2`,
+     `instance-3`, ... based on what's already running).
+   - Docs in README + in-app footer FAQ explaining each
+     instance is its own ATEM destination / own state /
+     own ports; close one with Cmd+Q from that window.
+   - Optional: a "Running instances" indicator in the
+     topbar that lists sibling instances by scanning the
+     state dir for active lockfiles. Skip if it gets
+     fiddly.
 
-   **Constraint**: only works for NDI sources (and OMT
-   sources, in theory). AVF/pipe/relay sources don't
-   produce raw frames at our layer — see priority #3.
+   Files: src-tauri/src/lib.rs (Tauri command),
+   bmd_emulator/static/index.html + app.js (button + modal),
+   README.md. ~100 lines + docs. Self-contained, ships as
+   its own alpha.
 
-3. **OMT-out from non-raw sources via FFmpeg tee.** The big
-   missing piece. AVF webcams, pipe / RTSP / HLS, and SRT/
-   RTMP relay sources all enter through FFmpeg, not through
-   our raw frame channel. To OMT-publish their frames, we
-   need FFmpeg to emit raw video + raw audio alongside the
-   encoded SRT.
+3. **Multi-source mode — Phase B (in-app 2x2 grid).** The
+   bigger architectural change deferred to a separate
+   alpha after Phase A. Single Tauri window holding up to
+   4 source→destination pipelines simultaneously, switcher-
+   board style.
 
-   Approach: use FFmpeg's `-f tee` muxer with two outputs:
-   - The existing SRT/RTMP to ATEM (mpegts encoded).
-   - A `-f rawvideo -f s16le` pair piped to stdout (or a
-     UNIX socket) for OMT consumption.
+   What it is:
+   - New `src-tauri/src/multi.rs` with
+     `struct EncoderFleet { encoders: Vec<Arc<EncoderState>>,
+     streamers: Vec<Arc<Streamer>>, previews: Vec<Arc<Preview>> }`.
+     Each Streamer already holds its own FFmpeg child + OMT
+     sender; the fleet is just N copies.
+   - http.rs route prefix `/i/:idx/api/...` for per-instance
+     endpoints; keep `/api/...` as an alias for instance 0
+     (UI back-compat).
+   - Per-tile BMD port walk — instance.rs already walks
+     9977→9986; the fleet assigns next-free per slot.
+   - New `bmd_emulator/static/multiview.html` — 2x2 grid
+     where each tile is a stripped-down version of today's
+     single-source UI (source picker + destination +
+     Start/Stop). Clicking a tile opens the full per-tile
+     panel.
+   - VideoToolbox encoder slots — macOS allows ~4 parallel
+     HEVC encoders before throttling; document as soft cap.
 
-   On the Rust side:
-   - When OMT output is enabled AND source isn't NDI/OMT,
-     swap the FFmpeg cmdline to use `-f tee`.
-   - Read raw video bytes from FFmpeg's stdout, hand to
-     OmtSender::feed_frame.
-   - Audio: use a separate file descriptor (FFmpeg's
-     `pipe:N` syntax) — this gets tricky cross-platform.
-     Alternative: interleave audio into a custom container
-     muxed with rawvideo and demux on our side. Or use
-     two FFmpeg processes (one for SRT, one for raw output)
-     — simpler but doubles source consumption.
+   ~600 lines + meaningful UI work. The architectural
+   refactor for v0.2.0. The most expensive remaining item.
 
-   This was originally considered for alpha.9 (the Plan
-   agent flagged Option B vs Option C in the original
-   alpha.9 plan); Option C was deferred. alpha.12 should
-   land it.
+4. **OMT-out audio for non-raw sources.** alpha.13's OMT
+   video tee is video-only; audio for non-raw sources (AVF
+   / pipe / RTSP / SRT-listen / RTMP-listen) still falls
+   back to lavfi anullsrc. Approach: extend
+   `spawn_omt_video_tee` to also output raw audio (s16le)
+   via a second pipe FD, demux to the OmtSender's
+   `feed_audio_frame`.
 
-   Constraint: AVF source consumed twice (once for SRT
-   FFmpeg, once for OMT FFmpeg if we go the dual-process
-   route). May not work for all virtual cameras that
-   restrict to a single consumer. Document the limitation.
+   Cross-platform pipe handling is the open design
+   question:
+   - macOS / Linux: FFmpeg's `pipe:3` syntax works with
+     custom file descriptors plumbed via
+     `std::os::unix::process::CommandExt::pre_exec` + dup2.
+   - Windows: need named pipes (`\\.\pipe\xxx`) or a TCP
+     loopback workaround. Tokio's process API doesn't
+     directly support arbitrary FDs on Windows.
 
-4. **Carry-overs (deprioritized but still relevant)** — items
+   Worth a Plan agent pass before implementing. May also
+   want to revisit the dual-FFmpeg-process alternative
+   (one for SRT, one for raw video + audio output) as a
+   cross-platform-simpler fallback if the FD plumbing is
+   too painful.
+
+5. **Pipe / relay custom audio extension.** alpha.14 fixed
+   Windows NDI + Custom audio via `-f dshow -i "audio=…"`
+   but the same gap exists for the rest of the source
+   types. Picking Custom audio mode with a pipe / RTSP /
+   SRT-listen / RTMP-listen video source still emits lavfi
+   anullsrc on every platform.
+
+   Fix shape mirrors alpha.14: each source factory in
+   sources.rs detects `audio_mode == custom`, appends
+   `-f dshow -i "audio=NAME"` (Windows) or
+   `-f avfoundation -i ":NAME"` (macOS) as a second audio
+   input, sets `combined_av=false`. ~30 lines per platform
+   per source — straightforward but needs a touchpoint in
+   each source factory (5 source types × 2 platforms = 10
+   touchpoints, though most can share a helper).
+
+6. **Pre-show panel: smaller-scope alternative.** The full
+   pre-show panel detailed in priority #1 is the most
+   impactful operator-facing addition but it's also the
+   biggest UI change. If picking that up cold feels too
+   large, the smaller alternative is to ship just the
+   aggregate verdict band (green/yellow/red strip at the
+   top of the dashboard) reading the existing checks
+   without the click-into-detail interaction. That's ~50
+   lines and gives 70% of the operator-visible value.
+
+7. **Carry-overs (deprioritized but still relevant)** — items
    that have been sitting in the priorities list since
-   Sessions 6-8. Not in alpha.12's scope but documented here
+   Sessions 6-8. Not in immediate scope but documented here
    so they don't get forgotten.
 
-   - **Real-Windows-hardware end-to-end test.** alpha.11
-     ships an installer that builds + signs in CI; nobody's
-     yet driven it through install → launch → stream-to-
-     ATEM on real Windows. DirectShow enumeration, the
-     SetDllDirectoryW NDI DLL path setup we added, Tauri's
-     Windows window chrome — all theoretically correct,
-     none verified.
+   - **Real-Windows-hardware end-to-end test (partial).**
+     alpha.13 + alpha.14 verified the Windows console-window
+     suppression and the NDI + Custom audio (Dante VSC)
+     paths on real Windows hardware. Still NOT individually
+     verified: full receive-wizard flow (Advanced settings
+     port change, app-instruction mismatch banner, public-
+     URL helper / ipify), DirectShow video device
+     enumeration end-to-end, Tauri's Windows window chrome
+     quirks. The pieces that have been touched recently
+     are most worth a deliberate test pass now that
+     alpha.14 is in users' hands.
    - **Unified client-list drill-down dashboard.** Session 5
      layout has bandwidth, flows, probe controls in separate
      cards. Replace with click-row-to-expand showing
@@ -1187,31 +1428,34 @@ intended order:
      from Session 5): probes resume only after N seconds
      of no observed flow on the configured key. Needs per-
      key correlation to be live + reliable first.
-   - **Multi-source mode in the main app.** Goal: 2-4
-     sources to 2-4 ATEM inputs simultaneously. Two paths:
-     `--instance-name N` (already supported, just needs
-     docs) and in-app 2x2 multi-view + per-input config.
-     Architecture: `multi.rs` module with 4 EncoderState +
-     4 Streamer; `WebviewWindow::new` for the second
-     window pointed at `/static/multiview.html`; prefixed
-     HTTP routes `/api/i1/state` ... `/api/i4/state`. Single
-     FFmpeg per input (4 total; VideoToolbox handles it).
-   - **Custom audio for pipe / relay video sources.**
-     Currently only AVF + NDI video sources support Custom
-     audio mode. Pipe / RTSP / SRT-listen / RTMP-listen
-     fall back to lavfi anullsrc. Fix is structurally the
-     same as NDI: detect `audio_mode == custom` in the
-     source builder, append `-f avfoundation -i :NAME` as
-     the audio input, set `combined_av=false`. Each source
-     factory needs its own conditional.
    - **net-diag Windows + Linux builds.** Mac arm64 only
      today. tshark path discovery + signing differ enough
      per platform that each warrants its own pass.
+   - **Bundle libomt in CI builds.** alpha.13's OMT audio
+     and tee paths compile but only activate with
+     `--features omt` + libomt at link time. CI's GitHub
+     Release builds don't have OMT enabled. Once libomt
+     distribution is solidified (same pattern as libndi —
+     download from vendor in CI, copy into
+     Contents/Frameworks via tauri.conf.json), flip the
+     omt feature on by default and the release artifacts
+     get OMT-capable.
 
    - ~~**Push `udm-live-fixes`, merge, rebuild tarball**~~ —
      DONE in alpha.7 (Session 7 wins).
-   - ~~**Pre-show panel**~~ — top of Session 10 priorities
+   - ~~**Pre-show panel**~~ — top of Session 11 priorities
      above (item #1).
+   - ~~**Multi-source mode in the main app**~~ — promoted
+     to Session 11 priorities #2 (Phase A launcher) and #3
+     (Phase B 2x2 grid).
+   - ~~**Custom audio for pipe / relay video sources**~~ —
+     promoted to Session 11 priority #5.
+   - ~~**OMT-out audio for NDI sources**~~ — DONE in
+     alpha.13 (Session 10 wins, item 6).
+   - ~~**OMT-out from non-raw sources via FFmpeg tee**~~ —
+     DONE in alpha.13 (Session 10 wins, item 7), video-
+     only. Audio for non-raw sources is Session 11
+     priority #4.
 
 ### atem-net-diag tool architecture (Session 4)
 
@@ -1318,6 +1562,39 @@ Key implementation gotchas:
   with both .dmg + .exe shipped. Plus net-diag wizard
   heuristic rewrite (ATEM-IP-aware), `?force_visibility=1`
   preview affordance, and net-diag bumped to 0.2.4.
+- `v0.2.0-alpha.12` (commit `a5212e6`): NDI DLL copy-up via
+  NSIS post-install hook. Fixes "Processing.NDI.Lib.x64.dll
+  was not found" on Windows first-launch — the Windows
+  loader couldn't find the DLL in
+  `$INSTDIR\sidecar\` (where tauri's `bundle.resources`
+  placed it). Hook copies the DLL up to `$INSTDIR\` next
+  to the .exe at install time, removes it on uninstall.
+- `v0.2.0-alpha.13` (commit `ed7616e`): "console fix +
+  receive-wizard polish + OMT audio + tee" — seven headline
+  changes (see Session 10 wins above for full detail):
+  Windows FFmpeg console window suppression, receive-wizard
+  advanced settings (custom ports / RTMP app / stream key /
+  SRT passphrase), protocol-radio lock while receiver
+  active (fixes the alpha.12 "SRT picked but RTMP banner"
+  state-drift), app-instruction mismatch banner with one-
+  click protocol switch, public-URL helper with WAN-IP
+  detection and port-forward checklist, NDI audio capture
+  wired into OmtSender's new `feed_audio_frame`, and OMT-
+  out video tee for AVF / pipe / RTSP / SRT-listen /
+  RTMP-listen sources via a second FFmpeg subprocess.
+- `v0.2.0-alpha.14` (commit `c042771`): NDI + Custom audio
+  on Windows. Bug surfaced during alpha.13 Windows test —
+  picking NDI source + Audio Mixer Custom mode + a real
+  audio device (Dante VSC, USB interface) produced silent
+  audio at the ATEM. Root cause:
+  `build_ffmpeg_cmd_for_ndi`'s non-macOS branch always
+  emitted lavfi anullsrc, with a Session 4 comment
+  flagging the DirectShow audio gap that was never
+  followed up. Fix: explicit
+  `cfg(target_os = "windows")` arm using
+  `-f dshow -i "audio=<DeviceName>"`. Pan filter is
+  platform-agnostic so L/R channel routing for Dante
+  carries over for free. Verified working in production.
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -1688,44 +1965,45 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 10 priorities"** under the v0.2.0 direction
-section above for the full alpha.12 plan. Quick summary:
+See **"Session 11 priorities"** under the v0.2.0 direction
+section above for the full detail. Quick summary:
 
 1. **Pre-show checks panel in net-diag** (largest single
-   operator-visible win remaining). Full-width card under the
-   existing pre-show banner with explicit checks: WAN IP
-   detected, WAN headroom, UDM polling, ATEM reachable,
-   capture visibility, active stream count, stream-key
-   correlation, WAN-vs-ATEM-RX consistency. Aggregate verdict
-   at top. Pure projection over existing state — no new
-   polling threads. Files: `tools/atem-net-diag/src/dashboard.rs`,
-   `tools/atem-net-diag/src/dashboard.html`, version bump
-   to 0.2.5.
+   operator-visible win remaining). Full-width card under
+   the existing pre-show banner with explicit checks:
+   WAN IP, WAN headroom, UDM polling, ATEM reachable,
+   capture visibility, active streams, WAN-vs-ATEM
+   consistency. Aggregate verdict at top. Pure projection
+   over existing state — no new polling threads. Files:
+   `tools/atem-net-diag/src/{dashboard.rs,dashboard.html}`,
+   version bump to 0.2.5.
 
-2. **OMT-out audio for NDI sources.** Extend
-   `NdiCapture::run_capture_loop` to also call
-   `Receiver::capture_audio` on grafton-ndi; add a parallel
-   audio mpsc channel; new `OmtSender::feed_audio_frame`
-   wrapping OMT_Send_SendAudio with OmtCodec::Fpa1; streamer
-   fans audio out alongside video. Files: `src-tauri/src/ndi_capture.rs`,
-   `src-tauri/src/omt_sender.rs`, `src-tauri/src/streamer.rs`.
+2. **Multi-source mode — Phase A (launcher polish).** Small
+   ship: a "+ New Instance" topbar button that spawns
+   another patchbay process via the existing
+   `--instance-name` CLI flag. ~100 lines + docs.
 
-3. **OMT-out from non-raw sources via FFmpeg tee.** When
-   source is AVF/pipe/relay AND OMT-out is enabled, swap
-   FFmpeg cmdline to use `-f tee` muxer with rawvideo +
-   raw audio pipes alongside the existing mpegts-to-SRT
-   output. Tokio task drains the raw pipes into OmtSender.
-   Cross-platform pipe handling (UNIX pipe FDs vs Windows
-   named pipes) is the main complexity — may end up using
-   two FFmpeg processes (one for SRT, one for raw out)
-   instead of tee, which is simpler but doubles source
-   consumption.
+3. **Multi-source mode — Phase B (in-app 2x2 grid).** The
+   architectural refactor — single Tauri window holding
+   up to 4 source→destination pipelines. New `multi.rs`,
+   route prefixing, new `multiview.html`. ~600 lines plus
+   meaningful UI work. Its own alpha.
 
-4. **Carry-overs**: real-Windows-hardware test, unified
-   client-list dashboard, stream-protocol-tag fallback,
-   interface picker UX, net-diag auto mode, multi-source
-   mode, pipe/relay custom audio, net-diag W+L builds.
-   See Session 10 priorities #4 for details.
+4. **OMT-out audio for non-raw sources.** alpha.13's video
+   tee is video-only. Needs cross-platform pipe-FD plumbing
+   (pipe:3 on UNIX, named pipes on Windows) OR a dual-
+   FFmpeg-process fallback. Worth a Plan agent pass first.
+
+5. **Pipe / relay custom audio extension.** Apply the same
+   alpha.14 Windows dshow / macOS AVF audio-injection
+   pattern to pipe / RTSP / SRT-listen / RTMP-listen video
+   sources. ~30 lines per source × platform.
+
+6. **Carry-overs**: real-Windows full test pass (alpha.13/14
+   features beyond Dante), unified client-list dashboard,
+   stream-protocol-tag fallback, interface picker UX,
+   net-diag auto mode, libomt bundling in CI, net-diag W+L
+   builds. See Session 11 priorities #7 for the full list.
 
 ## v0.2.0 candidate features
 
