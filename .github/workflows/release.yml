@@ -272,16 +272,40 @@ jobs:
             fi
           done < <(find "$APP" -type f)
 
-          echo "===== Re-signing every Mach-O with hardened runtime ====="
-          while IFS= read -r f; do
+          # SIGN INSIDE-OUT: leaves first (Frameworks/* + Resources/*
+          # subcomponents that the main binary embeds-and-seals),
+          # then the main binary in MacOS/, then the outer bundle.
+          # Without this order, codesign refuses to sign the main
+          # binary with "code object is not signed at all" because
+          # one of its embedded subcomponents (e.g. libomt /
+          # libvmx that we just dropped into Frameworks/ post-build)
+          # is still ad-hoc / linker-signed. alpha.18 hit this when
+          # we added libomt + libvmx but didn't enforce signing order.
+          sign_one() {
+            local f="$1"
             if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
               echo "  signing ${f#$APP/}"
               codesign --force --options runtime --timestamp \
                 --sign "$SIGN_IDENTITY" "$f"
             fi
-          done < <(find "$APP" -type f)
+          }
 
-          echo "===== Re-signing the outer .app bundle ====="
+          echo "===== Phase 1: re-sign Frameworks/* (leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Frameworks" -type f 2>/dev/null)
+
+          echo "===== Phase 2: re-sign Resources/* (sidecar leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Resources" -type f 2>/dev/null)
+
+          echo "===== Phase 3: re-sign main binary in MacOS/ ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/MacOS" -type f 2>/dev/null)
+
+          echo "===== Phase 4: re-sign the outer .app bundle ====="
           codesign --force --options runtime --timestamp \
             --sign "$SIGN_IDENTITY" "$APP"
 
@@ -607,13 +631,33 @@ jobs:
           $extract = "$env:RUNNER_TEMP\omt-extract"
           New-Item -ItemType Directory -Force -Path $extract | Out-Null
           Expand-Archive -Path $out -DestinationPath $extract -Force
-          # Locate Winx64 binaries inside the zip's Libraries/Winx64/.
-          $omtDll = Get-ChildItem -Path $extract -Filter "libomt.dll" -Recurse | Select-Object -First 1
-          $vmxDll = Get-ChildItem -Path $extract -Filter "libvmx.dll" -Recurse | Select-Object -First 1
-          $omtLib = Get-ChildItem -Path $extract -Filter "libomt.lib" -Recurse | Select-Object -First 1
-          if (-not $omtDll -or -not $vmxDll -or -not $omtLib) {
-            Write-Host "ERROR: missing one of libomt.dll/libvmx.dll/libomt.lib in OMT bundle"
+          # Pin to Libraries\Winx64\ explicitly — the OMT zip also
+          # contains WinArm64 builds, and a -Recurse -Filter "*.dll"
+          # picks up the FIRST match in filesystem walk order which
+          # may be the ARM64 one. alpha.18 hit this: the resulting
+          # x64 cargo build emitted "library machine type 'ARM64'
+          # conflicts with target machine type 'x64'" with 30 LNK2019
+          # unresolved-external errors.
+          $omtRoot = Join-Path $extract "Libraries\Winx64"
+          if (-not (Test-Path $omtRoot)) {
+            # Some zip arrangements use Libraries/Winx64 with forward
+            # slashes — find it case- and slash-insensitively.
+            $omtRoot = Get-ChildItem -Path $extract -Directory -Recurse `
+              | Where-Object { $_.Name -ieq "Winx64" } `
+              | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $omtRoot -or -not (Test-Path $omtRoot)) {
+            Write-Host "ERROR: Winx64 directory not found in OMT zip"
             Get-ChildItem -Path $extract -Recurse -Depth 3 | Format-Table FullName, Length -AutoSize
+            exit 1
+          }
+          Write-Host "Using OMT root: $omtRoot"
+          $omtDll = Get-Item (Join-Path $omtRoot "libomt.dll") -ErrorAction SilentlyContinue
+          $vmxDll = Get-Item (Join-Path $omtRoot "libvmx.dll") -ErrorAction SilentlyContinue
+          $omtLib = Get-Item (Join-Path $omtRoot "libomt.lib") -ErrorAction SilentlyContinue
+          if (-not $omtDll -or -not $vmxDll -or -not $omtLib) {
+            Write-Host "ERROR: missing one of libomt.dll/libvmx.dll/libomt.lib in $omtRoot"
+            Get-ChildItem -Path $omtRoot | Format-Table Name, Length -AutoSize
             exit 1
           }
           # Stage DLLs into sidecar/ so they ship in the NSIS installer
