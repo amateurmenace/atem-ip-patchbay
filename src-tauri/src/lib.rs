@@ -23,7 +23,6 @@ use std::sync::Arc;
 use tauri::{Manager, RunEvent};
 
 use crate::fleet::{EncoderFleet, TILE_COUNT};
-use crate::http::HttpAppState;
 use crate::protocol::ProtocolServer;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
@@ -42,9 +41,86 @@ fn window_title(instance: &str, http_port: u16, bmd_port: u16) -> String {
     }
 }
 
+/// Tauri command that spawns a new patchbay process via the existing
+/// `--instance-name` CLI flag. Used by the multiview shell's
+/// "+ New Window" button to let a power user run a 5th+ stream in
+/// its own window with its own state directory + port pair, on top
+/// of the in-app 2x2 grid.
+///
+/// Detaches properly so closing the parent doesn't kill the spawn:
+/// macOS/Linux use `setsid` to put the child in a new session +
+/// process group; Windows uses `CREATE_NEW_PROCESS_GROUP |
+/// DETACHED_PROCESS` so the child survives the parent's exit and
+/// gets its own console (or none, with our existing hide-console
+/// helper).
+#[tauri::command]
+async fn spawn_instance(name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("instance name cannot be empty".into());
+    }
+    // Sanitize — instance name becomes a directory path component.
+    // Reject anything that would create a weird filesystem layout.
+    if trimmed.contains(['/', '\\', ':', '\0']) {
+        return Err(format!("instance name contains invalid characters: {trimmed:?}"));
+    }
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("could not resolve current exe: {e}"))?;
+
+    log::info!("spawning new instance: name={trimmed:?} exe={}", current_exe.display());
+
+    let mut cmd = std::process::Command::new(&current_exe);
+    cmd.args(["--instance-name", trimmed]);
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // setsid creates a new session + process group with the
+            // child as leader. Without this, the spawned instance
+            // shares our process group → Cmd-Q on the parent kills
+            // the spawn too. setsid detaches it cleanly.
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x0000_0200, the child can be
+        // signaled independently of our process group.
+        // DETACHED_PROCESS = 0x0000_0008, no shared console with
+        // the parent — pairs with the hide-console helper in
+        // ffmpeg_path.rs to keep the spawn console-less on Windows.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|child| {
+            log::info!(
+                "spawned instance {trimmed:?} pid={}",
+                child.id()
+            );
+            // We intentionally drop the Child handle here — the
+            // OS keeps the process alive (detached). If we held
+            // onto it, the kill_on_drop default would terminate
+            // the spawn when our process exits, which is the
+            // opposite of what we want.
+        })
+        .map_err(|e| format!("failed to spawn instance: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![spawn_instance])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -140,10 +216,11 @@ pub fn run() {
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
 
-            // HttpAppState.encoder/streamer/preview are tile-0
-            // aliases for now; future commits will retire them in
-            // favor of route-extracted tile indexes.
-            let http_state = HttpAppState::from_fleet(fleet.clone());
+            // alpha.15: the router now takes the fleet directly and
+            // mounts per-tile API sub-routers at /api/i/0..3 plus a
+            // /api/* alias for tile 0. The HttpAppState wrapper that
+            // existed in earlier code paths is constructed internally
+            // by the router for each mount point.
 
             // Bind synchronously so we know the port before creating
             // the webview. The Axum server itself runs in a tokio task.
@@ -154,7 +231,7 @@ pub fn run() {
                 .expect("could not bind HTTP API port");
             log::info!("HTTP API listening on http://127.0.0.1:{port}/");
 
-            let router = crate::http::router(http_state, static_dir);
+            let router = crate::http::router(fleet.clone(), static_dir);
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = axum::serve(listener, router).await {
                     log::error!("Axum server stopped: {err}");

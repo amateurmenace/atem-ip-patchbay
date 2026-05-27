@@ -48,15 +48,24 @@ impl HttpAppState {
     /// zero tiles (which the fleet constructor guarantees never
     /// happens — TILE_COUNT is a compile-time const ≥ 1).
     pub fn from_fleet(fleet: Arc<EncoderFleet>) -> Self {
-        let tile0 = fleet
-            .tile(0)
-            .expect("fleet must always have at least one tile");
-        HttpAppState {
-            encoder: tile0.encoder.clone(),
-            streamer: tile0.streamer.clone(),
-            preview: tile0.preview.clone(),
-            fleet,
-        }
+        Self::for_tile(&fleet, 0).expect("fleet must always have at least tile 0")
+    }
+
+    /// Construct a per-tile HttpAppState — the `encoder` / `streamer`
+    /// / `preview` fields point at THIS tile's components, not
+    /// tile 0's. Used by the router to mount a copy of the API sub-
+    /// router under `/api/i/N` for each tile, each mount carrying
+    /// its own State so handlers automatically dispatch to the
+    /// right tile without needing to read a path parameter.
+    /// Returns None if `idx` is out of range.
+    pub fn for_tile(fleet: &Arc<EncoderFleet>, idx: u8) -> Option<Self> {
+        let tile = fleet.tile(idx)?;
+        Some(HttpAppState {
+            encoder: tile.encoder.clone(),
+            streamer: tile.streamer.clone(),
+            preview: tile.preview.clone(),
+            fleet: fleet.clone(),
+        })
     }
 }
 
@@ -83,10 +92,50 @@ pub async fn bind_with_walk(start_port: u16) -> Result<(u16, TcpListener)> {
     ))
 }
 
-/// Build the Axum router that drives the existing JS UI. `static_dir`
-/// is the on-disk path to `bmd_emulator/static/` (or its bundled
-/// equivalent inside the .app's Resources/).
-pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
+/// Build the per-tile API sub-router. Routes register at paths
+/// WITHOUT the `/api/` prefix (e.g. `/state`, `/start`) so the
+/// outer router can mount this sub-tree under either `/api/i/N`
+/// (per-tile, with that tile's HttpAppState baked in via
+/// `.with_state(...)`) or `/api` (alias for tile 0).
+///
+/// Returns `Router<HttpAppState>` — state is unset; caller calls
+/// `.with_state(tile_state)` per mount.
+fn tile_api_routes() -> Router<HttpAppState> {
+    Router::new()
+        .route("/state", get(api_state))
+        .route("/lan-ip", get(api_lan_ip))
+        .route("/lan-ips", get(api_lan_ips))
+        .route("/preview", get(api_preview))
+        .route("/preview/start", post(api_preview_start))
+        .route("/preview/stop", post(api_preview_stop))
+        .route("/log", get(api_log))
+        .route("/devices", get(api_devices))
+        .route("/discover", get(api_discover))
+        .route("/ndi-senders", get(api_ndi_senders))
+        .route("/omt-senders", get(api_omt_senders))
+        .route("/omt-output", post(api_omt_output))
+        .route("/open-net-diag", post(api_open_net_diag))
+        .route("/start", post(api_start))
+        .route("/stop", post(api_stop))
+        .route("/kill-orphans", post(api_kill_orphans))
+        .route("/settings", post(api_settings))
+        .route("/load_xml", post(api_load_xml))
+        .route("/load_xml_text", post(api_load_xml_text))
+        .route("/services/clear", post(api_clear_services))
+        .route("/destination/paste", post(api_destination_paste_stub))
+}
+
+/// Build the Axum router that drives the existing JS UI. Takes the
+/// EncoderFleet directly so the API routes can be mounted once per
+/// tile under `/api/i/:idx/*`, each mount carrying its own
+/// HttpAppState whose encoder/streamer/preview point at that tile's
+/// components. The `/api/*` alias is mounted last and resolves to
+/// tile 0 for backward compatibility with the existing single-
+/// source UI.
+///
+/// `static_dir` is the on-disk path to `bmd_emulator/static/` (or
+/// its bundled equivalent inside the .app's Resources/).
+pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
     // Static-file path mount — must come before nest_service('/') so the
     // /static/* prefix routes win over the index fallback. Wrap with
     // a no-cache layer because the WebView (and most browsers without
@@ -100,21 +149,36 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
     )
     .layer(ServeDir::new(&static_dir));
+    // alpha.15: root `/` serves multiview.html (the new 2x2 grid
+    // shell). The legacy single-source UI is still accessible at
+    // /static/index.html — that's what each multiview iframe loads,
+    // with `?tile=N` appended so app.js's fetch shim scopes API
+    // calls to that tile. If multiview.html is missing (e.g. an
+    // old static-dir bundle), we fall back to index.html so the
+    // single-source UI is still served at the root.
+    let multiview_path = static_dir.join("multiview.html");
     let index_path = static_dir.join("index.html");
+    let root_path = if multiview_path.exists() {
+        multiview_path
+    } else {
+        index_path.clone()
+    };
 
-    // Re-read index.html on every request rather than caching a copy
-    // at boot. Caching at boot meant any edit to index.html was
-    // invisible until the dev process restarted, even though edits
-    // to JS/CSS (served by ServeDir) showed up immediately. The cost
-    // is one stat + read per page load, which is negligible at
-    // anything below high-traffic-server scale and the file is small
-    // enough that the OS will keep it in the page cache anyway. If we
-    // ever serve from inside a bundled .app's Resources/ where the
-    // file genuinely never changes, we can swap in a OnceCell-cached
-    // path keyed off cfg!(debug_assertions).
-    Router::new()
+    // Build the tile-scoped API sub-router once; clone + mount per-
+    // tile below. The sub-router has no state baked in yet — each
+    // mount calls .with_state(tile_state) to finalize.
+    let tile_routes_template = tile_api_routes();
+
+    let mut router = Router::new()
+        // Re-read index.html on every request rather than caching a copy
+        // at boot. Caching at boot meant any edit to index.html was
+        // invisible until the dev process restarted, even though edits
+        // to JS/CSS (served by ServeDir) showed up immediately. The cost
+        // is one stat + read per page load, which is negligible at
+        // anything below high-traffic-server scale and the file is small
+        // enough that the OS will keep it in the page cache anyway.
         .route("/", get(move || {
-            let path = index_path.clone();
+            let path = root_path.clone();
             async move {
                 match tokio::fs::read_to_string(&path).await {
                     Ok(html) => axum::response::Html(html),
@@ -145,29 +209,31 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
                 }
             }
         }))
-        .route("/api/state", get(api_state))
-        .route("/api/lan-ip", get(api_lan_ip))
-        .route("/api/lan-ips", get(api_lan_ips))
-        .route("/api/preview", get(api_preview))
-        .route("/api/preview/start", post(api_preview_start))
-        .route("/api/preview/stop", post(api_preview_stop))
-        .route("/api/log", get(api_log))
-        .route("/api/devices", get(api_devices))
-        .route("/api/discover", get(api_discover))
-        .route("/api/ndi-senders", get(api_ndi_senders))
-        .route("/api/omt-senders", get(api_omt_senders))
-        .route("/api/omt-output", post(api_omt_output))
-        .route("/api/open-net-diag", post(api_open_net_diag))
-        .route("/api/start", post(api_start))
-        .route("/api/stop", post(api_stop))
-        .route("/api/kill-orphans", post(api_kill_orphans))
-        .route("/api/settings", post(api_settings))
-        .route("/api/load_xml", post(api_load_xml))
-        .route("/api/load_xml_text", post(api_load_xml_text))
-        .route("/api/services/clear", post(api_clear_services))
-        .route("/api/destination/paste", post(api_destination_paste_stub))
-        .nest_service("/static", static_service)
-        .with_state(state)
+        .nest_service("/static", static_service);
+
+    // Per-tile API mounts at /api/i/0, /api/i/1, ... — each gets a
+    // clone of the tile-routes sub-router with its own HttpAppState
+    // baked in so handlers automatically dispatch to the right tile
+    // without reading a path parameter. axum's longest-prefix-wins
+    // routing means /api/i/0/state matches THIS mount, not the
+    // /api/* alias mounted below.
+    for tile in fleet.tiles() {
+        let state = HttpAppState::for_tile(&fleet, tile.idx)
+            .expect("tile must exist for fleet.tiles() yield");
+        let prefix = format!("/api/i/{}", tile.idx);
+        router = router.nest(&prefix, tile_routes_template.clone().with_state(state));
+    }
+
+    // /api/* alias for tile 0 — keeps the existing single-source UI
+    // working without any URL changes. The iframe-based multiview
+    // shell (later commit) will explicitly hit /api/i/N/* via a
+    // tiny fetch-rewriting shim in app.js, so this alias is purely
+    // for backward compat / direct UI loads with no iframe context.
+    let tile_0_state =
+        HttpAppState::for_tile(&fleet, 0).expect("fleet must have tile 0");
+    router = router.nest("/api", tile_routes_template.with_state(tile_0_state));
+
+    router
 }
 
 // ---- handlers --------------------------------------------------------------

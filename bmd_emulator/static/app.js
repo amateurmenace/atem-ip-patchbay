@@ -2,6 +2,61 @@
 // Polls /api/state every second, drives forms, runs live source preview
 // in the browser via getUserMedia/getDisplayMedia.
 
+// -----------------------------------------------------------------
+// alpha.15 multi-source fetch shim — runs BEFORE any other code so
+// every subsequent fetch('/api/...') call gets rewritten to the
+// tile-scoped /api/i/N/... path. When this page is loaded standalone
+// (no ?tile=N), the shim is a no-op and /api/* lands on the backend's
+// tile-0 alias mount. When loaded inside the multiview iframe with
+// ?tile=N appended, every API call dispatches to that tile's
+// EncoderFleet slot in the backend — making four independent
+// source→destination pipelines look like four independent copies of
+// this UI from the network perspective, without rewriting any of
+// the 2,700+ lines of existing app.js fetch logic.
+//
+// Backwards-compatible: pages without ?tile= bypass the shim and
+// hit /api/* directly. Tile 0 receives those calls via the backend
+// alias mount, so single-source behavior is unchanged.
+(function installTileFetchShim() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get('tile');
+  if (raw === null) return; // no shim needed
+  const tileIdx = parseInt(raw, 10);
+  if (!Number.isFinite(tileIdx) || tileIdx < 0 || tileIdx > 9) return;
+  const originalFetch = window.fetch.bind(window);
+  const prefix = `/api/i/${tileIdx}`;
+  window.fetch = function tileScopedFetch(input, init) {
+    let url = typeof input === 'string'
+      ? input
+      : (input && input.url) || '';
+    // Only rewrite paths that look like /api/<anything-but-i>. Already-
+    // scoped /api/i/N/... paths pass through untouched (defensive — if
+    // the page somehow constructs one directly, don't double-prefix).
+    if (typeof url === 'string'
+        && url.startsWith('/api/')
+        && !url.startsWith('/api/i/')) {
+      const rewritten = prefix + url.substring(4);
+      if (typeof input === 'string') {
+        input = rewritten;
+      } else {
+        // Reconstruct the Request preserving method/headers/body
+        try {
+          input = new Request(rewritten, input);
+        } catch (_) {
+          input = rewritten;
+        }
+      }
+    }
+    return originalFetch(input, init);
+  };
+  // Mark the body so per-tile UI tweaks (e.g. hide the global topbar
+  // when inside the multiview shell) can target via CSS later.
+  document.addEventListener('DOMContentLoaded', () => {
+    document.body.classList.add('embedded-tile');
+    document.body.dataset.tileIdx = String(tileIdx);
+  });
+})();
+
 const $  = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
