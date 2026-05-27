@@ -582,6 +582,27 @@ select { appearance: none; cursor: pointer;
   background-repeat: no-repeat; background-position: right 12px center;
   padding-right: 30px;
 }
+
+/* Explicit dark theme for dropdown options. Without this, Windows
+   WebView2 renders the OPEN dropdown popup using the OS native
+   colors (light-grey background, near-white text) which is barely
+   readable. Chromium honors background/color on <option> for the
+   popup itself, so setting them here gives the dropdown the same
+   dark surface as the rest of the UI. Reported in alpha.16 against
+   the Audio Mixer device picker on Windows. */
+option {
+  background-color: #0e0f12;
+  color: #e6e6ea;
+  padding: 4px 8px;
+}
+option:checked {
+  background-color: #1a1c22;
+  color: #ffffff;
+  font-weight: 500;
+}
+option:disabled {
+  color: #5a626f;
+}
 input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--signal);
   box-shadow: 0 0 0 3px rgba(78,167,255,0.18);

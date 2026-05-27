@@ -128,6 +128,38 @@ jobs:
           ls -lh src-tauri/sidecar/
           src-tauri/sidecar/ffmpeg -version | head -3
 
+      - name: Download + stage libomt for OMT support (Mac arm64)
+        run: |
+          # alpha.18: OMT (Open Media Transport) — needed so OMT
+          # sources actually appear in the discovery dropdown. The
+          # libomt crate is feature-gated behind `omt`; enabling it
+          # requires libomt.dylib + libvmx.dylib at link time AND at
+          # runtime. Download URL matches the libomt-rs crate's
+          # mise.toml `native:download` task — official OMT 1.0.0.14
+          # binaries from openmediatransport/libomtnet GitHub
+          # releases.
+          OMT_VERSION="v1.0.0.14"
+          URL="https://github.com/openmediatransport/libomtnet/releases/download/${OMT_VERSION}/OpenMediaTransport.Binaries.Release.${OMT_VERSION}.zip"
+          curl -fSL -o /tmp/omt.zip "$URL"
+          mkdir -p /tmp/omt-extract
+          unzip -jo /tmp/omt.zip "Libraries/MacOS/libomt.dylib" "Libraries/MacOS/libvmx.dylib" -d /tmp/omt-extract
+          # Install at /usr/local/lib/ alongside libndi.dylib so
+          # tauri.conf.json's bundle.macOS.frameworks (absolute
+          # paths) can find them at bundle time. install_name_tool
+          # rewrites the LC_ID_DYLIB to @rpath/<name> so binaries
+          # link against the rpath-relative location the .app's
+          # build.rs sets via -Wl,-rpath,@executable_path/../Frameworks.
+          sudo mkdir -p /usr/local/lib
+          sudo cp -v /tmp/omt-extract/libomt.dylib /usr/local/lib/libomt.dylib
+          sudo cp -v /tmp/omt-extract/libvmx.dylib /usr/local/lib/libvmx.dylib
+          sudo install_name_tool -id "@rpath/libomt.dylib" /usr/local/lib/libomt.dylib
+          sudo install_name_tool -id "@rpath/libvmx.dylib" /usr/local/lib/libvmx.dylib
+          ls -lh /usr/local/lib/libomt* /usr/local/lib/libvmx*
+          # Export LIBOMT_PATH so the libomt-rs build.rs links
+          # against /usr/local/lib instead of its vendored stub
+          # location. Persists across subsequent CI steps.
+          echo "LIBOMT_PATH=/usr/local/lib" >> $GITHUB_ENV
+
       - name: Import signing identity (if secrets are set)
         env:
           CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
@@ -185,7 +217,28 @@ jobs:
           # secret override the hardcoded identity in the conf.
           APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         working-directory: src-tauri
-        run: cargo tauri build
+        run: cargo tauri build --features omt
+
+      - name: Copy libomt + libvmx into the .app's Contents/Frameworks
+        run: |
+          # alpha.18: libomt + libvmx need to ride along inside the .app
+          # for OMT to work at runtime. We don't put them in tauri.conf
+          # bundle.macOS.frameworks (that requires the dylibs at config-
+          # load time, which would break local cargo check for anyone
+          # who hasn't run `mise run native:download`) — copy them in
+          # post-build instead, after `cargo tauri build` has produced
+          # the .app and before the deep-codesign step picks them up.
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          FW="$APP/Contents/Frameworks"
+          mkdir -p "$FW"
+          cp -v /usr/local/lib/libomt.dylib "$FW/libomt.dylib"
+          cp -v /usr/local/lib/libvmx.dylib "$FW/libvmx.dylib"
+          ls -lh "$FW/"
+          # install_name on each dylib should already be @rpath/... from
+          # the earlier staging step; verify so a misconfig fails loud
+          # rather than producing a non-loadable binary.
+          otool -D "$FW/libomt.dylib"
+          otool -D "$FW/libvmx.dylib"
 
       - name: Deep codesign every Mach-O in the .app (hardened runtime)
         # Tauri 2's bundler signs the main binary in Contents/MacOS/
@@ -538,6 +591,50 @@ jobs:
           Get-ChildItem src-tauri\sidecar
           & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
 
+      - name: Download + stage libomt for OMT support (Windows x64)
+        shell: pwsh
+        run: |
+          # alpha.18: OMT (Open Media Transport) bundling for Windows.
+          # libomt.dll + libvmx.dll go into sidecar/ next to ffmpeg.exe
+          # and Processing.NDI.Lib.x64.dll; libomt.lib (the import
+          # library) goes into a separate vendor dir that LIBOMT_PATH
+          # points at for build-time linking.
+          $OMT_VERSION = "v1.0.0.14"
+          $url = "https://github.com/openmediatransport/libomtnet/releases/download/$OMT_VERSION/OpenMediaTransport.Binaries.Release.$OMT_VERSION.zip"
+          $out = "$env:RUNNER_TEMP\omt.zip"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Write-Host "Downloaded OMT binaries: $([math]::Round((Get-Item $out).Length / 1MB, 1)) MB"
+          $extract = "$env:RUNNER_TEMP\omt-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Expand-Archive -Path $out -DestinationPath $extract -Force
+          # Locate Winx64 binaries inside the zip's Libraries/Winx64/.
+          $omtDll = Get-ChildItem -Path $extract -Filter "libomt.dll" -Recurse | Select-Object -First 1
+          $vmxDll = Get-ChildItem -Path $extract -Filter "libvmx.dll" -Recurse | Select-Object -First 1
+          $omtLib = Get-ChildItem -Path $extract -Filter "libomt.lib" -Recurse | Select-Object -First 1
+          if (-not $omtDll -or -not $vmxDll -or -not $omtLib) {
+            Write-Host "ERROR: missing one of libomt.dll/libvmx.dll/libomt.lib in OMT bundle"
+            Get-ChildItem -Path $extract -Recurse -Depth 3 | Format-Table FullName, Length -AutoSize
+            exit 1
+          }
+          # Stage DLLs into sidecar/ so they ship in the NSIS installer
+          # AND get picked up by SetDllDirectoryW at runtime (the same
+          # mechanism that finds Processing.NDI.Lib.x64.dll).
+          New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+          Copy-Item $omtDll.FullName -Destination "src-tauri\sidecar\libomt.dll" -Force
+          Copy-Item $vmxDll.FullName -Destination "src-tauri\sidecar\libvmx.dll" -Force
+          # Stage .lib for build-time linking. Cargo's build.rs reads
+          # LIBOMT_PATH to locate the import library.
+          $libomtVendor = "$env:RUNNER_TEMP\libomt-vendor"
+          New-Item -ItemType Directory -Force -Path $libomtVendor | Out-Null
+          Copy-Item $omtDll.FullName -Destination "$libomtVendor\libomt.dll" -Force
+          Copy-Item $omtLib.FullName -Destination "$libomtVendor\libomt.lib" -Force
+          # Persist LIBOMT_PATH for subsequent steps. The libomt-rs
+          # build.rs joins it with `libomt.dll` to test for presence
+          # then links against libomt.lib from the same directory.
+          "LIBOMT_PATH=$libomtVendor" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Staged OMT binaries:"
+          Get-ChildItem src-tauri\sidecar | Where-Object { $_.Name -like "libomt*" -or $_.Name -like "libvmx*" } | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,2)}}
+
       - name: Build atem-net-diag.exe + stage into sidecar
         shell: pwsh
         run: |
@@ -571,7 +668,7 @@ jobs:
 
       - name: Build .exe + NSIS installer
         working-directory: src-tauri
-        run: cargo tauri build
+        run: cargo tauri build --features omt
 
       - name: Sanity-check the artifacts
         shell: pwsh
@@ -585,7 +682,13 @@ jobs:
           # Without these the .exe launches but NDI features silently
           # fail with "module not found" at first NDI use.
           $sidecar = "src-tauri\sidecar"
-          $required = @("Processing.NDI.Lib.x64.dll", "ffmpeg.exe", "atem-net-diag.exe")
+          $required = @(
+            "Processing.NDI.Lib.x64.dll",
+            "ffmpeg.exe",
+            "atem-net-diag.exe",
+            "libomt.dll",
+            "libvmx.dll"
+          )
           $missing = @()
           foreach ($f in $required) {
             $path = Join-Path $sidecar $f
