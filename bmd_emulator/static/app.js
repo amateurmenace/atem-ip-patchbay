@@ -161,14 +161,8 @@ const els = {
   decklinkDeviceStatus: $('#decklink-device-status'),
   decklinkRefresh:    $('#decklink-refresh'),
 
-  // alpha.22 — UDM config dialog
-  udmConfigBtn:    $('#udm-config-btn'),
-  udmConfigStatus: $('#udm-config-status'),
-  udmDialog:       $('#udm-config-dialog'),
-  udmDialogForm:   $('#udm-config-form'),
-  udmDialogHost:   $('#udm-config-host'),
-  udmDialogKey:    $('#udm-config-key'),
-  udmDialogCancel: $('#udm-config-cancel'),
+  // alpha.22's UDM config dialog elements removed in alpha.25 — UDM
+  // is configured inside the net-diag dashboard now.
 };
 
 let knownDecklinkDevices = []; // populated by fetchDecklinkDevices()
@@ -409,82 +403,9 @@ function humanizeDecklinkMode(m) {
   return `${m.height}${scan}${fpsLabel}  (${m.format_code})`;
 }
 
-// -----------------------------------------------------------------
-// alpha.22 — UDM config dialog
-// -----------------------------------------------------------------
-
-/// Update the topbar button's text + accent state from the current
-/// snapshot. The API key itself NEVER reaches JS (server side
-/// excludes it from /api/state); we only see the derived
-/// `unifi_api_key_set: bool` flag. unifi_host is exposed as plain
-/// text so the operator can see at a glance which controller
-/// they're pointing at without opening the dialog.
-function renderUdmConfigStatus(snap) {
-  if (!els.udmConfigBtn || !els.udmConfigStatus) return;
-  const keySet = !!snap.unifi_api_key_set;
-  els.udmConfigBtn.classList.toggle('is-configured', keySet);
-  // Strip protocol + trailing slash for the at-a-glance label.
-  const hostShort = (snap.unifi_host || '')
-    .replace(/^https?:\/\//, '')
-    .replace(/\/+$/, '');
-  if (keySet) {
-    els.udmConfigStatus.textContent = `UDM · ${hostShort || 'configured'}`;
-  } else {
-    els.udmConfigStatus.textContent = 'UDM —';
-  }
-  els.udmConfigBtn.title = keySet
-    ? `UDM controller configured (${hostShort}) — click to update`
-    : 'Configure UDM controller credentials for Net Diag';
-}
-
-/// Open the UDM config dialog, pre-filling the host from the latest
-/// snapshot. The API key field is ALWAYS blank on open — the server
-/// never sends it back, and clearing the field is how we avoid
-/// "leaving the old key in the input" on consecutive opens.
-function openUdmConfigDialog() {
-  if (!els.udmDialog) return;
-  const snap = lastSnapshot || {};
-  els.udmDialogHost.value = snap.unifi_host || 'https://192.168.20.1';
-  // Placeholder hint when the key is already configured.
-  els.udmDialogKey.placeholder = snap.unifi_api_key_set
-    ? 'key configured — leave blank to keep, type to replace'
-    : 'paste your UDM API key';
-  els.udmDialogKey.value = '';
-  if (typeof els.udmDialog.showModal === 'function') {
-    els.udmDialog.showModal();
-  } else {
-    // Safari < 15.4 lacks <dialog> showModal; fall back to display.
-    els.udmDialog.setAttribute('open', '');
-  }
-}
-
-/// Save the dialog values: POST to /api/settings. Empty host falls
-/// back to the default. Empty API key with the configured state
-/// flagged keeps the existing key (we just don't send unifi_api_key);
-/// empty API key with no prior config sends an empty string (the
-/// server treats that as "explicitly clear").
-async function saveUdmConfigDialog() {
-  const host = (els.udmDialogHost.value || '').trim();
-  const keyTyped = els.udmDialogKey.value;  // intentional: don't trim
-                                            // keys (whitespace could
-                                            // be meaningful).
-  const patch = {};
-  patch.unifi_host = host; // empty -> server resets to default
-  // Only send unifi_api_key when the user typed SOMETHING. An empty
-  // string leaves the previously-set key alone (matches the
-  // placeholder UX: "leave blank to keep").
-  if (keyTyped.length > 0) {
-    patch.unifi_api_key = keyTyped;
-  }
-  await applySettings(patch);
-  els.udmDialog.close('save');
-  // Immediately fetch fresh /api/state so the topbar status pill +
-  // configured flag reflect what we just saved.
-  try {
-    const r = await fetch('/api/state', { cache: 'no-cache' });
-    if (r.ok) render(await r.json());
-  } catch (_e) { /* ignore */ }
-}
+// alpha.22's UDM config dialog functions removed in alpha.25 — UDM
+// is configured inside the net-diag dashboard now (see its UDM
+// panel form, POSTs to its own /api/config).
 
 // -----------------------------------------------------------------
 // Browser-side device permission + enumeration
@@ -1321,9 +1242,8 @@ function render(snap) {
   // DeckLink body and lets the ATEM body keep its rendering above.
   renderDecklinkDestination(snap);
 
-  // alpha.22 — UDM config affordance in the topbar reflects the
-  // snapshot's unifi_host + unifi_api_key_set flag.
-  renderUdmConfigStatus(snap);
+  // alpha.22's renderUdmConfigStatus removed in alpha.25 — UDM lives
+  // inside the net-diag dashboard now.
 
   if (document.activeElement !== els.srtMode) els.srtMode.value = snap.srt_mode || 'caller';
   if (document.activeElement !== els.srtLatency) els.srtLatency.value = Math.round((snap.srt_latency_us || 500000) / 1000);
@@ -1820,24 +1740,8 @@ function bind() {
     els.decklinkRefresh.addEventListener('click', () => fetchDecklinkDevices(true));
   }
 
-  // alpha.22 — UDM config dialog wiring.
-  if (els.udmConfigBtn) {
-    els.udmConfigBtn.addEventListener('click', openUdmConfigDialog);
-  }
-  if (els.udmDialogForm) {
-    els.udmDialogForm.addEventListener('submit', (e) => {
-      // <form method="dialog"> normally closes on submit; we want to
-      // handle the save ourselves first so the API call completes
-      // before the dialog disappears.
-      e.preventDefault();
-      saveUdmConfigDialog();
-    });
-  }
-  if (els.udmDialogCancel) {
-    els.udmDialogCancel.addEventListener('click', () => {
-      els.udmDialog.close('cancel');
-    });
-  }
+  // alpha.22's UDM dialog wiring removed in alpha.25 — UDM moved into
+  // the net-diag dashboard.
 
   // Segmented controls — Protocol + Codec
   els.protoSegs.forEach((r) => r.addEventListener('change', () => {

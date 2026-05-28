@@ -229,15 +229,49 @@ struct Inner {
     /// looking; UI currently doesn't expose it.
     decklink_pixel_format: String,
 
-    // Session 12 alpha.22: UDM controller credentials passed through
-    // to a spawned atem-net-diag at api_open_net_diag time. Stored
-    // in-process only; never persisted to disk (next launch re-prompts
-    // the operator). The host is exposed on /api/state so the UI can
-    // surface the configured controller; the API key is `#[serde(skip)]`-
-    // equivalent (Snapshot doesn't include it) so it never leaves the
-    // process via JSON.
-    unifi_host: String,
-    unifi_api_key: String,
+    // alpha.25: production-quality encoder controls. The "auto"
+    // default keeps existing behavior (VT on macOS, libx264/libx265
+    // elsewhere); explicit names route through select_encoder's
+    // per-encoder flag bag in streamer.rs.
+    video_encoder: String,
+    /// Power-user textarea contents — raw FFmpeg args appended after
+    /// the encoder block but before the muxer/output block. Lets a
+    /// user override encoder params (e.g. tune, profile, x264-params)
+    /// without us having to surface every knob. Parsed via shlex at
+    /// build_ffmpeg_cmd time; bad input surfaces as an FFmpeg
+    /// startup error in the existing error banner.
+    encoder_extra_flags: String,
+
+    // alpha.25: audio quality knobs.
+    /// "aac" (default, AAC-LC — ATEM-compatible) | "aac_he" | "aac_he_v2".
+    /// Hard-blocked at build_plan validation when destination==atem and
+    /// audio_codec != "aac" (the ATEM SRT decoder only accepts LC).
+    audio_codec: String,
+    /// Explicit audio bitrate in kbps. 0 = inherit from active_config
+    /// (XML-driven path). Non-zero = operator override.
+    audio_bitrate_kbps: u32,
+    /// Output sample rate. Defaults to 48000 (broadcast standard).
+    /// 44100 supported for legacy / web use cases.
+    audio_sample_rate: u32,
+    /// Output channel count. Replaces the alpha.22 `audio_output_mono`
+    /// boolean (1=mono, 2=stereo, future 6=5.1). Stored as a u8 to
+    /// keep the wire shape compact.
+    audio_channels: u8,
+
+    // alpha.25: auto-reconnect supervisor controls.
+    /// When true (default), the streamer's supervisor wrapper restarts
+    /// FFmpeg with exponential backoff on unexpected exit. False fails
+    /// fast (matches alpha.21 and earlier behavior).
+    auto_reconnect: bool,
+    /// Max consecutive reconnect attempts before giving up. Default 12 —
+    /// at the 60s ceiling that's ~3 min of total backoff, covers most
+    /// network blip durations without making a hung config hang forever.
+    auto_reconnect_max_attempts: u32,
+
+    /// alpha.25: gate the astats audio-meter filter chain. On by
+    /// default; operator can disable in advanced settings if a
+    /// pathological audio source makes the metadata parser misbehave.
+    meters_enabled: bool,
 
     stats: StreamStats,
 }
@@ -296,8 +330,15 @@ impl EncoderState {
                 decklink_output_mode: String::new(),
                 decklink_format_code: String::new(),
                 decklink_pixel_format: "uyvy422".into(),
-                unifi_host: "https://192.168.20.1".into(),
-                unifi_api_key: String::new(),
+                video_encoder: "auto".into(),
+                encoder_extra_flags: String::new(),
+                audio_codec: "aac".into(),
+                audio_bitrate_kbps: 0, // 0 = inherit from active_config
+                audio_sample_rate: 48000,
+                audio_channels: 2,
+                auto_reconnect: true,
+                auto_reconnect_max_attempts: 12,
+                meters_enabled: true,
                 stats: StreamStats::default(),
             }),
         }
@@ -601,34 +642,81 @@ impl EncoderState {
                 inner.decklink_pixel_format = v.clone();
             }
         }
-        if let Some(v) = &update.unifi_host {
-            // Accept any non-empty string; the host is just a base URL
-            // for atem-net-diag's UDM polling. The default
-            // (192.168.20.1 — the user's production UDM) is set in
-            // new(); empty values reset to default to avoid an
-            // accidentally-cleared host breaking the spawn.
-            if v.trim().is_empty() {
-                inner.unifi_host = "https://192.168.20.1".into();
-            } else {
-                inner.unifi_host = v.clone();
+
+        // alpha.25: production-quality encoder + audio + reconnect knobs.
+        // UDM credentials moved out of EncoderState entirely — atem-net-diag
+        // now configures its own UDM via its dashboard's UDM form (POSTs to
+        // /api/config). Main app no longer carries that state.
+        if let Some(v) = &update.video_encoder {
+            // Validate against the known set. Unknown values silently
+            // ignored (matches the video_mode / srt_mode validation pattern
+            // above). "auto" is always valid; specific encoders must
+            // appear in `ffmpeg_path::available_encoders()` to be selectable
+            // but apply_settings accepts them as-is and select_encoder
+            // surfaces an error at stream-start if it can't be resolved.
+            if matches!(
+                v.as_str(),
+                "auto"
+                    | "libx264"
+                    | "libx265"
+                    | "h264_videotoolbox"
+                    | "hevc_videotoolbox"
+                    | "h264_nvenc"
+                    | "hevc_nvenc"
+                    | "h264_qsv"
+                    | "hevc_qsv"
+                    | "h264_amf"
+                    | "hevc_amf"
+            ) {
+                inner.video_encoder = v.clone();
             }
         }
-        if let Some(v) = &update.unifi_api_key {
-            // Empty string is meaningful here — it's how the operator
-            // clears a previously-set key (e.g. revoked, or wrong key
-            // entered). Just trim and accept.
-            inner.unifi_api_key = v.trim().to_string();
+        if let Some(v) = &update.encoder_extra_flags {
+            // Trim only — shlex tokenization happens at build_ffmpeg_cmd
+            // time so the operator sees their original text in the
+            // textarea even if it parses oddly.
+            inner.encoder_extra_flags = v.trim().to_string();
         }
-    }
-
-    /// Read the UDM API credentials for env-var plumbing into a
-    /// spawned atem-net-diag. Returns (host, api_key) tuple; the key
-    /// stays inside EncoderState (never surfaces on /api/state or any
-    /// other JSON endpoint) and only this accessor + the http.rs
-    /// spawn site touch it.
-    pub fn unifi_credentials(&self) -> (String, String) {
-        let inner = self.inner.read().unwrap();
-        (inner.unifi_host.clone(), inner.unifi_api_key.clone())
+        if let Some(v) = &update.audio_codec {
+            if matches!(v.as_str(), "aac" | "aac_he" | "aac_he_v2") {
+                inner.audio_codec = v.clone();
+            }
+        }
+        if let Some(v) = update.audio_bitrate_kbps {
+            // 0 means "inherit from active_config" (XML-driven path).
+            // Any non-zero must be in a reasonable range (32-320 kbps
+            // for AAC is the IETF practical range).
+            inner.audio_bitrate_kbps = if v == 0 { 0 } else { v.clamp(32, 320) };
+        }
+        if let Some(v) = update.audio_sample_rate {
+            // Only 44100 and 48000 supported — broadcast destinations
+            // expect one of these, and supporting 96k/192k is a
+            // can-of-worms-for-no-real-benefit at the current scope.
+            if matches!(v, 44100 | 48000) {
+                inner.audio_sample_rate = v;
+            }
+        }
+        if let Some(v) = update.audio_channels {
+            // 1=mono, 2=stereo. 6 (5.1) reserved for future destination
+            // types (RTMP relay, NDI sender) that accept it.
+            if matches!(v, 1 | 2) {
+                inner.audio_channels = v;
+                // Keep the legacy audio_output_mono boolean in sync so
+                // any code path still reading it sees consistent state.
+                inner.audio_output_mono = v == 1;
+            }
+        }
+        if let Some(v) = update.auto_reconnect {
+            inner.auto_reconnect = v;
+        }
+        if let Some(v) = update.auto_reconnect_max_attempts {
+            // 0 disables the cap (infinite retries). 1-100 is the
+            // reasonable operator-tunable range; higher gets clamped.
+            inner.auto_reconnect_max_attempts = v.min(100);
+        }
+        if let Some(v) = update.meters_enabled {
+            inner.meters_enabled = v;
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -769,8 +857,15 @@ impl EncoderState {
             decklink_output_mode: inner.decklink_output_mode.clone(),
             decklink_format_code: inner.decklink_format_code.clone(),
             decklink_pixel_format: inner.decklink_pixel_format.clone(),
-            unifi_host: inner.unifi_host.clone(),
-            unifi_api_key_set: !inner.unifi_api_key.is_empty(),
+            video_encoder: inner.video_encoder.clone(),
+            encoder_extra_flags: inner.encoder_extra_flags.clone(),
+            audio_codec: inner.audio_codec.clone(),
+            audio_bitrate_kbps: inner.audio_bitrate_kbps,
+            audio_sample_rate: inner.audio_sample_rate,
+            audio_channels: inner.audio_channels,
+            auto_reconnect: inner.auto_reconnect,
+            auto_reconnect_max_attempts: inner.auto_reconnect_max_attempts,
+            meters_enabled: inner.meters_enabled,
         }
     }
 }
@@ -954,10 +1049,16 @@ pub struct SettingsUpdate {
     pub decklink_output_mode: Option<String>,
     pub decklink_format_code: Option<String>,
     pub decklink_pixel_format: Option<String>,
-    // alpha.22 UDM credentials — passed to atem-net-diag via env when
-    // the operator clicks the Net Diag button. None = leave unchanged.
-    pub unifi_host: Option<String>,
-    pub unifi_api_key: Option<String>,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    pub video_encoder: Option<String>,
+    pub encoder_extra_flags: Option<String>,
+    pub audio_codec: Option<String>,
+    pub audio_bitrate_kbps: Option<u32>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channels: Option<u8>,
+    pub auto_reconnect: Option<bool>,
+    pub auto_reconnect_max_attempts: Option<u32>,
+    pub meters_enabled: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -1037,12 +1138,16 @@ pub struct Snapshot {
     pub decklink_output_mode: String,
     pub decklink_format_code: String,
     pub decklink_pixel_format: String,
-    // alpha.22 UDM controller config for the spawned atem-net-diag.
-    // `unifi_host` is exposed; `unifi_api_key_set` is a derived bool
-    // so the UI can show "configured / not configured" without ever
-    // surfacing the key itself.
-    pub unifi_host: String,
-    pub unifi_api_key_set: bool,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    pub video_encoder: String,
+    pub encoder_extra_flags: String,
+    pub audio_codec: String,
+    pub audio_bitrate_kbps: u32,
+    pub audio_sample_rate: u32,
+    pub audio_channels: u8,
+    pub auto_reconnect: bool,
+    pub auto_reconnect_max_attempts: u32,
+    pub meters_enabled: bool,
 }
 
 impl Snapshot {

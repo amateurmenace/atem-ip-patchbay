@@ -250,11 +250,16 @@ async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
         snapshot: crate::state::Snapshot,
         preview: crate::preview::PreviewStatus,
         ffmpeg_decklink_available: bool,
+        /// alpha.25: video-encoder list probed at boot from `ffmpeg
+        /// -encoders`. The UI's encoder picker filters its dropdown to
+        /// this set so we don't offer nvenc on a build without it.
+        available_encoders: Vec<String>,
     }
     Json(StateResponse {
         snapshot: state.encoder.snapshot(),
         preview: state.preview.status().await,
         ffmpeg_decklink_available: crate::ffmpeg_path::ffmpeg_has_decklink(),
+        available_encoders: crate::ffmpeg_path::available_encoders().to_vec(),
     })
 }
 
@@ -639,19 +644,17 @@ async fn api_omt_output(
 /// the static UI is just talking to /api/* over fetch. Keeping the
 /// pattern consistent here means the button works the same way as
 /// every other UI action.
-async fn api_open_net_diag(State(state): State<HttpAppState>) -> impl IntoResponse {
+async fn api_open_net_diag(State(_state): State<HttpAppState>) -> impl IntoResponse {
     let url = "http://localhost:8092";
     let mut launched_app = false;
     let mut opened_url = false;
     let mut error: Option<String> = None;
 
-    // alpha.22: pull UDM credentials from EncoderState so spawned
-    // net-diag inherits them via env without the operator needing to
-    // wrangle setx / export. Empty string == "not configured here";
-    // the spawned process will fall back to the env var it was
-    // launched under (if set in the user's shell) or to its own
-    // DEFAULT_UDM_HOST + not_configured state.
-    let (udm_host, udm_api_key) = state.encoder.unifi_credentials();
+    // alpha.25: UDM credentials are now configured INSIDE atem-net-diag
+    // (via its dashboard's UDM form, POST /api/config). The main app no
+    // longer pre-plumbs env vars at spawn time. The spawn here inherits
+    // whatever UDM_API_KEY / UDM_HOST env the user set in their shell
+    // (if any) as a fallback; the dashboard form is the primary path.
 
     #[cfg(target_os = "macos")]
     {
@@ -714,21 +717,12 @@ async fn api_open_net_diag(State(state): State<HttpAppState>) -> impl IntoRespon
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            // alpha.22: thread UDM credentials through so the
-            // dashboard can populate its UDM panel without the
-            // operator having to `setx` + relaunch + retry. Both
-            // env vars only set when the corresponding state field
-            // is non-empty — empty values let net-diag fall through
-            // to its DEFAULT_UDM_HOST and not_configured states.
-            // Logged at info but the key value itself is NEVER
-            // logged (log line at top of spawn shows path only).
-            if !udm_host.is_empty() {
-                spawn.env("UDM_HOST", &udm_host);
-            }
-            if !udm_api_key.is_empty() {
-                spawn.env("UDM_API_KEY", &udm_api_key);
-                log::info!("net-diag spawn: UDM_API_KEY plumbed from main app state");
-            }
+            // alpha.25: UDM credentials are configured inside the
+            // net-diag dashboard now (its UDM panel has a config form
+            // posting to /api/config). The spawn inherits whatever
+            // UDM_API_KEY / UDM_HOST env vars the user has in their
+            // shell — that path still works as a fallback for
+            // operators who prefer the env-var workflow.
             // CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: same
             // detachment pattern as spawn_instance, so closing the
             // main app doesn't kill net-diag (and ditto in reverse).
@@ -949,12 +943,18 @@ struct SettingsPayload {
     decklink_output_mode: Option<String>,
     decklink_format_code: Option<String>,
     decklink_pixel_format: Option<String>,
-    // alpha.22: UDM controller config for spawned atem-net-diag.
-    // The api_key field is accepted on POST but never surfaced on
-    // GET responses — state.rs's Snapshot has only the derived
-    // `unifi_api_key_set: bool` flag.
-    unifi_host: Option<String>,
-    unifi_api_key: Option<String>,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    // UDM credentials removed from this payload — net-diag manages its
+    // own UDM config via its dashboard's /api/config endpoint now.
+    video_encoder: Option<String>,
+    encoder_extra_flags: Option<String>,
+    audio_codec: Option<String>,
+    audio_bitrate_kbps: Option<u32>,
+    audio_sample_rate: Option<u32>,
+    audio_channels: Option<u8>,
+    auto_reconnect: Option<bool>,
+    auto_reconnect_max_attempts: Option<u32>,
+    meters_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1140,8 +1140,15 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
             decklink_output_mode: p.decklink_output_mode,
             decklink_format_code: p.decklink_format_code,
             decklink_pixel_format: p.decklink_pixel_format,
-            unifi_host: p.unifi_host,
-            unifi_api_key: p.unifi_api_key,
+            video_encoder: p.video_encoder,
+            encoder_extra_flags: p.encoder_extra_flags,
+            audio_codec: p.audio_codec,
+            audio_bitrate_kbps: p.audio_bitrate_kbps,
+            audio_sample_rate: p.audio_sample_rate,
+            audio_channels: p.audio_channels,
+            auto_reconnect: p.auto_reconnect,
+            auto_reconnect_max_attempts: p.auto_reconnect_max_attempts,
+            meters_enabled: p.meters_enabled,
         }
     }
 }

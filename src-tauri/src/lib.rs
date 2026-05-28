@@ -283,6 +283,11 @@ pub fn run() {
             // lifetime; if the user reinstalls FFmpeg between
             // launches the probe runs fresh on next boot.
             let _ = ffmpeg_path::ffmpeg_has_decklink();
+            // alpha.25: probe the available encoders too. Surfaces
+            // on /api/state as `available_encoders: Vec<String>` so
+            // the JS encoder picker only offers what the bundled
+            // FFmpeg can actually use. Same eager-at-setup pattern.
+            let _ = ffmpeg_path::available_encoders();
 
             load_default_xml_files(app.handle(), &encoder);
             apply_default_devices_at_boot(&encoder);

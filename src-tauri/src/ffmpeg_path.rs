@@ -180,3 +180,127 @@ fn probe_decklink_support() -> bool {
     log::info!("ffmpeg decklink muxer present: {present}");
     present
 }
+
+/// Cached list of video encoders the resolved FFmpeg supports. Used by
+/// the alpha.25 encoder picker to gate the dropdown (don't offer
+/// nvenc when the bundled FFmpeg lacks it) and by select_encoder's
+/// auto-mode to pick the best available.
+///
+/// First call probes `ffmpeg -hide_banner -encoders` and caches the
+/// names of all video encoders. The output looks like:
+///
+///     Encoders:
+///      V..... = Video
+///      A..... = Audio
+///      S..... = Subtitle
+///      --
+///      V..... libx264              libx264 H.264 / AVC / MPEG-4 AVC ...
+///      V....D h264_nvenc           NVIDIA NVENC H.264 encoder ...
+///      V..... hevc_videotoolbox    VideoToolbox H.265 Encoder
+///
+/// Lines starting with `V` (any combination of flags after) are video
+/// encoders; we extract column 2 (the encoder name). Other categories
+/// (audio "A", subtitle "S") are filtered out — they don't affect
+/// video-encoder picking and pollute the list.
+static AVAILABLE_ENCODERS: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn available_encoders() -> &'static [String] {
+    AVAILABLE_ENCODERS
+        .get_or_init(probe_available_encoders)
+        .as_slice()
+}
+
+fn probe_available_encoders() -> Vec<String> {
+    let mut cmd = std::process::Command::new(ffmpeg_path());
+    cmd.args(["-hide_banner", "-encoders"])
+        .stderr(std::process::Stdio::null());
+    hide_console_std(&mut cmd);
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("encoder probe: ffmpeg invocation failed: {e}");
+            return Vec::new();
+        }
+    };
+    if !output.status.success() {
+        log::warn!(
+            "encoder probe: ffmpeg -encoders exited {:?}",
+            output.status.code()
+        );
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut encoders = Vec::new();
+    for line in stdout.lines() {
+        // Skip the header / legend block until we hit the divider.
+        // The actual encoder lines have leading whitespace + a single
+        // letter (V/A/S) + 5 flag chars + space + name + spaces + desc.
+        let trimmed = line.trim_start();
+        // Video encoder lines look like " V..... libx264              ..."
+        // or " V....D h264_nvenc           ..." (the flags vary; we
+        // just need the leading V and the second token).
+        if !trimmed.starts_with('V') || trimmed.len() < 7 {
+            continue;
+        }
+        // Tokens after the flag word are the encoder name + description.
+        let mut iter = trimmed.split_whitespace();
+        let flags = iter.next().unwrap_or("");
+        if !flags.starts_with('V') || flags.len() != 6 {
+            // Header lines like "V..... = Video" also start with V but
+            // have different shape — `=` shows up as a separate token.
+            continue;
+        }
+        if let Some(name) = iter.next() {
+            // Sanity: encoder names are kebab/underscore lowercase
+            // ASCII identifiers. Reject anything that doesn't look the
+            // part to avoid pulling in legend text.
+            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                encoders.push(name.to_string());
+            }
+        }
+    }
+    log::info!("ffmpeg available video encoders: {} found", encoders.len());
+    encoders
+}
+
+#[cfg(test)]
+mod encoder_probe_tests {
+    use super::*;
+
+    #[test]
+    fn parses_typical_encoders_output() {
+        // Synthetic snippet of `ffmpeg -encoders` output.
+        let _sample = "\
+Encoders:
+ V..... = Video
+ A..... = Audio
+ S..... = Subtitle
+ ------
+ V..... libx264              libx264 H.264 / AVC / MPEG-4 AVC ...
+ V....D h264_nvenc           NVIDIA NVENC H.264 encoder
+ V....D hevc_videotoolbox    VideoToolbox H.265 Encoder
+ A..... aac                  AAC (Advanced Audio Coding)
+";
+        // The probe function shells out to ffmpeg so we can't test it
+        // directly without a binary; instead we replicate the parser
+        // here. The intent is to verify our matching logic.
+        let mut found = Vec::new();
+        for line in _sample.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('V') || trimmed.len() < 7 {
+                continue;
+            }
+            let mut iter = trimmed.split_whitespace();
+            let flags = iter.next().unwrap_or("");
+            if !flags.starts_with('V') || flags.len() != 6 {
+                continue;
+            }
+            if let Some(name) = iter.next() {
+                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    found.push(name.to_string());
+                }
+            }
+        }
+        assert_eq!(found, vec!["libx264", "h264_nvenc", "hevc_videotoolbox"]);
+    }
+}

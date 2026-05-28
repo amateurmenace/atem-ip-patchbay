@@ -52,18 +52,11 @@
         </svg>
         Net Diag
       </button>
-      <!-- alpha.22: UDM API key config for the spawned net-diag.
-           The Net Diag button itself works without this (the dashboard
-           just shows "UDM not configured"); this dialog lets the
-           operator wire up a UDM API key from inside the app rather
-           than having to setx + restart. Status pill shows configured/
-           not-configured state at a glance. -->
-      <button id="udm-config-btn" type="button" class="udm-config-btn"
-              title="Configure UDM controller credentials for Net Diag"
-              aria-label="Configure UDM controller">
-        <span class="udm-config-icon" aria-hidden="true">⚙</span>
-        <span id="udm-config-status" class="udm-config-status">UDM —</span>
-      </button>
+      <!-- alpha.25 removed the alpha.22 UDM config dialog from the main
+           app. UDM credentials are configured INSIDE the atem-net-diag
+           dashboard now (separation of concerns — net-diag manages its
+           own UDM state). Click Net Diag in the topbar to open the
+           dashboard, then configure UDM via the form in its UDM panel. -->
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
@@ -1222,53 +1215,8 @@
     <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
   </footer>
 
-  <!-- alpha.22: UDM controller config dialog. Opened by the ⚙ UDM
-       topbar button; saves the host + API key into in-process app
-       state (never persisted to disk for security). On next click
-       of the Net Diag button, api_open_net_diag plumbs the values
-       into the spawned atem-net-diag via UDM_HOST + UDM_API_KEY
-       env vars. The api_key field is `#[serde(skip)]`-equivalent
-       on the server — its value only ever leaves the process via
-       the spawned net-diag's inherited env, never via /api/state. -->
-  <dialog id="udm-config-dialog" class="udm-dialog">
-    <form method="dialog" id="udm-config-form">
-      <h2>UDM Controller (Net Diag)</h2>
-      <p class="udm-dialog-help">
-        Pass a UniFi controller API key to the atem-net-diag dashboard
-        so it can poll client bandwidth, ATEM reachability, and WAN
-        headroom. Optional — leave empty if you don't have a UniFi
-        Dream Machine on the network.
-      </p>
-      <label>
-        Controller host
-        <input type="text" id="udm-config-host"
-               placeholder="https://192.168.20.1" autocomplete="off" />
-        <span class="field-help">Base URL the controller serves on
-          your LAN. Default <code>https://192.168.20.1</code>.</span>
-      </label>
-      <label>
-        API key
-        <input type="password" id="udm-config-key"
-               placeholder="••••••••••••" autocomplete="off" />
-        <span class="field-help">
-          Create one in the UDM web UI:
-          <strong>Settings → Control Plane → Integrations → Create
-          API Key</strong>. Stored in this app's process memory only —
-          never written to disk; you'll re-enter it next launch.
-        </span>
-      </label>
-      <p class="udm-dialog-help muted">
-        After saving, click <strong>Net Diag</strong> in the topbar to
-        open the dashboard. If a previous net-diag instance is still
-        running on port 8092, close it via Task Manager first so it
-        picks up the new credentials.
-      </p>
-      <menu class="udm-dialog-actions">
-        <button type="button" id="udm-config-cancel" value="cancel">Cancel</button>
-        <button type="submit" id="udm-config-save" value="save">Save</button>
-      </menu>
-    </form>
-  </dialog>
+  <!-- alpha.22's UDM config dialog removed in alpha.25 (relocated to
+       net-diag's own dashboard). -->
 
   <script src="/static/app.js"></script>
 </body>
