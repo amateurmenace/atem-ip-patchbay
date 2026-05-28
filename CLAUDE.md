@@ -1216,15 +1216,239 @@ consumed the session.
 - **net-diag Windows + Linux builds still deferred.**
   Mac arm64 only today. Carries from Session 8.
 
-### Session 11 priorities (next pickup)
+### Session 11 wins (alpha.15 through alpha.19, 2026-05-27)
 
-After alpha.13 + alpha.14 cleared most of Session 10's plan,
-the biggest still-pending pieces are the architectural
-multi-source work + the operator-visible net-diag pre-show
-panel that originally headlined Session 10. Priority order
-below.
+Shipped the multi-source feature in a different shape than the
+session started with, plus bundled net-diag.exe on Windows, plus
+got OMT working end-to-end via libomt bundling. Five alphas, two
+CI failures that took follow-up to debug.
 
-1. **Pre-show checks panel in net-diag.** This is the largest
+**alpha.15 (commit `4a35048`)** — first attempt at multi-source as
+an in-app 2x2 grid. multiview.html shell with 4 iframes loading
+the existing single-source UI scoped via ?tile=N + an app.js
+fetch shim rewriting /api/* → /api/i/N/*. Backend EncoderFleet
+abstraction; tile-prefixed routes /api/i/:idx/* mounted alongside
+/api/* aliases. spawn_instance Tauri command for "+ New Window".
+**Operator feedback: iframes were too cramped to actually
+configure or use a stream. The whole grid approach was wrong.**
+
+**alpha.16 (commit `0f9c3a0`)** — pivot. Deleted multiview.html
+shell + fetch shim. Kept the EncoderFleet abstraction (TILE_COUNT
+reduced to 1, vestigial but harmless). New approach: small per-
+instance **monitor window** the operator opens via a topbar button.
+Each monitor shows live preview JPEG + condensed stats (status
+pill, bitrate, source label, destination URL truncated). Sized
+360x320, resizable down to 220x200. Document title syncs to
+"Live · NDI: iPhone NDICAM — Monitor" so a screen full of monitor
+windows is identifiable in the OS task switcher. Expand button
+brings the main window to front (`focus_main_window` Tauri
+command). Operator workflow: configure each instance in its
+main window, open a monitor, drag to corner / second screen; the
+OS window manager composes the multi-stream view, just like a
+broadcast multiviewer.
+
+**alpha.17 (commit `ab1ee41`)** — bundle atem-net-diag.exe on
+Windows so the "Net Diag" topbar button actually works without
+a separate download. New step in build-windows CI:
+`cargo build --release` in tools/atem-net-diag/, copy the .exe
+into src-tauri/sidecar/ alongside ffmpeg.exe + the NDI DLL. New
+`net_diag_path()` resolver in ffmpeg_path.rs mirrors the existing
+ffmpeg_path() pattern. api_open_net_diag's Windows arm spawns
+the bundled binary with `--ui 8092` (detached, no console), then
+opens browser to the dashboard. Sanity-check step requires
+atem-net-diag.exe in sidecar/ before publishing.
+
+**alpha.18 (commit `3f060ee`)** — bundle libomt so OMT senders
+actually appear in discovery. CI failed both platforms:
+- Windows: `Get-ChildItem -Recurse -First 1` picked the ARM64
+  libomt.lib alphabetically before Winx64 → x64 cargo build hit
+  30 LNK2019 unresolved-external errors with "library machine
+  type 'ARM64' conflicts with target machine type 'x64'".
+- macOS: deep-codesign walked the .app in filesystem order; tried
+  to re-sign Contents/MacOS/atem-ip-patchbay before re-signing
+  the libomt + libvmx dylibs in Contents/Frameworks/ → codesign
+  refused with "code object is not signed at all" because the
+  embedded subcomponents were still adhoc-signed.
+
+Also includes a CSS fix for the audio-device dropdown contrast
+on Windows — explicit `option { background-color: #0e0f12;
+color: #e6e6ea; }` so WebView2 doesn't fall back to OS-native
+light-mode colors for the open dropdown popup.
+
+**alpha.19 (commit `7f8f397`)** — fixed alpha.18's two CI bugs:
+- Windows: pin to `Libraries\Winx64\` explicitly, case-
+  insensitive fallback if path casing varies.
+- macOS: sign inside-out — Phase 1 Frameworks, Phase 2 Resources,
+  Phase 3 MacOS/, Phase 4 outer .app. The leaves get signed first
+  so the main binary's embedded subcomponent verification passes.
+
+Both platforms now ship with:
+- OMT discovery working (libomt.dylib/dll bundled, --features omt
+  enabled in CI builds; libomt-rs's build.rs finds the binaries
+  via LIBOMT_PATH env var exported from CI to GITHUB_ENV)
+- libvmx.dylib/dll also bundled (libomt's runtime dep)
+- NSIS post-install hook on Windows copies libomt.dll + libvmx.dll
+  up to $INSTDIR\ from sidecar\ so the Windows loader finds them
+  at process startup (same trick used for the NDI DLL since
+  alpha.12)
+- Deep-codesign on Mac re-signs every Mach-O with hardened
+  runtime + Developer ID, in proper inside-out order
+
+### Open issues from Session 11
+
+- **Net Diag button doesn't actually work on Windows.** User-
+  reported in alpha.19 (the user's first install after the bundling
+  work). alpha.17 bundled atem-net-diag.exe, alpha.19 was supposed
+  to make everything work end-to-end. Click does... nothing
+  visible. Need to debug from the in-app log panel + verify the
+  spawn actually happens. Possible causes: bundled .exe missing a
+  runtime dep, SmartScreen blocking the spawned binary, port 8092
+  collision, browser-open failing silently. Investigation lives at
+  src-tauri/src/http.rs:602+ (api_open_net_diag handler).
+
+- **Hardware acceleration not used on Windows.** Today the FFmpeg
+  encoder routes through h264_videotoolbox / hevc_videotoolbox on
+  macOS (via the `use_vt` check at src-tauri/src/streamer.rs around
+  line 712), but non-Mac platforms fall through to libx264 /
+  libx265 software encoding. Multi-stream + 1080p60 software
+  encoding on a typical Windows machine will quickly saturate CPU.
+  Need to detect GPU vendor + route through nvenc (NVIDIA), qsv
+  (Intel Quick Sync), or amf (AMD). The BtbN FFmpeg builds bundled
+  in CI include all three encoders, so no new build work needed —
+  just plumbing in streamer.rs. ATEM_DISABLE_VT pattern can extend
+  to ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software.
+
+- **alpha.15-19 features all need first-pass Windows operator
+  verification.** Most of this is tested only on Mac dev builds.
+  Specifically: monitor window resize behavior, layout-toggle
+  persistence (localStorage), OMT sender discovery against real
+  OMT senders (vMix, OBS-OMT plugin), bundled libomt actually
+  loadable on Windows install, audio dropdown contrast fix lands
+  visibly. Carries forward from Session 10's "alpha.13/14 other
+  Windows tests pending" item; the test pass keeps growing as we
+  add features.
+
+- **CI cycles got expensive.** Five alphas in one session, two
+  CI failures requiring debug + re-tag. Each cycle is ~17-20 min.
+  Future direction: maybe add local-build verification to the
+  worktree dev loop so we catch CI-level failures (esp. cross-
+  platform stuff like the codesign ordering bug) before pushing.
+
+### Session 12 direction: BIDIRECTIONAL PATCHBAY (DeckLink outputs)
+
+The next major direction — user-stated 2026-05-27. Today the
+app routes a LOCAL SOURCE (NDI camera, AVF/dshow webcam, screen
+capture, SRT-listener, etc.) OUT to a NETWORK destination
+(BMD-flavored SRT to ATEM, plus OMT-out tee). Session 12 adds
+the **other direction**: route a NETWORK SOURCE (NDI sender on
+the LAN, OMT sender, incoming SRT stream) to a LOCAL DECKLINK
+OUTPUT (SDI / HDMI on a Blackmagic DeckLink card).
+
+End-state use case the user described: this machine becomes a
+"decode farm" — receives N NDI/OMT/SRT streams over the network,
+outputs each to a different DeckLink SDI output, feeding a
+hardware switcher / monitor wall / broadcast workflow. The app
+becomes a true PATCHBAY — patching between physical (DeckLink
+in/out) and network (NDI/OMT/SRT in/out) signals in both
+directions.
+
+Technical sketch:
+
+- **Device discovery**: FFmpeg `-f decklink -list_devices true -i
+  dummy` lists installed DeckLink outputs. Mirrors the existing
+  `device_scanner::scan_dshow` pattern.
+- **State**: extend `EncoderState` with a `destination_type`
+  field — "atem" (the current SRT-to-ATEM flow, default) or
+  "decklink" (new). When "decklink", add `decklink_device_name`.
+- **FFmpeg command**: `build_ffmpeg_cmd` branches on
+  destination_type. For DeckLink: `... -f decklink -i <device>`
+  output instead of the current `-f mpegts srt://...` output.
+  Pixel format negotiation: DeckLink outputs require specific
+  pixel formats (uyvy422 typical) and resolutions matching the
+  card's supported modes.
+- **Existing sources work as-is**: NDI / OMT / SRT-listen /
+  RTMP-listen / pipe (RTSP, HLS, etc.) all already produce raw
+  frames (NDI/OMT) or bytestreams (others) that FFmpeg can
+  decode. Just need to point the output at DeckLink instead of
+  SRT.
+- **Multi-instance shines**: each Tauri-instance (via
+  `--instance-name` from Session 11) can route to a different
+  DeckLink output. Operator launches 4 instances; instance A
+  takes NDI sender X → DeckLink output 1; instance B takes
+  OMT sender Y → DeckLink output 2; etc. Each instance gets
+  its own monitor window — same UX as for the encode direction.
+- **Hardware decoding**: similar story to encoding. NVIDIA
+  cuvid / Intel qsv / AMD amf hardware decoders cut CPU for
+  H.264/H.265 ingest. Wire up alongside the hardware-encoding
+  work for Session 12.
+- **FFmpeg DeckLink support**: needs `--enable-decklink` build.
+  BtbN's Windows GPL builds include this historically; verify
+  in CI. Mac's Jellyfin GPL build also includes it. Both
+  platforms need the BMD DeckLink Driver installed on the
+  end-user machine (free download from blackmagicdesign.com).
+- **UI**: destination card in the source-pickers area gets a
+  new option alongside "ATEM" — "DeckLink Output". When
+  selected, expose the DeckLink device dropdown + the output
+  mode (1080p59.94, 720p59.94, etc.) populated from the card's
+  capabilities probe.
+
+This is a substantial refactor — the streamer's mental model
+shifts from "encode local source to network" to "patch source
+to destination, where each can be local OR network". Worth a
+Plan agent pass before implementation.
+
+### Session 12 priorities (next pickup)
+
+The big new direction is **DeckLink output** — see the "Session
+12 direction: BIDIRECTIONAL PATCHBAY" section above. Plus two
+Windows-side bugs that surfaced during alpha.17/19 testing and
+need investigation before the next operator-test pass.
+
+Priority order:
+
+1. **DeckLink output integration (the headline).** See the
+   "Session 12 direction" section above for the full sketch.
+   Roughly: discover DeckLink outputs via FFmpeg, add a
+   `destination_type` field to EncoderState, branch
+   build_ffmpeg_cmd on it, surface a destination-type picker
+   in the UI. Combined with multi-instance from Session 11,
+   the use case is "N network sources → N DeckLink outputs"
+   — broadcast decode farm. Substantial refactor; worth a
+   Plan agent pass before implementation. Probably needs
+   FFmpeg `--enable-decklink` (verify BtbN's Windows builds
+   include it — historically yes).
+
+2. **Hardware acceleration for Windows encoding (and DeckLink-
+   output decoding).** Today the FFmpeg encoder uses
+   h264_videotoolbox / hevc_videotoolbox on macOS (via the
+   `use_vt` check in src-tauri/src/streamer.rs around line
+   712), but non-Mac platforms fall through to libx264 /
+   libx265 software encoding. Multi-stream + 1080p60 software
+   encoding on a typical Windows machine saturates CPU fast.
+   Need to detect GPU vendor and route through nvenc (NVIDIA),
+   qsv (Intel Quick Sync), or amf (AMD). BtbN's FFmpeg builds
+   already include all three encoders — just plumbing in
+   streamer.rs. Same investigation applies to hardware
+   DECODERS (cuvid / qsv / amf) for the DeckLink-output path
+   in priority #1. Extend ATEM_DISABLE_VT pattern to
+   ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software.
+
+3. **Net Diag button broken on Windows.** User-reported
+   2026-05-27 after alpha.19 install. alpha.17 bundled
+   atem-net-diag.exe; click on Net Diag does nothing visible.
+   First debug step: check the in-app log panel for the
+   "net-diag spawn:" log line from api_open_net_diag (http.rs
+   line ~602). If the spawn happens but no browser opens, the
+   `cmd /c start "" http://localhost:8092` step is failing
+   silently. If the spawn doesn't happen, net_diag_path() is
+   returning None — check whether atem-net-diag.exe actually
+   landed in resources\sidecar\ in the bundled installer.
+   Possible culprits: bundled .exe missing a runtime DLL
+   dependency (use `dumpbin /dependents` to check), SmartScreen
+   blocking the spawned binary on first launch, port 8092
+   collision with something else on the user's machine.
+
+4. **Pre-show checks panel in net-diag.** This is the largest
    single operator-visible win remaining. Session 7 priority
    #4 was flagged as "the largest piece — likely needs to
    break into sub-tasks, but #1 of those is the pre-show
@@ -1288,13 +1512,27 @@ below.
    and/or ATEM-direct queries that we don't have plumbing
    for yet.
 
-2. **Multi-source mode — Phase A (launcher polish).** User
-   asked for "a way to run multiple stream instances at
-   once, ie convert multiple NDI sources to multiple SRT
-   destinations" during the alpha.13 planning conversation
-   and chose a two-phase rollout. Phase A is the small,
-   fast-ship change: polish the existing `--instance-name`
-   CLI flag into a one-click experience.
+~~**Multi-source mode — Phase A (launcher polish).**~~ — DONE
+in alpha.15/16 via the `spawn_instance` Tauri command + the
+"+ New Window" topbar button. Each instance gets its own
+process, state dir, port pair.
+
+~~**Multi-source mode — Phase B (in-app 2x2 grid).**~~ —
+ATTEMPTED in alpha.15 (multiview.html iframes), ABANDONED in
+alpha.16 because iframes were too cramped for actual stream
+configuration. The replacement is the **monitor window**
+pattern: configure in the full main UI, open a small monitor
+window per instance, operator positions them on screen like a
+video-switcher multiview. Ships the multi-stream UX without
+fighting the OS window manager.
+
+(Original Session 11 priority #2 — superseded.) User
+asked for "a way to run multiple stream instances at
+once, ie convert multiple NDI sources to multiple SRT
+destinations" during the alpha.13 planning conversation
+and chose a two-phase rollout. Phase A is the small,
+fast-ship change: polish the existing `--instance-name`
+CLI flag into a one-click experience.
 
    What it is:
    - Tauri command `spawn_instance(name)` that runs
@@ -1595,6 +1833,52 @@ Key implementation gotchas:
   `-f dshow -i "audio=<DeviceName>"`. Pan filter is
   platform-agnostic so L/R channel routing for Dante
   carries over for free. Verified working in production.
+- `v0.2.0-alpha.15` (commit `4a35048`): first attempt at
+  multi-source as an in-app 2x2 grid. multiview.html shell
+  loading the existing single-source UI in 4 iframes scoped
+  via ?tile=N, app.js fetch shim rewriting /api/* →
+  /api/i/N/*, EncoderFleet abstraction with 4 tiles, tile-
+  prefixed routes /api/i/:idx/* + /api/* aliases for tile 0,
+  spawn_instance Tauri command. **Iframes too cramped to be
+  operational — reverted in alpha.16.**
+- `v0.2.0-alpha.16` (commit `0f9c3a0`): pivot from the 2x2
+  grid to a multi-instance + monitor-window pattern.
+  multiview shell deleted, fetch shim removed, root `/`
+  serves index.html again, TILE_COUNT back to 1 (fleet
+  abstraction kept as vestigial-but-harmless). New
+  bmd_emulator/static/monitor.html — small companion
+  window per instance with live preview + status pill +
+  bitrate + source/dest labels, 360x320 default with
+  Expand button. Tauri commands `open_monitor_window` +
+  `focus_main_window`. Topbar "Monitor" button (cyan, next
+  to Net Diag).
+- `v0.2.0-alpha.17` (commit `ab1ee41`): bundle
+  atem-net-diag.exe in the Windows installer's sidecar/
+  folder. New `cargo build --release` step in
+  build-windows CI for tools/atem-net-diag/, copy .exe
+  into src-tauri/sidecar/. New `net_diag_path()` resolver
+  in ffmpeg_path.rs mirrors the ffmpeg_path() pattern.
+  api_open_net_diag's Windows arm spawns the bundled
+  binary with `--ui 8092` (detached, no console). Sanity-
+  check requires atem-net-diag.exe in sidecar/ before
+  publishing. **User-reported 2026-05-27: button still
+  doesn't actually open anything visible — needs debug
+  in Session 12.**
+- `v0.2.0-alpha.18` (commit `3f060ee`): attempted to bundle
+  libomt so OMT senders appear in discovery, plus an audio-
+  dropdown contrast fix. CI **failed both platforms** —
+  Windows picked ARM64 libomt.lib alphabetically before
+  Winx64 → 30 LNK2019 errors; macOS deep-codesign signed
+  files in filesystem order so the main binary failed to
+  sign against its still-adhoc-signed Frameworks
+  subcomponents.
+- `v0.2.0-alpha.19` (commit `7f8f397`): fixed alpha.18's
+  two CI bugs. Windows: pin OMT extraction to
+  Libraries\Winx64\ explicitly with a case-insensitive
+  fallback. macOS: sign inside-out (Frameworks → Resources
+  → MacOS/main → outer .app). First Mac + Windows release
+  with bundled libomt + OMT cargo feature enabled. Audio
+  dropdown contrast fix from alpha.18 also ships here.
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -1965,45 +2249,56 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 11 priorities"** under the v0.2.0 direction
-section above for the full detail. Quick summary:
+See **"Session 12 direction"** + **"Session 12 priorities"**
+under the v0.2.0 direction section above for the full detail.
+Quick summary:
 
-1. **Pre-show checks panel in net-diag** (largest single
-   operator-visible win remaining). Full-width card under
-   the existing pre-show banner with explicit checks:
-   WAN IP, WAN headroom, UDM polling, ATEM reachable,
-   capture visibility, active streams, WAN-vs-ATEM
-   consistency. Aggregate verdict at top. Pure projection
-   over existing state — no new polling threads. Files:
-   `tools/atem-net-diag/src/{dashboard.rs,dashboard.html}`,
-   version bump to 0.2.5.
+1. **DeckLink output — the bidirectional patchbay.** This is
+   the headline Session 12 direction. Today the app routes
+   local sources OUT to network destinations; the new push is
+   the OTHER direction: route NETWORK sources (NDI / OMT /
+   SRT receive) to LOCAL DeckLink SDI/HDMI outputs. End-state
+   use case: this machine becomes a "decode farm" that
+   receives N network streams and outputs each to a different
+   DeckLink output for downstream hardware switchers / monitor
+   walls / broadcast workflows. Substantial refactor — worth
+   a Plan agent pass first.
 
-2. **Multi-source mode — Phase A (launcher polish).** Small
-   ship: a "+ New Instance" topbar button that spawns
-   another patchbay process via the existing
-   `--instance-name` CLI flag. ~100 lines + docs.
+2. **Hardware acceleration on Windows.** Today encoder routes
+   through libx264 / libx265 on non-Mac platforms; multi-
+   stream 1080p60 saturates CPU fast. Detect GPU vendor and
+   route through nvenc / qsv / amf. BtbN's FFmpeg builds
+   already include all three. Same hardware-decode story for
+   the DeckLink-output path in priority #1.
 
-3. **Multi-source mode — Phase B (in-app 2x2 grid).** The
-   architectural refactor — single Tauri window holding
-   up to 4 source→destination pipelines. New `multi.rs`,
-   route prefixing, new `multiview.html`. ~600 lines plus
-   meaningful UI work. Its own alpha.
+3. **Debug Net Diag button on Windows.** alpha.17 bundled
+   atem-net-diag.exe, alpha.19 first-pass install: button
+   doesn't actually open anything visible. Investigate the
+   api_open_net_diag handler at src-tauri/src/http.rs:602+,
+   start with the in-app log panel.
 
-4. **OMT-out audio for non-raw sources.** alpha.13's video
+4. **Pre-show checks panel in net-diag.** Carry-over from
+   Sessions 10/11. Full-width card with explicit checks
+   (WAN IP, WAN headroom, UDM polling, ATEM reachable,
+   capture visibility, etc.). Pure projection over existing
+   state — no new polling threads. Files:
+   `tools/atem-net-diag/src/{dashboard.rs,dashboard.html}`.
+
+5. **OMT-out audio for non-raw sources.** alpha.13's video
    tee is video-only. Needs cross-platform pipe-FD plumbing
    (pipe:3 on UNIX, named pipes on Windows) OR a dual-
-   FFmpeg-process fallback. Worth a Plan agent pass first.
+   FFmpeg-process fallback.
 
-5. **Pipe / relay custom audio extension.** Apply the same
+6. **Pipe / relay custom audio extension.** Apply the
    alpha.14 Windows dshow / macOS AVF audio-injection
    pattern to pipe / RTSP / SRT-listen / RTMP-listen video
-   sources. ~30 lines per source × platform.
+   sources.
 
-6. **Carry-overs**: real-Windows full test pass (alpha.13/14
-   features beyond Dante), unified client-list dashboard,
-   stream-protocol-tag fallback, interface picker UX,
-   net-diag auto mode, libomt bundling in CI, net-diag W+L
-   builds. See Session 11 priorities #7 for the full list.
+7. **Carry-overs**: alpha.15-19 features need first-pass
+   Windows verification (monitor window, OMT discovery,
+   audio dropdown contrast, etc.), unified client-list
+   dashboard, stream-protocol-tag fallback, interface picker
+   UX, net-diag auto mode, net-diag W+L builds.
 
 ## v0.2.0 candidate features
 
