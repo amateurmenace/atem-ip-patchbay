@@ -1280,11 +1280,22 @@
         <p style="margin:0 0 12px;">Paste your UDM API key below. Create one
         in the UDM web UI under <strong>Settings → Control Plane → Integrations
         → Create API Key</strong>.</p>
-        <form id="udm-key-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <input type="password" id="udm-key-input" placeholder="UDM API key"
+        <form id="udm-key-form" autocomplete="off"
+              style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"
+              onsubmit="return false;">
+          <!-- type="text" + the random `data-1p-ignore` / `data-lpignore` /
+               `data-bwignore` markers + autocomplete="off" stack up to
+               keep password-manager extensions (1Password, LastPass,
+               Bitwarden, Chrome's built-in saver) from intercepting the
+               submit. The API key is a 60-char token, not really a
+               password, so type=text + a small show-mask trick is
+               operator-friendly. -->
+          <input type="text" id="udm-key-input" placeholder="UDM API key"
                  autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:240px;padding:6px 10px;background:#0e0f12;color:#e6e6ea;border:1px solid #2a2d35;border-radius:4px;font-family:monospace;font-size:13px;">
-          <button type="submit" id="udm-key-save"
+                 name="udm-key-not-a-password"
+                 data-1p-ignore="true" data-lpignore="true" data-bwignore="true"
+                 style="flex:1;min-width:240px;padding:6px 10px;background:#0e0f12;color:#e6e6ea;border:1px solid #2a2d35;border-radius:4px;font-family:monospace;font-size:13px;-webkit-text-security:disc;text-security:disc;">
+          <button type="button" id="udm-key-save"
                   style="padding:6px 14px;background:#3a7ac4;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;">Save</button>
           <span id="udm-key-feedback" style="font-size:12px;color:var(--muted);"></span>
         </form>
@@ -1539,11 +1550,16 @@
     function wireUdmKeyForm() {
       const form = $('#udm-key-form');
       const input = $('#udm-key-input');
+      const button = $('#udm-key-save');
       const fb = $('#udm-key-feedback');
       const updateLink = $('#udm-update-link');
-      if (!form || !input) return;
-      form.addEventListener('submit', async (ev) => {
-        ev.preventDefault();
+      if (!form || !input || !button) {
+        console.warn('udm form not found in DOM at wire-up time');
+        return;
+      }
+
+      const submit = async () => {
+        if (!fb) return;
         const key = input.value.trim();
         fb.style.color = 'var(--muted)';
         fb.textContent = 'Saving…';
@@ -1561,13 +1577,37 @@
             document.body.dataset.udmOpen = '';
           } else {
             fb.style.color = '#e85a5a';
-            fb.textContent = data.error || 'Save failed';
+            fb.textContent = (data && data.error) || `Save failed (HTTP ${resp.status})`;
           }
         } catch (e) {
           fb.style.color = '#e85a5a';
-          fb.textContent = 'Network error: ' + e.message;
+          fb.textContent = 'Network error: ' + (e && e.message ? e.message : String(e));
+        }
+      };
+
+      // Belt-and-suspenders wiring: the button is type=button (NOT
+      // type=submit) so password-manager extensions don't intercept
+      // form submission. We attach the handler to both the button's
+      // click and the form's submit (which would only fire on Enter
+      // in the input field). preventDefault on both so neither path
+      // triggers a page navigation.
+      button.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        submit();
+      });
+      form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        submit();
+      });
+      // Enter key in the input also triggers submit (the form submit
+      // listener handles it on its own; just here for clarity).
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          submit();
         }
       });
+
       if (updateLink) {
         updateLink.addEventListener('click', (ev) => {
           ev.preventDefault();
