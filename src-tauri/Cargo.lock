@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "atem-ip-patchbay"
-version = "0.2.0-alpha.33"
+version = "0.2.0-alpha.34"
 dependencies = [
  "anyhow",
  "axum",

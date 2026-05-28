@@ -110,23 +110,51 @@ jobs:
           ls -lh /usr/local/lib/libndi*
           otool -D /usr/local/lib/libndi.dylib
 
-      - name: Download FFmpeg sidecar (Jellyfin GPL build, arm64)
+      - name: Download FFmpeg+DeckLink sidecar (our build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Bundle FFmpeg into the .app so end users without Homebrew
-          # can stream on first launch. Jellyfin's portable arm64 GPL
-          # build is the same one v0.1.0 shipped — libsrt + HEVC +
-          # VideoToolbox encoders all included, no shared libraries
-          # to wrangle. Pinned version so the CI cache stays valid
-          # across runs and the bundled binary is reproducible.
-          JELLYFIN_VERSION="7.1.3-5"
-          URL="https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JELLYFIN_VERSION}/jellyfin-ffmpeg_${JELLYFIN_VERSION}_portable_macarm64-gpl.tar.xz"
-          curl -fSL -o /tmp/ffmpeg.tar.xz "$URL"
-          mkdir -p /tmp/ffmpeg-extract src-tauri/sidecar
-          tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract
-          cp /tmp/ffmpeg-extract/ffmpeg src-tauri/sidecar/ffmpeg
+          set -e
+          # alpha.34: switched from jellyfin-ffmpeg to our own
+          # FFmpeg+DeckLink build (see ci/ffmpeg-pins.env +
+          # .github/workflows/build-ffmpeg.yml). Both shipped with
+          # --enable-decklink so alpha.21's DeckLink output direction
+          # actually works on end-user installs without operators
+          # having to point ATEM_PATCHBAY_FFMPEG at a custom build.
+          #
+          # Same flag set as jellyfin's Mac build otherwise: libsrt,
+          # libx264, libx265, videotoolbox. Pinned via ci/ffmpeg-
+          # pins.env so the CI cache + downstream version expectations
+          # stay deterministic.
+          set -a
+          source ci/ffmpeg-pins.env
+          set +a
+          FFMPEG_VERSION_TRIM="${FFMPEG_VERSION#n}"
+          RELEASE_TAG="ffmpeg-decklink-${FFMPEG_VERSION_TRIM}-bmd${BMD_SDK_VERSION}-rev${BUILD_REVISION}"
+          ARTIFACT="ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz"
+          echo "Downloading $ARTIFACT from sidecar release $RELEASE_TAG"
+          gh release download "$RELEASE_TAG" --pattern "$ARTIFACT" --dir /tmp
+          mkdir -p src-tauri/sidecar
+          tar -xzf "/tmp/$ARTIFACT" -C /tmp
+          cp /tmp/ffmpeg src-tauri/sidecar/ffmpeg
           chmod +x src-tauri/sidecar/ffmpeg
           ls -lh src-tauri/sidecar/
           src-tauri/sidecar/ffmpeg -version | head -3
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
+          MUXERS=$(src-tauri/sidecar/ffmpeg -hide_banner -muxers 2>/dev/null)
+          ENCODERS=$(src-tauri/sidecar/ffmpeg -hide_banner -encoders 2>/dev/null)
+          PROTOCOLS=$(src-tauri/sidecar/ffmpeg -hide_banner -protocols 2>/dev/null)
+          for need in decklink mpegts flv; do
+            echo "$MUXERS" | grep -qE "\\s${need}\\s" || { echo "::error::muxer '${need}' missing"; exit 1; }
+          done
+          for need in libx264 h264_videotoolbox; do
+            echo "$ENCODERS" | grep -qE "${need}" || { echo "::error::encoder '${need}' missing"; exit 1; }
+          done
+          echo "$PROTOCOLS" | grep -qE '^\s*srt\s*$' || { echo "::error::protocol 'srt' missing"; exit 1; }
+          echo "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
 
       - name: Download + stage libomt for OMT support (Mac arm64)
         run: |
@@ -597,60 +625,75 @@ jobs:
           "NDI_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Exported NDI_SDK_DIR=$sdkRoot"
 
-      - name: Download FFmpeg sidecar (gyan.dev full build, x64)
+      - name: Download FFmpeg+DeckLink sidecar (our build)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Bundle FFmpeg into the NSIS installer so end users
-          # without their own FFmpeg can stream on first launch.
+          # alpha.34: switched from gyan.dev to our own FFmpeg+
+          # DeckLink build. See ci/ffmpeg-pins.env + .github/
+          # workflows/build-ffmpeg.yml for the pipeline. The
+          # bundled FFmpeg now ships --enable-decklink so alpha.21's
+          # DeckLink output direction works out of the box on end-
+          # user Windows installs — no more ATEM_PATCHBAY_FFMPEG
+          # workaround.
           #
-          # alpha.22 switched the Windows FFmpeg distribution from
-          # BtbN's GPL build to gyan.dev's "full_build" variant.
-          # Both are GPL static-linked Windows binaries with the
-          # same encoder + libsrt set, but only gyan.dev ships
-          # FFmpeg with `--enable-decklink`. BtbN dropped DeckLink
-          # support some time before n7.x because the Blackmagic
-          # DeckLink SDK can't be redistributed alongside their
-          # prebuilt artifacts. gyan.dev keeps the muxer plumbed
-          # in via dynamic linking against the user-installed
-          # Blackmagic Desktop Video driver at runtime — same
-          # mechanism we already rely on for grafton-ndi (NDI SDK
-          # on the user's machine) and libomt.
-          #
-          # The cost is a heavier download (~240 MB full vs ~80 MB
-          # BtbN-essentials), but the artifact we actually ship is
-          # just ffmpeg.exe — Tauri's bundle.resources picks one
-          # file out of the extracted tree, so the runtime install
-          # size is unchanged.
-          #
-          # Pinned to 8.1.1 (matches the BtbN n8.1 build we
-          # shipped through alpha.21). gyan.dev publishes a fresh
-          # GitHub release per upstream FFmpeg version + nightly
-          # snapshots; the semver tags are stable artifacts.
-          $version = "8.1.1"
-          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$version/ffmpeg-$version-full_build.zip"
-          $out = "$env:RUNNER_TEMP\ffmpeg.zip"
-          Invoke-WebRequest -Uri $url -OutFile $out
-          Expand-Archive -Path $out -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract"
-          $ffmpeg = Get-ChildItem -Path "$env:RUNNER_TEMP\ffmpeg-extract" -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          # Same feature set as gyan.dev's full_build otherwise:
+          # libsrt, libx264, libx265, NVENC (NVIDIA hardware
+          # encode), d3d11va/dxva2/mediafoundation decoders.
+
+          # Read pins.
+          $pins = @{}
+          Get-Content ci/ffmpeg-pins.env | Where-Object { $_ -match '^\s*[A-Z_]+=' } | ForEach-Object {
+            $parts = $_ -split '=', 2
+            $pins[$parts[0].Trim()] = $parts[1].Trim()
+          }
+          $version = $pins['FFMPEG_VERSION']
+          $versionTrim = $version -replace '^n', ''
+          $sdkVer = $pins['BMD_SDK_VERSION']
+          $rev = $pins['BUILD_REVISION']
+          $releaseTag = "ffmpeg-decklink-$versionTrim-bmd$sdkVer-rev$rev"
+          $artifact = "ffmpeg-$version-windows-x64.zip"
+          Write-Host "Downloading $artifact from sidecar release $releaseTag"
+          gh release download $releaseTag --pattern $artifact --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Failed to download FFmpeg sidecar artifact"
+            exit 1
+          }
           New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
-          Copy-Item $ffmpeg.FullName -Destination "src-tauri\sidecar\ffmpeg.exe"
+          Expand-Archive -Path "$env:RUNNER_TEMP\$artifact" -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract" -Force
+          # The sidecar zip contains ffmpeg.exe + MinGW runtime
+          # DLLs (libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-
+          # 1.dll). All need to land next to ffmpeg.exe so the
+          # Windows loader finds them at process startup.
+          Copy-Item "$env:RUNNER_TEMP\ffmpeg-extract\*" -Destination "src-tauri\sidecar\" -Force
           Get-ChildItem src-tauri\sidecar
           & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
-          # Note the decklink-muxer status in the build log. As of
-          # alpha.22 NEITHER BtbN nor gyan.dev's prebuilt Windows
-          # FFmpegs ship `--enable-decklink` (Blackmagic SDK can't
-          # be redistributed alongside the binaries). End users
-          # who want DeckLink output set `ATEM_PATCHBAY_FFMPEG=...`
-          # pointing at their own decklink-enabled FFmpeg.
-          # Building our own with the DeckLink SDK is queued for a
-          # later alpha. Until then this is informational only —
-          # don't fail the build on a missing decklink muxer.
+
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
           $muxers = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -muxers
-          if ($muxers | Select-String -Pattern "decklink" -SimpleMatch -Quiet) {
-            Write-Host "Bundled FFmpeg includes decklink muxer (out-of-the-box DeckLink output)."
-          } else {
-            Write-Host "Bundled FFmpeg lacks decklink muxer (expected for prebuilt distros). Users with DeckLink hardware set ATEM_PATCHBAY_FFMPEG to a decklink-enabled FFmpeg."
+          $encoders = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -encoders
+          $protocols = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -protocols
+          foreach ($need in @('decklink', 'mpegts', 'flv')) {
+            if (-not ($muxers | Select-String -Pattern "\s$need\s" -Quiet)) {
+              Write-Host "::error::muxer '$need' missing"
+              exit 1
+            }
           }
+          foreach ($need in @('libx264', 'h264_nvenc')) {
+            if (-not ($encoders | Select-String -Pattern $need -Quiet)) {
+              Write-Host "::error::encoder '$need' missing"
+              exit 1
+            }
+          }
+          if (-not ($protocols | Select-String -Pattern '^\s*srt\s*$' -Quiet)) {
+            Write-Host "::error::protocol 'srt' missing"
+            exit 1
+          }
+          Write-Host "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
 
       - name: Download + stage libomt for OMT support (Windows x64)
         shell: pwsh
