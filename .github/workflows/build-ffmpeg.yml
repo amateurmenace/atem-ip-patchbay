@@ -525,13 +525,14 @@ jobs:
             $expectedH = $idl.BaseName + '.h'
             if (-not (Test-Path $expectedH)) {
               Write-Host "  stub: $expectedH (-> DeckLinkAPI.h)"
-              @"
-/* alpha.31 CI stub: BMD Windows SDK 16 ships only $($idl.Name); the
- * generated content lives in DeckLinkAPI.h (MIDL inlined it). This
- * stub satisfies FFmpeg's per-version-header includes. */
-#pragma once
-#include "DeckLinkAPI.h"
-"@ | Set-Content -Path $expectedH -Encoding UTF8
+              # Build the stub as an array of lines + Set-Content
+              # (avoids YAML+PowerShell here-string indentation pitfalls).
+              $stub = @(
+                "/* alpha.31 CI stub: BMD Win SDK 16 ships only " + $idl.Name + ". */",
+                "#pragma once",
+                '#include "DeckLinkAPI.h"'
+              )
+              Set-Content -Path $expectedH -Value $stub -Encoding UTF8
             }
           }
           Get-ChildItem -Filter '*.h' | Format-Table Name, Length
