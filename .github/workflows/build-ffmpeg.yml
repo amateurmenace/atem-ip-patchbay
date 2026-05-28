@@ -440,20 +440,31 @@ jobs:
           }
           Write-Host "Using MIDL: $($midl.FullName)"
 
-          # Find the matching SDK Include directory (shared + um are
-          # what MIDL needs for unknwn.idl, wtypes.idl, etc.).
+          # Find the matching SDK Include directory. unknwn.idl can
+          # live under shared/, um/, or winrt/ depending on the SDK
+          # version. Walk all version directories and grab the first
+          # that has it in any subdir.
           $sdkVersion = ($midl.FullName -split '\\bin\\')[1].Split('\')[0]
-          $sdkIncRoot = "C:\Program Files (x86)\Windows Kits\10\Include\$sdkVersion"
-          if (-not (Test-Path "$sdkIncRoot\shared\unknwn.idl")) {
-            Write-Host "::warning::unknwn.idl not at expected SDK path — trying any available version"
-            $sdkIncRoot = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory `
-              | Where-Object { Test-Path "$($_.FullName)\shared\unknwn.idl" } `
-              | Sort-Object Name -Descending `
-              | Select-Object -First 1 -ExpandProperty FullName
-            if (-not $sdkIncRoot) {
-              Write-Host "::error::Could not locate Windows SDK shared\unknwn.idl"
-              exit 1
+          $sdkIncBase = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          Write-Host "Available SDK Include versions:"
+          Get-ChildItem $sdkIncBase -Directory -ErrorAction SilentlyContinue | Format-Table Name
+          $sdkIncRoot = $null
+          foreach ($candidate in @($sdkVersion) + (Get-ChildItem $sdkIncBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { $_.Name })) {
+            $candPath = Join-Path $sdkIncBase $candidate
+            if (-not (Test-Path $candPath)) { continue }
+            $found = Get-ChildItem -Path $candPath -Filter 'unknwn.idl' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              $sdkIncRoot = $candPath
+              Write-Host "Found unknwn.idl at: $($found.FullName)"
+              break
             }
+          }
+          if (-not $sdkIncRoot) {
+            Write-Host "::warning::unknwn.idl not found in any SDK version Include dir — MIDL may still succeed via its built-in path resolution"
+            # Fall back to the version matching MIDL.exe; MIDL itself
+            # often knows where to find its own standard headers
+            # without an explicit /I.
+            $sdkIncRoot = Join-Path $sdkIncBase $sdkVersion
           }
           Write-Host "Using SDK Include: $sdkIncRoot"
 
