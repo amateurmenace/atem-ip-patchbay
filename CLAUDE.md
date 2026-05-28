@@ -1296,15 +1296,12 @@ Both platforms now ship with:
 
 ### Open issues from Session 11
 
-- **Net Diag button doesn't actually work on Windows.** User-
-  reported in alpha.19 (the user's first install after the bundling
-  work). alpha.17 bundled atem-net-diag.exe, alpha.19 was supposed
-  to make everything work end-to-end. Click does... nothing
-  visible. Need to debug from the in-app log panel + verify the
-  spawn actually happens. Possible causes: bundled .exe missing a
-  runtime dep, SmartScreen blocking the spawned binary, port 8092
-  collision, browser-open failing silently. Investigation lives at
-  src-tauri/src/http.rs:602+ (api_open_net_diag handler).
+- ~~**Net Diag button doesn't actually work on Windows.**~~ FIXED in
+  alpha.20 (Session 12 wins, below). Root cause was `cmd /c start ""
+  URL` under CREATE_NO_WINDOW silently failing — replaced with
+  `rundll32 url.dll,FileProtocolHandler` which hits ShellExecuteW
+  directly. The bundled .exe was fine; only the browser-open step
+  was broken.
 
 - **Hardware acceleration not used on Windows.** Today the FFmpeg
   encoder routes through h264_videotoolbox / hevc_videotoolbox on
@@ -1316,7 +1313,8 @@ Both platforms now ship with:
   (Intel Quick Sync), or amf (AMD). The BtbN FFmpeg builds bundled
   in CI include all three encoders, so no new build work needed —
   just plumbing in streamer.rs. ATEM_DISABLE_VT pattern can extend
-  to ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software.
+  to ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software. **Deferred to
+  alpha.22** — see Session 12 wins below.
 
 - **alpha.15-19 features all need first-pass Windows operator
   verification.** Most of this is tested only on Mac dev builds.
@@ -1406,17 +1404,12 @@ need investigation before the next operator-test pass.
 
 Priority order:
 
-1. **DeckLink output integration (the headline).** See the
-   "Session 12 direction" section above for the full sketch.
-   Roughly: discover DeckLink outputs via FFmpeg, add a
-   `destination_type` field to EncoderState, branch
-   build_ffmpeg_cmd on it, surface a destination-type picker
-   in the UI. Combined with multi-instance from Session 11,
-   the use case is "N network sources → N DeckLink outputs"
-   — broadcast decode farm. Substantial refactor; worth a
-   Plan agent pass before implementation. Probably needs
-   FFmpeg `--enable-decklink` (verify BtbN's Windows builds
-   include it — historically yes).
+1. ~~**DeckLink output integration (the headline).**~~ SHIPPED
+   in alpha.21. See "Session 12 wins" below for the full
+   writeup of what landed, the architectural decisions the
+   user confirmed before implementation, and the implementation
+   surface (probe + discovery + state + FFmpeg branching + UI +
+   monitor label).
 
 2. **Hardware acceleration for Windows encoding (and DeckLink-
    output decoding).** Today the FFmpeg encoder uses
@@ -1431,22 +1424,16 @@ Priority order:
    streamer.rs. Same investigation applies to hardware
    DECODERS (cuvid / qsv / amf) for the DeckLink-output path
    in priority #1. Extend ATEM_DISABLE_VT pattern to
-   ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software.
+   ATEM_HW_ENCODER=auto|nvenc|qsv|amf|software. **Now the
+   top alpha.22 candidate** — user re-confirmed during Session
+   12 they want this bundled across both paths.
 
-3. **Net Diag button broken on Windows.** User-reported
-   2026-05-27 after alpha.19 install. alpha.17 bundled
-   atem-net-diag.exe; click on Net Diag does nothing visible.
-   First debug step: check the in-app log panel for the
-   "net-diag spawn:" log line from api_open_net_diag (http.rs
-   line ~602). If the spawn happens but no browser opens, the
-   `cmd /c start "" http://localhost:8092` step is failing
-   silently. If the spawn doesn't happen, net_diag_path() is
-   returning None — check whether atem-net-diag.exe actually
-   landed in resources\sidecar\ in the bundled installer.
-   Possible culprits: bundled .exe missing a runtime DLL
-   dependency (use `dumpbin /dependents` to check), SmartScreen
-   blocking the spawned binary on first launch, port 8092
-   collision with something else on the user's machine.
+3. ~~**Net Diag button broken on Windows.**~~ FIXED in
+   alpha.20. Root cause: `cmd /c start "" URL` under
+   CREATE_NO_WINDOW silently fails to open the browser even
+   though it returns exit 0. Replaced with `rundll32
+   url.dll,FileProtocolHandler URL`. See Session 12 wins
+   below for the diagnosis and verification details.
 
 4. **Pre-show checks panel in net-diag.** This is the largest
    single operator-visible win remaining. Session 7 priority
@@ -1695,6 +1682,222 @@ CLI flag into a one-click experience.
      only. Audio for non-raw sources is Session 11
      priority #4.
 
+### Session 12 wins (alpha.20 + alpha.21, 2026-05-28)
+
+Both Session 12 priorities the user picked up cold (warm-up =
+Net Diag debug, headline = DeckLink output integration) shipped
+in a single session as two sequential alphas. CI green on both
+platforms first try for both. Hardware-accel work that the user
+re-confirmed for the DeckLink PR was descoped during
+implementation and bumped to alpha.22 (see below).
+
+**alpha.20 (commit `f96a8b6`) — Net Diag button fix on Windows.**
+User-reported in alpha.19: clicking the Net Diag topbar button
+does nothing visible despite alpha.17's `atem-net-diag.exe`
+bundling work. Root cause turned out NOT to be the bundled
+binary (it spawns correctly, binds 8092, serves the dashboard).
+The follow-up step that opens the user's default browser via
+`cmd /c start "" URL` exits 0 BUT silently fails to launch
+Chrome — cmd.exe's `start` builtin needs an attached console
+to allocate ShellExecute correctly, and alpha.13's
+hide_console_std (CREATE_NO_WINDOW) flag suppresses that
+console. Replaced with `rundll32 url.dll,FileProtocolHandler
+URL` which hits ShellExecuteW directly without needing a
+console. Verified empirically on the Broadcast Pix test rig
+before the fix landed: ProcessStartInfo with CreateNoWindow=true
+running `cmd /c start "" URL` returns exit 0 with empty stderr
+but no Chrome tab; same command with `rundll32 url.dll` opens
+the tab cleanly. 4-line behavior change + matching error
+strings + commit-message-only explanation of the alternatives
+considered (drop CREATE_NO_WINDOW, pull in opener crate, call
+ShellExecuteW via windows-rs).
+
+**alpha.21 (commit `a1cd804`) — bidirectional patchbay
+(DeckLink output destinations).** Session 12's headline. The
+app now supports a new destination type alongside ATEM/SRT:
+LOCAL Blackmagic DeckLink SDI/HDMI outputs. Combined with
+Session 11's multi-instance + monitor windows, the operator
+gets a "broadcast decode farm" workflow — N network sources
+in (NDI/OMT/SRT-listen/RTMP-listen/pipe), N DeckLink outputs
+out, feeding a hardware switcher or monitor wall.
+
+Architecture choices the user confirmed before implementation:
+- **Data model: tagged Rust enum, flat JSON wire** (Plan
+  agent's recommendation). Inner state has a flat
+  `destination_type: String` discriminator + four
+  `decklink_*` sibling fields when DeckLink is active. A
+  `Snapshot::is_decklink()` helper hides the string
+  comparison at consumer sites. Wire-side flat layout means
+  every existing JS `snap.field` accessor in app.js keeps
+  working untouched — no UI churn for the dozens of
+  ATEM-side fields that vastly outnumber the new
+  DeckLink ones.
+- **UI: segmented control inline in existing destination
+  card.** `[ATEM (Network · SRT)] [DeckLink (Local ·
+  SDI/HDMI)]` toggle at the top, body swaps below. Same
+  card. The dest-aux label in the card title flips from
+  "SRT → host:port" to "DECKLINK → device · mode" when
+  DeckLink is active. Monitor window's describeDest mirrors
+  this.
+- **HW accel: deferred** despite the user's initial
+  request to bundle. During implementation the DeckLink
+  surface itself grew to ~970 LOC across nine files; adding
+  hardware encoder/decoder routing on top would have doubled
+  the change surface for one PR. Decision: alpha.21 ships
+  DeckLink with software paths; alpha.22 layers HW accel
+  across both directions with shared `select_encoder()` /
+  `select_decoder()` helpers keyed off ATEM_HW_ENCODER /
+  ATEM_HW_DECODER env vars.
+
+Implementation surface (alpha.21):
+
+1. **FFmpeg DeckLink support probe at boot.**
+   `ffmpeg_path.rs::ffmpeg_has_decklink()` — runs
+   `ffmpeg -hide_banner -muxers` once, greps for
+   "decklink", caches in OnceLock<bool>. Called eagerly
+   from Tauri setup() so the answer is ready before the
+   first /api/state request. Exposed as
+   `ffmpeg_decklink_available: bool` on the state envelope;
+   the UI uses it to disable the DeckLink radio with a
+   "reinstall" hint when the build lacks `--enable-decklink`.
+
+2. **DeckLink device + mode discovery in device_scanner.rs.**
+   Two new functions following the existing
+   `list_capture_devices` cache pattern:
+   - `list_decklink_outputs(force)` — `ffmpeg -f decklink
+     -list_devices true -i dummy`, parses single-quoted
+     device names from stderr, 60s TTL cache. Card
+     add/remove via force-refresh also clears the
+     per-device mode cache.
+   - `probe_decklink_modes(device_name)` —
+     `ffmpeg -f decklink -list_formats 1 -i {name}`,
+     parses the per-card format table into
+     `DecklinkMode { format_code, description, width,
+     height, fps_num, fps_den, interlaced }`. Lazy per-
+     device cache (HashMap<String, Vec<DecklinkMode>>).
+   - Three unit tests cover the regex parsers against
+     synthetic FFmpeg output.
+
+3. **`/api/decklink-outputs` HTTP endpoint.** Returns
+   devices-with-modes shape. `?force=1` bypasses cache.
+   The state envelope gets `ffmpeg_decklink_available` in
+   the same commit so both signals reach the UI in one
+   request.
+
+4. **State model (state.rs):** added
+   `destination_type: String` (default "atem"),
+   `decklink_device_name: String`,
+   `decklink_output_mode: String` (human label like
+   "1080p59.94"), `decklink_format_code: String` (FFmpeg's
+   per-card mode identifier like "Hp59"),
+   `decklink_pixel_format: String` (default "uyvy422").
+   Wired through `apply_settings` with validation against
+   the known destination-type set ("atem" | "decklink") +
+   Snapshot serialization. `SettingsPayload` in http.rs got
+   matching Option fields with a one-line addition to the
+   From<SettingsPayload> impl.
+
+5. **build_plan branching (streamer.rs).** Early-return at
+   the top of `build_plan` when `snap.is_decklink()` — the
+   ATEM/SRT validation set (active_config, current_url,
+   stream_key) doesn't apply. New `build_plan_decklink`
+   validates instead that FFmpeg has DeckLink support, a
+   device is picked, and the picked output mode is still
+   supported by the card (re-probes via
+   `probe_decklink_modes` to handle hot-swap). Uses the
+   DeckLink mode's width/height/fps as the plan dimensions
+   (rather than the user's video_mode dropdown, which now
+   represents SOURCE-side expected geometry). Sets
+   `protocol = "decklink"` and populates the new StreamPlan
+   fields (decklink_device_name, decklink_format_code,
+   decklink_pixel_format).
+
+6. **build_ffmpeg_cmd branching (streamer.rs).** Early
+   delegation to new `build_decklink_output_cmd` when
+   `plan.protocol == "decklink"`. The DeckLink cmd builder
+   shares input/map/filter handling with the ATEM path
+   (identical for the first half of the command); the tail
+   diverges entirely — no H.264/H.265 encoder, no AAC, no
+   MPEG-TS/FLV container. Instead: `-c:v rawvideo -pix_fmt
+   uyvy422 -c:a pcm_s16le -ar 48000 -ac {1|2} -f decklink
+   -format_code {code} {device}`. The for_ndi / for_omt
+   source builders feed their adjusted plans through
+   build_ffmpeg_cmd, so the branch dispatches uniformly
+   across every source type. Source-specific scale filters
+   (NDI's scale=W:H:flags=lanczos when source dims differ
+   from plan dims) compose cleanly — FFmpeg's pipeline
+   auto-inserts uyvy422 conversion via the output-side
+   `-pix_fmt` when the upstream filter omits the format
+   step.
+
+7. **UI (index.html + app.js + style.css).** Destination
+   card grows a segmented control at the top — `[ATEM
+   (Network · SRT)] [DeckLink (Local · SDI/HDMI)]` matching
+   the existing `.seg-control` pattern used for protocol /
+   codec / quality. New `.dest-decklink-body` block with
+   device dropdown, mode dropdown, pixel-format note,
+   driver-install link, refresh button. New
+   `renderDecklinkDestination(snap)` toggles bodies, gates
+   on `ffmpeg_decklink_available`, populates dropdowns from
+   `knownDecklinkDevices`, and overwrites the destAux label
+   when active. Three new device-status messages — distinct
+   for build-support-absent vs. driver-absent vs. devices-
+   available. Boot-time `fetchDecklinkDevices(false)` so the
+   dropdown is pre-populated when the operator first
+   switches modes. New mode labels rendered as "1080p59.94
+   (Hp59)" by `humanizeDecklinkMode`.
+
+8. **Monitor window destination label (monitor.js).**
+   `describeDest` branches on `destination_type` —
+   "{device} · {mode}" for DeckLink, existing
+   shortenUrl-for-current_url shape for ATEM. Lets a
+   screen full of monitor windows pointing at different
+   DeckLink outputs stay distinguishable in the OS task
+   switcher.
+
+What this commit does NOT touch (carry-overs):
+- Hardware accel routing (encode + decode) — alpha.22.
+- Pre-show checks panel — Session 12 priority #4, still open.
+- OMT-out audio for non-raw sources — Session 12 priority #5.
+- Pipe / relay custom audio extension — Session 12 priority #6.
+- README "DeckLink output" section — separate doc commit; the
+  app's in-UI hints cover the basics for now (download driver
+  from blackmagicdesign.com, etc.).
+
+### Open issues from Session 12
+
+- **alpha.21 DeckLink path not yet operator-tested with real
+  hardware.** Code compiled clean on Mac + Windows CI but
+  the actual flow (pick DeckLink card → pick output mode →
+  start NDI source → see signal on the SDI output) hasn't
+  been exercised on the Broadcast Pix test rig (the user
+  has DeckLink hardware available). First operator test
+  may surface mode-string format edge cases, scale-filter
+  interactions for source/target geometry mismatches, or
+  driver-error surfacing the UI hints don't yet handle
+  gracefully. Likely fast iteration in alpha.22 / alpha.23.
+
+- **HW accel deferred to alpha.22.** User requested both
+  directions (SRT-to-ATEM encode + DeckLink-out decode).
+  Plumbing in streamer.rs needs platform + GPU detection
+  + an ATEM_HW_ENCODER / ATEM_HW_DECODER env-var surface.
+  Will share a small `select_encoder` / `select_decoder`
+  helper module across both paths. BtbN's Windows FFmpeg
+  builds already include nvenc/qsv/amf so no build-side
+  work needed.
+
+- **No local cargo check possible on Broadcast Pix
+  Windows.** LLVM's libclang.dll isn't installed (the LLVM
+  Windows installer needs admin elevation that the user
+  account here can't provide; chocolatey-managed installs
+  to ProgramData are also blocked). So Rust-side changes
+  on this machine ship without a compile-time gate — CI
+  is the first compile check. Net Diag fix (4 lines) was
+  trivial; DeckLink work (970 LOC across 13 files) compiled
+  clean first try anyway. Future sessions on this box can
+  either install LLVM via admin elevation OR continue the
+  "push-and-let-CI-verify" pattern.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
@@ -1879,6 +2082,35 @@ Key implementation gotchas:
   → MacOS/main → outer .app). First Mac + Windows release
   with bundled libomt + OMT cargo feature enabled. Audio
   dropdown contrast fix from alpha.18 also ships here.
+- `v0.2.0-alpha.20` (commit `f96a8b6`): Net Diag button
+  fix on Windows. `cmd /c start "" URL` under
+  CREATE_NO_WINDOW returns exit 0 but silently fails to
+  launch the browser — cmd.exe's `start` builtin needs an
+  attached console to allocate ShellExecute. Replaced with
+  `rundll32 url.dll,FileProtocolHandler URL` which hits
+  ShellExecuteW directly. Verified empirically on the
+  Broadcast Pix test rig: ProcessStartInfo with
+  CreateNoWindow=true running `cmd /c start "" URL` returns
+  0 with empty stderr but no browser tab opens; same with
+  rundll32 opens the tab. 4-line change; only Windows arm
+  of api_open_net_diag. See Session 12 wins above.
+- `v0.2.0-alpha.21` (commit `a1cd804`): Session 12
+  headline — bidirectional patchbay (DeckLink output
+  destinations). Route NETWORK sources (NDI / OMT /
+  SRT-listen / RTMP-listen / pipe) to LOCAL Blackmagic
+  DeckLink SDI/HDMI outputs alongside the existing
+  LOCAL-source → NETWORK-ATEM path. ~970 LOC across 13
+  files. New `ffmpeg_has_decklink()` probe at boot, new
+  `/api/decklink-outputs` device+modes endpoint, new
+  destination-type segmented control inline in the
+  destination card, new DeckLink picker UI (device +
+  mode + pixel-format hint + driver-install link +
+  refresh), new `build_plan_decklink` +
+  `build_decklink_output_cmd` raw-output FFmpeg branch.
+  Monitor window destination label flips to "{device} ·
+  {mode}" when DeckLink is active. Hardware accel
+  deferred to alpha.22. CI green Mac + Windows first
+  try.
 
 ### v0.2.0 UI / UX scope (queued)
 
