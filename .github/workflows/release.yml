@@ -597,15 +597,37 @@ jobs:
           "NDI_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Exported NDI_SDK_DIR=$sdkRoot"
 
-      - name: Download FFmpeg sidecar (BtbN GPL build, x64)
+      - name: Download FFmpeg sidecar (gyan.dev full build, x64)
         shell: pwsh
         run: |
           # Bundle FFmpeg into the NSIS installer so end users
           # without their own FFmpeg can stream on first launch.
-          # BtbN's static GPL build pins libsrt + HEVC + nvenc
-          # without DLL dependencies, same shape v0.1.0 shipped.
-          $version = "n8.1"
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-$version-latest-win64-gpl-8.1.zip"
+          #
+          # alpha.22 switched the Windows FFmpeg distribution from
+          # BtbN's GPL build to gyan.dev's "full_build" variant.
+          # Both are GPL static-linked Windows binaries with the
+          # same encoder + libsrt set, but only gyan.dev ships
+          # FFmpeg with `--enable-decklink`. BtbN dropped DeckLink
+          # support some time before n7.x because the Blackmagic
+          # DeckLink SDK can't be redistributed alongside their
+          # prebuilt artifacts. gyan.dev keeps the muxer plumbed
+          # in via dynamic linking against the user-installed
+          # Blackmagic Desktop Video driver at runtime — same
+          # mechanism we already rely on for grafton-ndi (NDI SDK
+          # on the user's machine) and libomt.
+          #
+          # The cost is a heavier download (~240 MB full vs ~80 MB
+          # BtbN-essentials), but the artifact we actually ship is
+          # just ffmpeg.exe — Tauri's bundle.resources picks one
+          # file out of the extracted tree, so the runtime install
+          # size is unchanged.
+          #
+          # Pinned to 8.1.1 (matches the BtbN n8.1 build we
+          # shipped through alpha.21). gyan.dev publishes a fresh
+          # GitHub release per upstream FFmpeg version + nightly
+          # snapshots; the semver tags are stable artifacts.
+          $version = "8.1.1"
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$version/ffmpeg-$version-full_build.zip"
           $out = "$env:RUNNER_TEMP\ffmpeg.zip"
           Invoke-WebRequest -Uri $url -OutFile $out
           Expand-Archive -Path $out -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract"
@@ -614,6 +636,21 @@ jobs:
           Copy-Item $ffmpeg.FullName -Destination "src-tauri\sidecar\ffmpeg.exe"
           Get-ChildItem src-tauri\sidecar
           & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
+          # Note the decklink-muxer status in the build log. As of
+          # alpha.22 NEITHER BtbN nor gyan.dev's prebuilt Windows
+          # FFmpegs ship `--enable-decklink` (Blackmagic SDK can't
+          # be redistributed alongside the binaries). End users
+          # who want DeckLink output set `ATEM_PATCHBAY_FFMPEG=...`
+          # pointing at their own decklink-enabled FFmpeg.
+          # Building our own with the DeckLink SDK is queued for a
+          # later alpha. Until then this is informational only —
+          # don't fail the build on a missing decklink muxer.
+          $muxers = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -muxers
+          if ($muxers | Select-String -Pattern "decklink" -SimpleMatch -Quiet) {
+            Write-Host "Bundled FFmpeg includes decklink muxer (out-of-the-box DeckLink output)."
+          } else {
+            Write-Host "Bundled FFmpeg lacks decklink muxer (expected for prebuilt distros). Users with DeckLink hardware set ATEM_PATCHBAY_FFMPEG to a decklink-enabled FFmpeg."
+          }
 
       - name: Download + stage libomt for OMT support (Windows x64)
         shell: pwsh

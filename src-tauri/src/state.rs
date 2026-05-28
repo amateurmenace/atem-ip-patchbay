@@ -229,6 +229,16 @@ struct Inner {
     /// looking; UI currently doesn't expose it.
     decklink_pixel_format: String,
 
+    // Session 12 alpha.22: UDM controller credentials passed through
+    // to a spawned atem-net-diag at api_open_net_diag time. Stored
+    // in-process only; never persisted to disk (next launch re-prompts
+    // the operator). The host is exposed on /api/state so the UI can
+    // surface the configured controller; the API key is `#[serde(skip)]`-
+    // equivalent (Snapshot doesn't include it) so it never leaves the
+    // process via JSON.
+    unifi_host: String,
+    unifi_api_key: String,
+
     stats: StreamStats,
 }
 
@@ -286,6 +296,8 @@ impl EncoderState {
                 decklink_output_mode: String::new(),
                 decklink_format_code: String::new(),
                 decklink_pixel_format: "uyvy422".into(),
+                unifi_host: "https://192.168.20.1".into(),
+                unifi_api_key: String::new(),
                 stats: StreamStats::default(),
             }),
         }
@@ -589,6 +601,34 @@ impl EncoderState {
                 inner.decklink_pixel_format = v.clone();
             }
         }
+        if let Some(v) = &update.unifi_host {
+            // Accept any non-empty string; the host is just a base URL
+            // for atem-net-diag's UDM polling. The default
+            // (192.168.20.1 — the user's production UDM) is set in
+            // new(); empty values reset to default to avoid an
+            // accidentally-cleared host breaking the spawn.
+            if v.trim().is_empty() {
+                inner.unifi_host = "https://192.168.20.1".into();
+            } else {
+                inner.unifi_host = v.clone();
+            }
+        }
+        if let Some(v) = &update.unifi_api_key {
+            // Empty string is meaningful here — it's how the operator
+            // clears a previously-set key (e.g. revoked, or wrong key
+            // entered). Just trim and accept.
+            inner.unifi_api_key = v.trim().to_string();
+        }
+    }
+
+    /// Read the UDM API credentials for env-var plumbing into a
+    /// spawned atem-net-diag. Returns (host, api_key) tuple; the key
+    /// stays inside EncoderState (never surfaces on /api/state or any
+    /// other JSON endpoint) and only this accessor + the http.rs
+    /// spawn site touch it.
+    pub fn unifi_credentials(&self) -> (String, String) {
+        let inner = self.inner.read().unwrap();
+        (inner.unifi_host.clone(), inner.unifi_api_key.clone())
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -729,6 +769,8 @@ impl EncoderState {
             decklink_output_mode: inner.decklink_output_mode.clone(),
             decklink_format_code: inner.decklink_format_code.clone(),
             decklink_pixel_format: inner.decklink_pixel_format.clone(),
+            unifi_host: inner.unifi_host.clone(),
+            unifi_api_key_set: !inner.unifi_api_key.is_empty(),
         }
     }
 }
@@ -912,6 +954,10 @@ pub struct SettingsUpdate {
     pub decklink_output_mode: Option<String>,
     pub decklink_format_code: Option<String>,
     pub decklink_pixel_format: Option<String>,
+    // alpha.22 UDM credentials — passed to atem-net-diag via env when
+    // the operator clicks the Net Diag button. None = leave unchanged.
+    pub unifi_host: Option<String>,
+    pub unifi_api_key: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -991,6 +1037,12 @@ pub struct Snapshot {
     pub decklink_output_mode: String,
     pub decklink_format_code: String,
     pub decklink_pixel_format: String,
+    // alpha.22 UDM controller config for the spawned atem-net-diag.
+    // `unifi_host` is exposed; `unifi_api_key_set` is a derived bool
+    // so the UI can show "configured / not configured" without ever
+    // surfacing the key itself.
+    pub unifi_host: String,
+    pub unifi_api_key_set: bool,
 }
 
 impl Snapshot {

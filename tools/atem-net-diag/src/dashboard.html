@@ -1093,11 +1093,22 @@
       </div>
       <div class="unifi-error" id="udm-error" hidden></div>
       <div class="unifi-help" id="udm-help" hidden>
-        UDM credentials not configured. Set <code>UDM_API_KEY=...</code> in your shell
-        before launching this tool. Create a key in the UDM web UI under
-        <strong>Settings → Control Plane → Integrations → Create API Key</strong>.
-        Falls back to <code>UDM_USERNAME</code> + <code>UDM_PASSWORD</code> for older
-        UniFi OS versions.
+        <p style="margin:0 0 8px;">UDM credentials not configured. Create an API key in the UDM
+        web UI under <strong>Settings → Control Plane → Integrations →
+        Create API Key</strong>, then set it as an environment variable
+        before launching net-diag.</p>
+        <p style="margin:0 0 8px;"><strong>Windows (PowerShell):</strong>
+        <code>setx UDM_API_KEY "your-key-here"</code>, then close +
+        relaunch the main ATEM IP Patchbay app (the env var is only read
+        by new processes).</p>
+        <p style="margin:0 0 8px;"><strong>macOS / Linux:</strong>
+        <code>export UDM_API_KEY="your-key-here"</code> in the same
+        terminal you launch the app from. Or set it permanently in
+        <code>~/.zshrc</code> / <code>~/.bashrc</code>.</p>
+        <p style="margin:0;">Or use the in-app field on the main ATEM IP
+        Patchbay window (alpha.22+) which passes the key to this dashboard
+        without needing a shell. Falls back to <code>UDM_USERNAME</code> +
+        <code>UDM_PASSWORD</code> for older UniFi OS versions.</p>
       </div>
     </section>
 
@@ -1565,11 +1576,13 @@
 
       // Wizard pre-fill — Step 1 takes the first sorted local IP,
       // Step 2 takes the configured ATEM IP, Step 3 deep-links to
-      // the UDM web UI at the configured host.
+      // the UDM web UI at the configured host. cfg + atemIp already
+      // declared above for the summary line — reuse here to avoid a
+      // duplicate-identifier SyntaxError that blocks the whole
+      // dashboard from rendering (regression observed alpha.21
+      // installs).
       const localIps = state.local_ips || [];
       $('#visibility-local-ip').textContent = localIps.length > 0 ? localIps[0] : '(unknown)';
-      const cfg = state.config || {};
-      const atemIp = (cfg.atem && cfg.atem.ip) || '(not configured)';
       $('#visibility-atem-ip').textContent = atemIp;
       const unifiHost = cfg.unifi_host || 'https://192.168.20.1';
       const unifiLink = $('#visibility-unifi-link');
