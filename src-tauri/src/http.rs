@@ -697,19 +697,26 @@ async fn api_open_net_diag() -> impl IntoResponse {
                  If you're running a dev build, set ATEM_NET_DIAG_PATH to your local atem-net-diag.exe."
             );
         }
-        // Open the dashboard URL in the default browser regardless
-        // of whether the spawn succeeded — if net-diag is already
-        // running this lands on its dashboard; if neither path
-        // worked, the browser shows a clear connection error.
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/c", "start", "", url])
+        // Open the dashboard URL via `rundll32 url.dll,FileProtocolHandler`
+        // rather than `cmd /c start "" URL`. The cmd.exe `start` builtin
+        // exits 0 under CREATE_NO_WINDOW but silently fails to actually
+        // launch the browser — its console-allocation path needs a
+        // visible cmd window to hand off to ShellExecute correctly. We
+        // can't drop CREATE_NO_WINDOW (alpha.13 added it specifically to
+        // suppress the cmd.exe flash on every Net Diag click) and we
+        // don't want to add a new crate just for URL-opening. rundll32
+        // url.dll,FileProtocolHandler is the documented Win32 entry
+        // point for protocol-handler launches, hits ShellExecuteW
+        // directly, and works fine with no attached console.
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", url])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         crate::ffmpeg_path::hide_console_std(&mut cmd);
         match cmd.status() {
             Ok(s) if s.success() => opened_url = true,
-            Ok(s) => error = Some(format!("cmd /c start exited {s:?}")),
-            Err(e) => error = Some(format!("cmd /c start failed: {e}")),
+            Ok(s) => error = Some(format!("rundll32 url.dll exited {s:?}")),
+            Err(e) => error = Some(format!("rundll32 url.dll failed: {e}")),
         }
     }
 
