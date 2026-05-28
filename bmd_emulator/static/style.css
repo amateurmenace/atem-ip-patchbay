@@ -870,6 +870,22 @@ button.big { padding: 14px 18px; font-size: 14px; }
 .tile.disabled { opacity: 0.55; cursor: default; }
 .tile.disabled:hover { background: var(--panel-2); border-color: var(--line); }
 .tile.discovered { border-style: dashed; }
+/* alpha.24: empty-state tile in a section whose discovery returned
+   zero results. Greyed out + non-interactive — communicates "the
+   feature exists but you don't have any senders yet" rather than
+   hiding the section entirely (which left OMT undiscoverable for
+   operators who didn't know about it). */
+.tile.placeholder {
+  opacity: 0.55;
+  cursor: default;
+  border-style: dashed;
+  background: transparent;
+}
+.tile.placeholder:hover {
+  background: transparent;
+  border-color: var(--line);
+}
+.tile.placeholder .tile-name { font-style: italic; }
 
 .tile-section {
   grid-column: 1 / -1;

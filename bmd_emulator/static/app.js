@@ -85,6 +85,7 @@ const els = {
   pipePath:       $('#pipe-path'),
   rescanDevices:  $('#rescan-devices'),
   ndiRescan:      $('#ndi-rescan'),
+  omtRescan:      $('#omt-rescan'),
 
   // Relay (incoming SRT/RTMP server)
   // Old per-tile relay-config panels removed in favor of the
@@ -1050,24 +1051,36 @@ function buildSourceTiles(snap) {
       continue;
     }
     if (cat === 'omt_senders') {
-      // Skip the section entirely when no OMT senders are visible —
-      // most users don't have OMT on their network, and showing an
-      // empty "OMT senders" header noisily implies the feature is
-      // broken. The section appears when discovery finds something
-      // OR when the user has a previously-selected OMT source still
-      // in their state (so the active tile renders as a placeholder).
-      const omtTiles = [];
-      for (const sender of knownOmt) {
-        omtTiles.push({
-          sourceId: 'omt-sender',
+      // alpha.24 reversed alpha.13's "hide OMT when empty" — the
+      // hide-when-empty UX made OMT undiscoverable for users who
+      // didn't know the feature existed. Always show the section
+      // (matches NDI's "scan NDI" affordance in the card title) and
+      // render either the discovered senders OR a single
+      // placeholder tile that explains how to populate the list.
+      if (knownOmt.length > 0) {
+        for (const sender of knownOmt) {
+          tiles.push({
+            sourceId: 'omt-sender',
+            avIndex: null,
+            name: sender.name,
+            category: 'omt',
+            section: label,
+            discovered: true,
+          });
+        }
+      } else {
+        // Empty-state placeholder. Non-selectable (the click handler
+        // checks `placeholder` and no-ops). Tells the operator the
+        // feature exists and how to populate it.
+        tiles.push({
+          sourceId: 'omt-placeholder',
           avIndex: null,
-          name: sender.name,
+          name: 'No OMT senders found',
           category: 'omt',
           section: label,
-          discovered: true,
+          placeholder: true,
         });
       }
-      tiles.push(...omtTiles);
       continue;
     }
     for (const d of groups[cat]) {
@@ -1117,13 +1130,27 @@ function buildSourceTiles(snap) {
        (snap.source_id === 'omt' && t.sourceId === 'omt-sender' && snap.omt_source_name === t.name)) &&
       (t.sourceId !== 'avfoundation' || snap.av_video_index === t.avIndex);
     const div = document.createElement('div');
-    div.className = 'tile' + (isActive ? ' active' : '') + (t.discovered ? ' discovered' : '');
-    div.innerHTML = `
-      <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
-      <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
-      <div class="tile-cat">${CATEGORY_LABEL[t.category] || t.category}</div>
-    `;
-    div.addEventListener('click', () => selectSource(t));
+    div.className = 'tile'
+      + (isActive ? ' active' : '')
+      + (t.discovered ? ' discovered' : '')
+      + (t.placeholder ? ' placeholder' : '');
+    if (t.placeholder) {
+      // Non-selectable empty-state tile (e.g. "No OMT senders found").
+      // Slightly muted styling via .placeholder CSS; hint text in tile-cat.
+      div.innerHTML = `
+        <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
+        <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+        <div class="tile-cat">click "scan ${(t.category || '').toUpperCase()}" above to refresh</div>
+      `;
+      // No click handler — placeholder is informational.
+    } else {
+      div.innerHTML = `
+        <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
+        <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+        <div class="tile-cat">${CATEGORY_LABEL[t.category] || t.category}</div>
+      `;
+      div.addEventListener('click', () => selectSource(t));
+    }
     els.sourceTiles.appendChild(div);
   }
 }
@@ -1997,6 +2024,9 @@ function bind() {
   els.pipePath.addEventListener('change', () => applySettings({ pipe_path: els.pipePath.value }));
   els.rescanDevices.addEventListener('click', (e) => { e.preventDefault(); ensureDevicesLoaded(true); });
   els.ndiRescan.addEventListener('click', (e) => { e.preventDefault(); ensureNdiLoaded(true); });
+  if (els.omtRescan) {
+    els.omtRescan.addEventListener('click', (e) => { e.preventDefault(); ensureOmtLoaded(true); });
+  }
 
   // OMT output toggle + sender name. POSTs to /api/omt-output which
   // updates state.omt_output_enabled / state.omt_output_name. The
