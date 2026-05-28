@@ -435,6 +435,20 @@ jobs:
           else
             echo "Using MinGW IDL include: $MINGW_IDL_INC"
           fi
+          # BMD's .idl files rely on MIDL's implicit `import "unknwn.idl"`
+          # behavior — they reference IUnknown directly without an
+          # explicit import statement. widl is stricter and errors
+          # with "type 'IUnknown' not found in global namespace".
+          # Workaround: prepend an explicit import to every .idl
+          # before compilation. Same for wtypes (BOOL, LPCWSTR, etc.).
+          echo "=== Prepending standard COM imports to BMD .idl files ==="
+          for idl in *.idl; do
+            if ! grep -q '^import "unknwn.idl"' "$idl"; then
+              # Use a tmp file to avoid in-place sed edge cases.
+              { printf 'import "unknwn.idl";\nimport "wtypes.idl";\n'; cat "$idl"; } > "${idl}.patched"
+              mv "${idl}.patched" "$idl"
+            fi
+          done
           for idl in *.idl; do
             echo "widl: $idl"
             # Default widl invocation produces *.h (+ _i.c, _p.c,
