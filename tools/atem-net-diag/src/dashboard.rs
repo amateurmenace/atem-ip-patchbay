@@ -562,8 +562,14 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_UDM_HOST.to_string());
-    let unifi_credentials = unifi::read_credentials_from_env();
-    let unifi_configured = unifi_credentials.is_some();
+    let env_credentials = unifi::read_credentials_from_env();
+    let unifi_configured = env_credentials.is_some();
+    // Shared credentials slot — env-read creds at startup are the
+    // seed; the dashboard form's POST /api/config { unifi_api_key }
+    // updates the slot at runtime. Polling threads check on each
+    // tick so a runtime update takes effect within ~2s.
+    let creds_holder: unifi::CredentialsHolder =
+        Arc::new(Mutex::new(env_credentials));
 
     // Snapshot this machine's own IPv4 addresses once at startup.
     // The monitor loop uses these to classify each captured flow's
@@ -619,40 +625,46 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .spawn(move || probe_loop(probe_state))
         .expect("spawn probe loop");
 
-    // UDM polling thread — only spawn if creds are configured.
-    // No creds means the dashboard reports "UDM: not configured"
-    // and the operator can still use the tool with active probes
-    // (Standby mode) and tshark monitoring as data sources.
-    if let Some(creds) = unifi_credentials {
+    // UDM polling threads — always spawn. Each loop reads creds
+    // from the shared `creds_holder` on every tick; when None it
+    // idles in NotConfigured. This is how the dashboard form's
+    // POST /api/config { unifi_api_key } takes effect at runtime
+    // without a binary restart.
+    {
         let unifi_state = state.clone();
-        let host = state.lock().unwrap().config.unifi_host.clone();
-        let creds_for_clients = creds.clone();
+        let unifi_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("unifi-poll".into())
-            .spawn(move || unifi::poll_loop(host, creds_for_clients, unifi_state))
+            .spawn(move || unifi::poll_loop(unifi_state, unifi_creds))
             .expect("spawn unifi poll");
+    }
 
-        // Separate thread for WAN bandwidth — same UDM, different
-        // endpoint. Kept independent so a slow / failing WAN endpoint
-        // doesn't starve client polling and vice versa.
+    // Separate thread for WAN bandwidth — same UDM, different
+    // endpoint. Kept independent so a slow / failing WAN endpoint
+    // doesn't starve client polling and vice versa.
+    {
         let wan_state = state.clone();
-        let wan_host = state.lock().unwrap().config.unifi_host.clone();
-        let wan_creds = creds.clone();
+        let wan_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("wan-poll".into())
-            .spawn(move || unifi::wan_poll_loop(wan_host, wan_creds, wan_state))
+            .spawn(move || unifi::wan_poll_loop(wan_state, wan_creds))
             .expect("spawn wan poll");
+    }
 
-        // System poll: switches + alarms (slower cadence: 5s).
+    // System poll: switches + alarms (slower cadence: 5s).
+    {
         let sys_state = state.clone();
-        let sys_host = state.lock().unwrap().config.unifi_host.clone();
+        let sys_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("system-poll".into())
-            .spawn(move || unifi::system_poll_loop(sys_host, creds, sys_state))
+            .spawn(move || unifi::system_poll_loop(sys_state, sys_creds))
             .expect("spawn system poll");
+    }
 
-        // Reverse-DNS resolver thread: pulls source IPs out of the
-        // pending queue, runs `host` to look them up, caches results.
+    // Reverse-DNS resolver thread: pulls source IPs out of the
+    // pending queue, runs `host` to look them up, caches results.
+    // No creds needed; just shells out to the OS resolver.
+    {
         let rdns_state = state.clone();
         std::thread::Builder::new()
             .name("rdns-worker".into())
@@ -731,7 +743,7 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
                     Response::from_string(r#"{"error":"failed to read body"}"#)
                         .with_status_code(400)
                 } else {
-                    let result = apply_config_update(&state, &body);
+                    let result = apply_config_update(&state, &creds_holder, &body);
                     let mut r = Response::from_string(match &result {
                         Ok(()) => r#"{"ok":true}"#.to_string(),
                         Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
@@ -1256,7 +1268,11 @@ fn probe_loop(state: Arc<Mutex<DashboardState>>) {
 /// dashboard's success-rate / latency numbers reflect only the new
 /// configuration. Tweaking interval, mode, atem, or unifi_host
 /// preserves probe history.
-fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result<(), String> {
+fn apply_config_update(
+    state: &Arc<Mutex<DashboardState>>,
+    creds_holder: &unifi::CredentialsHolder,
+    body: &str,
+) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("invalid JSON: {e}"))?;
 
@@ -1320,6 +1336,31 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
+    // UDM API key — write-through to the shared credentials holder.
+    // Polling threads pick up the change on their next tick (~2s).
+    // Sending an empty string CLEARS credentials, useful for "log
+    // out" / "stop polling" without restarting the binary.
+    //
+    // Important: the key is NEVER written into DashboardState, so
+    // it doesn't leak into /api/state JSON. Only the
+    // UnifiStatus surfaces (Connected / Connecting / Failed /
+    // NotConfigured) to the dashboard.
+    //
+    // Encoding: outer Option = field-presence (None = field absent,
+    // don't touch creds); inner Option = empty-vs-set (None = clear,
+    // Some(key) = set).
+    let unifi_api_key_field: Option<Option<String>> = parsed
+        .get("unifi_api_key")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+
     let monitor_iface_field = parsed
         .get("monitor_iface")
         .and_then(|v| v.as_str())
@@ -1356,6 +1397,22 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         }
     });
 
+    // Write-through to the shared credentials holder BEFORE
+    // acquiring state.lock(). Polling threads acquire creds first,
+    // then state — apply_config_update has to use the same order
+    // or two opposing locks could deadlock. Capture the new
+    // unifi_configured value for the state update below.
+    let new_unifi_configured: Option<bool> = if let Some(key_change) = unifi_api_key_field {
+        let mut creds = creds_holder.lock().unwrap();
+        *creds = match key_change {
+            Some(key) => Some(unifi::UnifiCredentials::ApiKey(key)),
+            None => None,
+        };
+        Some(creds.is_some())
+    } else {
+        None
+    };
+
     let mut s = state.lock().unwrap();
     let mut probe_target_changed = false;
     if let Some(u) = url_field {
@@ -1381,6 +1438,9 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
     }
     if let Some(h) = unifi_host_field {
         s.config.unifi_host = h;
+    }
+    if let Some(cfg_val) = new_unifi_configured {
+        s.config.unifi_configured = cfg_val;
     }
     if let Some(new_iface) = monitor_iface_field {
         if !new_iface.is_empty() && Some(&new_iface) != s.config.monitor_iface.as_ref() {

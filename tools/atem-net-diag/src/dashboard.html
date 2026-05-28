@@ -1277,22 +1277,25 @@
       </div>
       <div class="unifi-error" id="udm-error" hidden></div>
       <div class="unifi-help" id="udm-help" hidden>
-        <p style="margin:0 0 8px;">UDM credentials not configured. Create an API key in the UDM
-        web UI under <strong>Settings → Control Plane → Integrations →
-        Create API Key</strong>, then set it as an environment variable
-        before launching net-diag.</p>
-        <p style="margin:0 0 8px;"><strong>Windows (PowerShell):</strong>
-        <code>setx UDM_API_KEY "your-key-here"</code>, then close +
-        relaunch the main ATEM IP Patchbay app (the env var is only read
-        by new processes).</p>
-        <p style="margin:0 0 8px;"><strong>macOS / Linux:</strong>
-        <code>export UDM_API_KEY="your-key-here"</code> in the same
-        terminal you launch the app from. Or set it permanently in
-        <code>~/.zshrc</code> / <code>~/.bashrc</code>.</p>
-        <p style="margin:0;">Or use the in-app field on the main ATEM IP
-        Patchbay window (alpha.22+) which passes the key to this dashboard
-        without needing a shell. Falls back to <code>UDM_USERNAME</code> +
-        <code>UDM_PASSWORD</code> for older UniFi OS versions.</p>
+        <p style="margin:0 0 12px;">Paste your UDM API key below. Create one
+        in the UDM web UI under <strong>Settings → Control Plane → Integrations
+        → Create API Key</strong>.</p>
+        <form id="udm-key-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input type="password" id="udm-key-input" placeholder="UDM API key"
+                 autocomplete="off" spellcheck="false"
+                 style="flex:1;min-width:240px;padding:6px 10px;background:#0e0f12;color:#e6e6ea;border:1px solid #2a2d35;border-radius:4px;font-family:monospace;font-size:13px;">
+          <button type="submit" id="udm-key-save"
+                  style="padding:6px 14px;background:#3a7ac4;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;">Save</button>
+          <span id="udm-key-feedback" style="font-size:12px;color:var(--muted);"></span>
+        </form>
+        <p style="margin:12px 0 0;font-size:12px;color:var(--muted);">Stored
+        in-process only — never written to disk. Polling threads pick it
+        up within ~2 seconds. Falls back to <code>UDM_USERNAME</code> +
+        <code>UDM_PASSWORD</code> environment variables for older UniFi OS
+        versions that don't expose local API keys.</p>
+      </div>
+      <div class="unifi-update" id="udm-update" hidden style="margin-top:8px;font-size:12px;">
+        <a href="#" id="udm-update-link" style="color:var(--accent);cursor:pointer;">Update credentials</a>
       </div>
     </section>
 
@@ -1515,7 +1518,63 @@
         errEl.hidden = true;
       }
 
-      $('#udm-help').hidden = status.state !== 'not_configured';
+      // Form visibility: show when not configured OR explicitly
+      // opened via the "Update credentials" link (signaled by the
+      // `data-udm-open` attribute on the body). When connected we
+      // show the link instead so the operator can rotate the key
+      // without restarting.
+      const helpEl = $('#udm-help');
+      const updateEl = $('#udm-update');
+      const explicitlyOpen = document.body.dataset.udmOpen === '1';
+      const failed = status.state === 'failed';
+      const notConfigured = status.state === 'not_configured';
+      helpEl.hidden = !(notConfigured || failed || explicitlyOpen);
+      updateEl.hidden = !(status.state === 'connected' || status.state === 'connecting') || explicitlyOpen;
+    }
+
+    // UDM API-key form: handles submit + the "Update credentials"
+    // toggle. Posts the key to /api/config; backend writes through
+    // to the shared CredentialsHolder, polling threads pick it up
+    // on their next tick.
+    function wireUdmKeyForm() {
+      const form = $('#udm-key-form');
+      const input = $('#udm-key-input');
+      const fb = $('#udm-key-feedback');
+      const updateLink = $('#udm-update-link');
+      if (!form || !input) return;
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const key = input.value.trim();
+        fb.style.color = 'var(--muted)';
+        fb.textContent = 'Saving…';
+        try {
+          const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ unifi_api_key: key }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.ok && data.ok) {
+            fb.style.color = '#3acf6f';
+            fb.textContent = key ? 'Saved — connecting…' : 'Cleared.';
+            input.value = '';
+            document.body.dataset.udmOpen = '';
+          } else {
+            fb.style.color = '#e85a5a';
+            fb.textContent = data.error || 'Save failed';
+          }
+        } catch (e) {
+          fb.style.color = '#e85a5a';
+          fb.textContent = 'Network error: ' + e.message;
+        }
+      });
+      if (updateLink) {
+        updateLink.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          document.body.dataset.udmOpen = '1';
+          input.focus();
+        });
+      }
     }
 
     // WAN bandwidth card — renders the upload + download Mbps,
@@ -1837,6 +1896,12 @@
           toggle.textContent = isOpen ? 'Hide steps ↑' : 'Set up port mirroring →';
         });
       }
+
+      // UDM API-key form (alpha.29). Wire submit handler + the
+      // "Update credentials" link once at boot — the form's
+      // elements survive re-renders since renderUnifi only toggles
+      // hidden, never rebuilds DOM.
+      wireUdmKeyForm();
 
       // alpha.27: switches/ports filter bar wiring. State (text +
       // chip) lives in `switchesFilter` and persists to localStorage.
