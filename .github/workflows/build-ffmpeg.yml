@@ -398,6 +398,11 @@ jobs:
           "BMD_SDK_ROOT=$sdkRootMsys" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Get-ChildItem -Path "$sdkRoot\Win\include" | Select-Object -First 10 | Format-Table Name, Length
 
+      - name: Set up MSVC dev environment (for MIDL's cl.exe preprocessor)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Compile BMD .idl files to .h via MIDL (Windows SDK)
         shell: pwsh
         run: |
