@@ -1225,6 +1225,49 @@ button.big { padding: 14px 18px; font-size: 14px; }
   display: flex; gap: 18px; flex-wrap: wrap;
   padding: 10px 0;
 }
+
+/* Session 12 — destination-type segmented control. Lives above the
+   ATEM-wizard body so the operator picks where this source goes
+   before configuring the rest. Matches the .toggle-group pattern
+   used for protocol/codec/quality below the wizard. */
+.dest-type-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 4px 0 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.dest-type-row .seg-control {
+  flex: 0 0 auto;
+}
+.dest-type-row .seg input:disabled + span {
+  opacity: 0.4; cursor: not-allowed;
+}
+.dest-type-help {
+  font-size: 12px; color: var(--warn, #d9a04b);
+  margin: -6px 0 12px;
+}
+.dest-decklink-body {
+  display: flex; flex-direction: column; gap: 12px;
+  padding-bottom: 4px;
+}
+.dest-decklink-body select {
+  /* match the look of other destination-card selects (audio, etc.) */
+  width: 100%; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text);
+}
+.dest-decklink-body select option {
+  /* dropdown popup contrast on Windows WebView2 — alpha.18 pattern */
+  background-color: #0e0f12; color: #e6e6ea;
+}
+.dest-decklink-body .seg-btn {
+  align-self: flex-start;
+  padding: 6px 14px; font-size: 12px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--text); cursor: pointer;
+}
+.dest-decklink-body .seg-btn:hover { background: var(--panel-3, #2a2c33); }
 .toggle-group {
   display: flex; align-items: center; gap: 10px;
 }

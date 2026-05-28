@@ -65,6 +65,17 @@ pub struct StreamPlan {
     /// `-ac 1` arg on the AAC encoder so the output is a single
     /// summed channel instead of stereo.
     pub audio_output_mono: bool,
+    /// Session 12 DeckLink-output fields. Populated only when
+    /// `protocol == "decklink"`; otherwise empty strings.
+    /// - `decklink_device_name` matches FFmpeg's `-list_devices` output
+    ///   exactly and is passed as `-i <name>` after `-f decklink`.
+    /// - `decklink_format_code` is FFmpeg's per-card mode identifier
+    ///   (e.g. "Hp59" for 1080p59.94), passed as `-format_code <code>`.
+    /// - `decklink_pixel_format` is the requested output pixel format
+    ///   (typically "uyvy422").
+    pub decklink_device_name: String,
+    pub decklink_format_code: String,
+    pub decklink_pixel_format: String,
 }
 
 impl StreamPlan {
@@ -555,6 +566,16 @@ impl Streamer {
 
     fn build_plan(&self) -> Result<StreamPlan> {
         let snap = self.state.snapshot();
+
+        // Session 12: bidirectional patchbay. When destination_type
+        // is "decklink" the validation set is entirely different —
+        // no XML profile, no stream key, no SRT/RTMP URL. We instead
+        // need a picked DeckLink device, an FFmpeg build that
+        // supports it, and a matching output mode.
+        if snap.is_decklink() {
+            return self.build_plan_decklink(snap);
+        }
+
         let cfg = snap
             .active_config
             .as_ref()
@@ -614,6 +635,102 @@ impl Streamer {
             video_filter,
             audio_filter,
             audio_output_mono: snap.audio_output_mono,
+            decklink_device_name: String::new(),
+            decklink_format_code: String::new(),
+            decklink_pixel_format: String::new(),
+        })
+    }
+
+    /// DeckLink-destination plan builder — invoked from `build_plan`
+    /// when `snap.is_decklink()`. The mental model differs from the
+    /// ATEM/SRT path: there's no remote endpoint, no stream key, no
+    /// encoder choice (DeckLink output is raw video + PCM audio),
+    /// and the framing dimensions come from the picked output mode
+    /// rather than the user's video_mode dropdown (which represents
+    /// SOURCE expected geometry).
+    fn build_plan_decklink(&self, snap: crate::state::Snapshot) -> Result<StreamPlan> {
+        if !crate::ffmpeg_path::ffmpeg_has_decklink() {
+            return Err(anyhow!(
+                "This FFmpeg build does not include DeckLink output \
+                 (--enable-decklink missing). Reinstall ATEM IP Patchbay."
+            ));
+        }
+        if snap.decklink_device_name.trim().is_empty() {
+            return Err(anyhow!(
+                "No DeckLink device selected. Pick one in the Destination card."
+            ));
+        }
+        if snap.decklink_format_code.trim().is_empty() {
+            return Err(anyhow!(
+                "No DeckLink output mode selected. Pick one for the chosen device."
+            ));
+        }
+        // Verify the picked mode is still supported by the picked
+        // device — guards against the operator unplugging a card or
+        // switching cards after a settings save without re-picking.
+        let modes = crate::device_scanner::probe_decklink_modes(&snap.decklink_device_name);
+        let mode = modes
+            .into_iter()
+            .find(|m| m.format_code == snap.decklink_format_code)
+            .ok_or_else(|| {
+                anyhow!(
+                    "DeckLink mode '{}' not supported by device '{}'. \
+                     Re-pick a mode from the dropdown.",
+                    snap.decklink_format_code,
+                    snap.decklink_device_name
+                )
+            })?;
+        // FFmpeg's rounding-up rule for fractional rates (29.97 -> 30,
+        // 59.94 -> 60). The actual exact rate is preserved in the
+        // format_code; this fps is just for GOP math + filter strings,
+        // which don't matter for DeckLink (no encoder).
+        let fps = ((mode.fps_num as f32) / (mode.fps_den as f32)).round() as u32;
+        let source = crate::sources::resolve_source(&self.state)
+            .map_err(|e| anyhow!("Source resolve failed: {e}"))?;
+        let audio_filter = build_audio_filter(&snap);
+        // DeckLink requires the source to be normalized to the card's
+        // output geometry + pixel format. Always emit a filter when
+        // the source dimensions don't match, or when we need to force
+        // the pixel format conversion. Source dimensions aren't
+        // known until the source-specific FFmpeg cmd builder probes
+        // them (NDI/OMT do this at start time), so the safest bet is
+        // to always include a `scale=W:H,format=uyvy422` filter on
+        // the DeckLink branch. The cost on already-matching sources
+        // is a no-op pass through scale.
+        let video_filter = Some(format!(
+            "scale={w}:{h},format={pf}",
+            w = mode.width,
+            h = mode.height,
+            pf = if snap.decklink_pixel_format.is_empty() {
+                "uyvy422".to_string()
+            } else {
+                snap.decklink_pixel_format.clone()
+            },
+        ));
+        Ok(StreamPlan {
+            width: mode.width,
+            height: mode.height,
+            fps,
+            // No encode happens for DeckLink — these fields are zero
+            // to make any accidental encoder-side use surface as an
+            // obvious "uninitialized" symptom.
+            video_bitrate: 0,
+            audio_bitrate: 0,
+            keyframe_seconds: 0,
+            output_url: String::new(),
+            protocol: "decklink".to_string(),
+            source,
+            video_codec: String::new(),
+            video_filter,
+            audio_filter,
+            audio_output_mono: snap.audio_output_mono,
+            decklink_device_name: snap.decklink_device_name.clone(),
+            decklink_format_code: snap.decklink_format_code.clone(),
+            decklink_pixel_format: if snap.decklink_pixel_format.is_empty() {
+                "uyvy422".to_string()
+            } else {
+                snap.decklink_pixel_format.clone()
+            },
         })
     }
 
@@ -753,7 +870,78 @@ impl Streamer {
         self.build_ffmpeg_cmd_for_ndi(plan, &as_ndi)
     }
 
+    /// Build the FFmpeg command for a DeckLink output destination.
+    /// Same input + map + filter shape as the ATEM/SRT path; the
+    /// difference is the output tail — no encoder (DeckLink takes
+    /// raw video), PCM audio (DeckLink doesn't accept AAC), no
+    /// transport container (we hand off to the `decklink` muxer
+    /// which writes directly to the card).
+    fn build_decklink_output_cmd(&self, plan: &StreamPlan) -> Vec<String> {
+        let mut cmd: Vec<String> = vec![
+            ffmpeg_path(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "info".into(),
+        ];
+        cmd.extend(plan.source.ffmpeg_input_args.iter().cloned());
+
+        let (v_in, a_in) = if plan.source.combined_av {
+            ("0:v:0", "0:a:0")
+        } else {
+            ("0:v:0", "1:a:0")
+        };
+        cmd.extend([
+            "-map".into(), v_in.into(),
+            "-map".into(), a_in.into(),
+        ]);
+        if let Some(filter) = plan.video_filter.as_deref() {
+            cmd.push("-vf".into());
+            cmd.push(filter.into());
+        }
+        if let Some(filter) = plan.audio_filter.as_deref() {
+            cmd.push("-af".into());
+            cmd.push(filter.into());
+        }
+
+        // DeckLink output muxer takes raw video (rawvideo codec — set
+        // explicitly so FFmpeg doesn't try to AAC-encode), PCM audio
+        // at 48 kHz, and the pixel format the card expects. Modern
+        // DeckLink cards default to uyvy422 (8-bit YUV 4:2:2);
+        // 10-bit cards can take yuv422p10le but the UI doesn't
+        // surface that yet. -format_code is the per-card mode
+        // identifier (Hp59 == 1080p59.94, etc.) — passed through
+        // from build_plan_decklink which looked it up via
+        // probe_decklink_modes against the live card.
+        let pix_fmt = if plan.decklink_pixel_format.is_empty() {
+            "uyvy422"
+        } else {
+            plan.decklink_pixel_format.as_str()
+        };
+        let ac = if plan.audio_output_mono { "1" } else { "2" };
+        cmd.extend([
+            "-c:v".into(), "rawvideo".into(),
+            "-pix_fmt".into(), pix_fmt.into(),
+            "-c:a".into(), "pcm_s16le".into(),
+            "-ar".into(), "48000".into(),
+            "-ac".into(), ac.into(),
+            "-f".into(), "decklink".into(),
+            "-format_code".into(), plan.decklink_format_code.clone(),
+            plan.decklink_device_name.clone(),
+        ]);
+        cmd
+    }
+
     fn build_ffmpeg_cmd(&self, plan: &StreamPlan) -> Vec<String> {
+        // Session 12: DeckLink output destination — raw video + PCM
+        // audio to the local card, no encode, no SRT/RTMP push. The
+        // input + map + filter portion is identical to the ATEM path
+        // (frames arrive the same way regardless of where they're
+        // going); only the encoder/container/output tail changes.
+        // Branch early to keep the existing ATEM code path readable.
+        if plan.protocol == "decklink" {
+            return self.build_decklink_output_cmd(plan);
+        }
+
         let gop = plan.gop().to_string();
         let mut cmd: Vec<String> = vec![
             ffmpeg_path(),

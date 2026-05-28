@@ -277,6 +277,13 @@ pub fn run() {
                 add_windows_dll_search_path(&resource_dir);
             }
 
+            // Probe DeckLink output support eagerly so the first UI
+            // request that reads `/api/state` doesn't pay the
+            // ffmpeg-spawn cost. Result is cached for the process
+            // lifetime; if the user reinstalls FFmpeg between
+            // launches the probe runs fresh on next boot.
+            let _ = ffmpeg_path::ffmpeg_has_decklink();
+
             load_default_xml_files(app.handle(), &encoder);
             apply_default_devices_at_boot(&encoder);
 

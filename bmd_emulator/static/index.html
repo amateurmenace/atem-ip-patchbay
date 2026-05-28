@@ -314,7 +314,57 @@
           <span class="card-title-aux" id="dest-aux">no destination</span>
         </div>
 
-        <div class="dest-wizard">
+        <!-- Session 12: destination-type segmented control. ATEM is the
+             default (every existing operator workflow); DeckLink routes
+             the same SOURCE to a local SDI/HDMI output for monitor-wall
+             / hardware-switcher integration. JS toggles between the two
+             body blocks below based on snap.destination_type. -->
+        <div class="dest-type-row">
+          <span class="toggle-label">Destination type</span>
+          <div class="seg-control" role="radiogroup" aria-label="Destination type" id="dest-type-row">
+            <label class="seg"><input type="radio" name="dest-type" value="atem" checked /><span>ATEM (Network · SRT)</span></label>
+            <label class="seg"><input type="radio" name="dest-type" value="decklink" /><span>DeckLink (Local · SDI/HDMI)</span></label>
+          </div>
+        </div>
+        <p class="dest-type-help" id="dest-decklink-unsupported" hidden>
+          This FFmpeg build does not include DeckLink output. Reinstall
+          ATEM IP Patchbay (or rebuild FFmpeg with <code>--enable-decklink</code>).
+        </p>
+
+        <!-- DeckLink-destination body. Hidden when ATEM is active.
+             Device + mode dropdowns are populated from
+             /api/decklink-outputs at first render and on Refresh. -->
+        <div class="dest-decklink-body" id="dest-decklink-body" hidden>
+          <div class="dest-row">
+            <label>DeckLink device
+              <select id="decklink-device"></select>
+              <span class="field-help" id="decklink-device-status">
+                Pick the Blackmagic DeckLink card and SDI/HDMI port that
+                should receive this source's frames.
+              </span>
+            </label>
+            <label>Output mode
+              <select id="decklink-mode"></select>
+              <span class="field-help">
+                Sets the card's signal format. The source is scaled to
+                match — 1080p59.94 is the most universal pick.
+              </span>
+            </label>
+          </div>
+          <p class="field-help">
+            Pixel format: <code>uyvy422</code> (8-bit YUV 4:2:2 — universal
+            DeckLink format). Audio is PCM 48&nbsp;kHz stereo embedded in
+            the SDI signal.
+          </p>
+          <p class="field-help">
+            Need to install the driver? Free download:
+            <a href="https://www.blackmagicdesign.com/support/family/capture-and-playback" target="_blank" rel="noopener">Blackmagic DeckLink Driver</a>.
+            After install, click Refresh below.
+          </p>
+          <button type="button" class="seg-btn" id="decklink-refresh">↻ Refresh devices</button>
+        </div>
+
+        <div class="dest-wizard" id="dest-atem-body">
 
           <div class="dest-row">
             <label>Address

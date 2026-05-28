@@ -1,8 +1,8 @@
-use crate::ffmpeg_path::ffmpeg_path;
+use crate::ffmpeg_path::{ffmpeg_has_decklink, ffmpeg_path};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -450,4 +450,278 @@ pub fn find_default_video(devs: &DeviceList) -> Option<&Device> {
     }
     devs.video.iter().find(|d| !VIDEO_SKIP.is_match(&d.name))
         .or(devs.video.first())
+}
+
+// ---------------------------------------------------------------------------
+// DeckLink — Session 12 bidirectional patchbay (output direction).
+//
+// Discovers Blackmagic DeckLink output devices via the FFmpeg
+// decklink muxer, and probes per-device supported output modes.
+// Gated on `ffmpeg_has_decklink()` so builds without
+// `--enable-decklink` return empty without spending an ffmpeg
+// invocation; the UI uses both signals (build-support absent vs.
+// hardware/driver absent) to render distinct error states.
+//
+// Discovery is a single shared cache (60s TTL like
+// list_capture_devices). Mode probing is a separate per-device
+// cache populated lazily on first lookup; mirrors how
+// probe_avf_modes is invoked from sources.rs.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DecklinkDevice {
+    pub name: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DecklinkMode {
+    pub format_code: String,    // e.g. "Hp59"
+    pub description: String,    // raw line from -list_formats, sans prefix
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub interlaced: bool,
+}
+
+static DECKLINK_DEVICE_CACHE: Lazy<Mutex<(Vec<DecklinkDevice>, Option<Instant>)>> =
+    Lazy::new(|| Mutex::new((Vec::new(), None)));
+
+static DECKLINK_MODE_CACHE: Lazy<Mutex<HashMap<String, Vec<DecklinkMode>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+// Captures the device-name (single-quoted) from FFmpeg's
+// decklink-output device listing:
+//
+//   [decklink @ 0x...] 'DeckLink Mini Monitor 4K'
+//
+// The PID-segment is variable-width; the device name is the single-
+// quoted payload.
+static DECKLINK_DEVICE_LINE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\[decklink\s*@\s*[^\]]+\]\s*'([^']+)'").unwrap()
+});
+
+// Captures format-code + WxH + fps + interlace marker from the
+// per-device -list_formats output:
+//
+//   [decklink @ 0x...]   Hp59           1920x1080 at 60000/1001 fps
+//   [decklink @ 0x...]   pal            720x576 at 25000/1000 fps (interlaced, upper field first)
+static DECKLINK_FORMAT_LINE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"\[decklink\s*@\s*[^\]]+\]\s+(\S+)\s+(\d+)x(\d+)\s+at\s+(\d+)/(\d+)\s+fps(.*)$",
+    )
+    .unwrap()
+});
+
+/// Return the set of DeckLink output devices visible to FFmpeg right
+/// now. Returns an empty Vec if the FFmpeg build lacks DeckLink
+/// support OR the Blackmagic DeckLink Driver isn't installed OR no
+/// cards are connected — the UI distinguishes these by also reading
+/// `ffmpeg_has_decklink()` separately.
+pub fn list_decklink_outputs(force: bool) -> Vec<DecklinkDevice> {
+    let mut cache = DECKLINK_DEVICE_CACHE.lock().unwrap();
+    if !force {
+        if let Some(scanned_at) = cache.1 {
+            if scanned_at.elapsed() < CACHE_TTL {
+                return cache.0.clone();
+            }
+        }
+    }
+    let devices = if ffmpeg_has_decklink() {
+        scan_decklink_devices()
+    } else {
+        Vec::new()
+    };
+    // Card add/remove invalidates every per-device mode probe too.
+    DECKLINK_MODE_CACHE.lock().unwrap().clear();
+    *cache = (devices.clone(), Some(Instant::now()));
+    devices
+}
+
+/// Return the list of supported output modes for the named DeckLink
+/// device, populating the cache on first lookup. Empty Vec on
+/// unknown device, parse failure, or missing DeckLink build support.
+pub fn probe_decklink_modes(device_name: &str) -> Vec<DecklinkMode> {
+    {
+        let cache = DECKLINK_MODE_CACHE.lock().unwrap();
+        if let Some(modes) = cache.get(device_name) {
+            return modes.clone();
+        }
+    }
+    if !ffmpeg_has_decklink() {
+        return Vec::new();
+    }
+    let modes = scan_decklink_modes(device_name);
+    DECKLINK_MODE_CACHE
+        .lock()
+        .unwrap()
+        .insert(device_name.to_string(), modes.clone());
+    modes
+}
+
+fn scan_decklink_devices() -> Vec<DecklinkDevice> {
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args([
+        "-hide_banner",
+        "-f",
+        "decklink",
+        "-list_devices",
+        "true",
+        "-i",
+        "dummy",
+    ])
+    .stdout(std::process::Stdio::null());
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let stderr = match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        Err(err) => {
+            log::warn!("decklink device scan failed: {err}");
+            return Vec::new();
+        }
+    };
+    parse_decklink_devices(&stderr)
+}
+
+fn parse_decklink_devices(text: &str) -> Vec<DecklinkDevice> {
+    let mut devices = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        // The header line "Blackmagic DeckLink devices:" itself
+        // matches our regex (it's wrapped in the [decklink @ ...]
+        // prefix on some builds, naked on others). Skip any name
+        // that's the header phrase.
+        let Some(caps) = DECKLINK_DEVICE_LINE.captures(line) else {
+            continue;
+        };
+        let name = caps[1].trim().to_string();
+        if name.is_empty()
+            || name.eq_ignore_ascii_case("Blackmagic DeckLink devices")
+            || seen.contains(&name)
+        {
+            continue;
+        }
+        seen.insert(name.clone());
+        devices.push(DecklinkDevice { name });
+    }
+    devices
+}
+
+fn scan_decklink_modes(device_name: &str) -> Vec<DecklinkMode> {
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args([
+        "-hide_banner",
+        "-f",
+        "decklink",
+        "-list_formats",
+        "1",
+        "-i",
+        device_name,
+    ])
+    .stdout(std::process::Stdio::null());
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let stderr = match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        Err(err) => {
+            log::warn!("decklink mode probe for {device_name:?} failed: {err}");
+            return Vec::new();
+        }
+    };
+    parse_decklink_modes(&stderr)
+}
+
+fn parse_decklink_modes(text: &str) -> Vec<DecklinkMode> {
+    let mut modes = Vec::new();
+    for line in text.lines() {
+        let Some(caps) = DECKLINK_FORMAT_LINE.captures(line) else {
+            continue;
+        };
+        let format_code = caps[1].to_string();
+        // The header row of the formats table has `format_code` as
+        // its first column literally — skip it.
+        if format_code.eq_ignore_ascii_case("format_code") {
+            continue;
+        }
+        let width: u32 = caps[2].parse().unwrap_or(0);
+        let height: u32 = caps[3].parse().unwrap_or(0);
+        let fps_num: u32 = caps[4].parse().unwrap_or(0);
+        let fps_den: u32 = caps[5].parse().unwrap_or(1).max(1);
+        let trailing = caps.get(7).map(|m| m.as_str()).unwrap_or("");
+        let interlaced = trailing.to_lowercase().contains("interlaced");
+        let description = line
+            .splitn(2, ']')
+            .nth(1)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| line.trim().to_string());
+        if width == 0 || height == 0 || fps_num == 0 {
+            continue;
+        }
+        modes.push(DecklinkMode {
+            format_code,
+            description,
+            width,
+            height,
+            fps_num,
+            fps_den,
+            interlaced,
+        });
+    }
+    modes
+}
+
+#[cfg(test)]
+mod decklink_tests {
+    use super::*;
+
+    #[test]
+    fn parse_devices_from_typical_output() {
+        // What `-f decklink -list_devices true -i dummy` writes
+        // on a machine with two cards. The "dummy:" trailing line
+        // is an immediate-exit error FFmpeg always prints.
+        let text = "\
+[decklink @ 0x600003b1c000] Blackmagic DeckLink devices:
+[decklink @ 0x600003b1c000] 'DeckLink Mini Monitor 4K'
+[decklink @ 0x600003b1c000] 'DeckLink 8K Pro (1)'
+[decklink @ 0x600003b1c000] 'DeckLink 8K Pro (2)'
+dummy: Immediate exit requested
+";
+        let devices = parse_decklink_devices(text);
+        let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "DeckLink Mini Monitor 4K",
+                "DeckLink 8K Pro (1)",
+                "DeckLink 8K Pro (2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_modes_skips_header_row() {
+        let text = "\
+[decklink @ 0x600003b1c000] Supported formats for 'DeckLink Mini Monitor 4K':
+[decklink @ 0x600003b1c000]   format_code  description
+[decklink @ 0x600003b1c000]   ntsc         720x486 at 30000/1001 fps (interlaced, lower field first)
+[decklink @ 0x600003b1c000]   Hp59         1920x1080 at 60000/1001 fps
+[decklink @ 0x600003b1c000]   Hp60         1920x1080 at 60000/1000 fps
+";
+        let modes = parse_decklink_modes(text);
+        assert_eq!(modes.len(), 3);
+        assert_eq!(modes[0].format_code, "ntsc");
+        assert!(modes[0].interlaced);
+        assert_eq!(modes[1].format_code, "Hp59");
+        assert_eq!(modes[1].width, 1920);
+        assert_eq!(modes[1].height, 1080);
+        assert_eq!(modes[1].fps_num, 60000);
+        assert_eq!(modes[1].fps_den, 1001);
+        assert!(!modes[1].interlaced);
+    }
+
+    #[test]
+    fn parse_devices_empty_on_no_decklink_output() {
+        // What we see when ffmpeg lacks decklink support OR the
+        // driver is missing — the prefix lines just aren't there.
+        assert!(parse_decklink_devices("").is_empty());
+        assert!(parse_decklink_devices("ffmpeg version blah blah").is_empty());
+    }
 }

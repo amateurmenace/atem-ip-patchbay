@@ -122,3 +122,61 @@ pub fn hide_console_tokio(cmd: &mut tokio::process::Command) {
 
 #[cfg(not(windows))]
 pub fn hide_console_tokio(_cmd: &mut tokio::process::Command) {}
+
+/// Cached "does our FFmpeg build include DeckLink output support?"
+/// Populated on first call via [`ffmpeg_has_decklink`]; the eager
+/// path is [`probe_decklink_support_eager`], called from Tauri
+/// setup() so the answer is ready before any UI thread asks.
+static HAS_DECKLINK: OnceLock<bool> = OnceLock::new();
+
+/// True iff the resolved FFmpeg binary was built with
+/// `--enable-decklink` (i.e. the DeckLink output muxer is registered).
+/// First call probes `ffmpeg -hide_banner -muxers` and caches; later
+/// calls are a single atomic load.
+///
+/// Used by the DeckLink-output destination path (Session 12) to gate
+/// the UI: the destination-type picker disables the DeckLink option
+/// when this is false and surfaces a "reinstall ATEM IP Patchbay —
+/// this build is missing DeckLink support" hint instead.
+///
+/// Why -muxers and not -outdevs / -formats / -h muxer=decklink:
+/// `-muxers` is the most stable single-purpose list, prints to stdout,
+/// always exits 0, and contains exactly one line per muxer ("E decklink
+/// Blackmagic DeckLink output" when present). The other options either
+/// share output channels with errors (-h exits with stderr on missing
+/// muxers) or include incidental matches (-formats lists demuxers too,
+/// though only the output direction matters for us).
+pub fn ffmpeg_has_decklink() -> bool {
+    *HAS_DECKLINK.get_or_init(probe_decklink_support)
+}
+
+fn probe_decklink_support() -> bool {
+    let mut cmd = std::process::Command::new(ffmpeg_path());
+    cmd.args(["-hide_banner", "-muxers"])
+        .stderr(std::process::Stdio::null());
+    hide_console_std(&mut cmd);
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("decklink probe: ffmpeg invocation failed: {e}");
+            return false;
+        }
+    };
+    if !output.status.success() {
+        log::warn!(
+            "decklink probe: ffmpeg -muxers exited {:?}",
+            output.status.code()
+        );
+        return false;
+    }
+    // -muxers output is one line per muxer; the decklink line looks
+    // like " E decklink           Blackmagic DeckLink output". A
+    // simple substring match is safe — "decklink" doesn't appear in
+    // any other registered muxer name in current FFmpeg builds.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let present = stdout
+        .lines()
+        .any(|line| line.contains("decklink"));
+    log::info!("ffmpeg decklink muxer present: {present}");
+    present
+}

@@ -70,9 +70,21 @@
   }
 
   function describeDest(snap) {
-    // Prefer the active resolved URL the streamer is actually using;
-    // fall back to the custom override the user typed in if no
-    // service XML is loaded.
+    // Session 12: DeckLink destinations don't have a URL at all —
+    // surface the device + output mode instead. The mental model
+    // shifts from "where on the network" to "which physical port",
+    // and the monitor window is the place an operator scanning
+    // multiple instances needs that distinction at a glance.
+    if (snap.destination_type === 'decklink') {
+      const dev = snap.decklink_device_name || '';
+      const mode = snap.decklink_output_mode || snap.decklink_format_code || '';
+      if (dev && mode) return `${dev} · ${mode}`;
+      if (dev) return dev;
+      return 'DeckLink — pick device';
+    }
+    // ATEM/SRT path — preserve existing behavior. Prefer the active
+    // resolved URL the streamer is using; fall back to the custom
+    // override the user typed in if no service XML is loaded.
     const url = snap.current_url || snap.custom_url || '';
     return shortenUrl(url, 38);
   }

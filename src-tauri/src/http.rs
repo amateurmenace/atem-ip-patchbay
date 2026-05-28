@@ -110,6 +110,7 @@ fn tile_api_routes() -> Router<HttpAppState> {
         .route("/preview/stop", post(api_preview_stop))
         .route("/log", get(api_log))
         .route("/devices", get(api_devices))
+        .route("/decklink-outputs", get(api_decklink_outputs))
         .route("/discover", get(api_discover))
         .route("/ndi-senders", get(api_ndi_senders))
         .route("/omt-senders", get(api_omt_senders))
@@ -237,15 +238,23 @@ async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
     // Flatten the encoder snapshot with the current preview status so
     // the JS poll loop sees both in one request — keeps the Preview
     // button label in sync with backend state without a second poll.
+    // Session 12 adds `ffmpeg_decklink_available` so the UI can gate
+    // the DeckLink destination-type picker on FFmpeg build support:
+    // disabled with a "reinstall ATEM IP Patchbay" hint when the
+    // probed muxer is absent, enabled (but possibly empty device
+    // list) when present. Read from the same OnceLock probe lib.rs
+    // primed at setup() — single atomic load per request.
     #[derive(Serialize)]
     struct StateResponse {
         #[serde(flatten)]
         snapshot: crate::state::Snapshot,
         preview: crate::preview::PreviewStatus,
+        ffmpeg_decklink_available: bool,
     }
     Json(StateResponse {
         snapshot: state.encoder.snapshot(),
         preview: state.preview.status().await,
+        ffmpeg_decklink_available: crate::ffmpeg_path::ffmpeg_has_decklink(),
     })
 }
 
@@ -507,6 +516,37 @@ async fn api_devices(Query(q): Query<HashMap<String, String>>) -> impl IntoRespo
     let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
     let devs = crate::device_scanner::list_capture_devices(force);
     Json(devs)
+}
+
+/// List DeckLink output devices visible to FFmpeg, with each device's
+/// supported output modes attached. Empty array is the operator's
+/// "missing prerequisite" signal — combined with the
+/// `ffmpeg_decklink_available` flag on `/api/state`, the UI can
+/// distinguish:
+///   - build-support absent (reinstall ATEM IP Patchbay)
+///   - build-support present, devices empty (install Blackmagic
+///     DeckLink Driver or connect a card)
+///   - devices populated (proceed)
+///
+/// `?force=1` bypasses both the device-list cache and the per-device
+/// mode cache (the device-list refresh path clears the mode cache
+/// because card add/remove invalidates everything).
+async fn api_decklink_outputs(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
+    let devices = crate::device_scanner::list_decklink_outputs(force);
+    #[derive(Serialize)]
+    struct DecklinkDeviceWithModes {
+        name: String,
+        modes: Vec<crate::device_scanner::DecklinkMode>,
+    }
+    let with_modes: Vec<DecklinkDeviceWithModes> = devices
+        .into_iter()
+        .map(|d| {
+            let modes = crate::device_scanner::probe_decklink_modes(&d.name);
+            DecklinkDeviceWithModes { name: d.name, modes }
+        })
+        .collect();
+    Json(with_modes)
 }
 
 /// NDI source list, fed by the grafton-ndi Finder. /api/discover and
@@ -877,6 +917,15 @@ struct SettingsPayload {
     label: Option<String>,
     relay: Option<RelayPayload>,
     overlay: Option<OverlayPayload>,
+    // Session 12 destination shape — flat siblings of the ATEM-side
+    // fields above. JS posts these alongside the existing keys via the
+    // same /api/settings endpoint; the apply_settings handler validates
+    // destination_type.
+    destination_type: Option<String>,
+    decklink_device_name: Option<String>,
+    decklink_output_mode: Option<String>,
+    decklink_format_code: Option<String>,
+    decklink_pixel_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1057,6 +1106,11 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
                 logo_path: o.logo_path,
                 clock: o.clock,
             }),
+            destination_type: p.destination_type,
+            decklink_device_name: p.decklink_device_name,
+            decklink_output_mode: p.decklink_output_mode,
+            decklink_format_code: p.decklink_format_code,
+            decklink_pixel_format: p.decklink_pixel_format,
         }
     }
 }

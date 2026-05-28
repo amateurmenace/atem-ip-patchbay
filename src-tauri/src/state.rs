@@ -201,6 +201,34 @@ struct Inner {
 
     video_codec: String,
 
+    // Session 12: destination_type drives whether the streamer pushes
+    // BMD-flavored SRT to an ATEM (`"atem"`, default — every existing
+    // ATEM-side field above applies) or sends raw video/audio out a
+    // local Blackmagic DeckLink card (`"decklink"`, new — the
+    // decklink_* fields below apply). The Snapshot::is_decklink()
+    // helper is the consumer-side switch; build_plan / build_ffmpeg_cmd
+    // branch on it for the actual command construction.
+    destination_type: String,
+    /// DeckLink output device name as reported by FFmpeg's
+    /// `-f decklink -list_devices true -i dummy` (matched
+    /// case-sensitively when passed back to `-i <name>`). Empty when
+    /// destination_type=="atem" or when no device has been picked yet.
+    decklink_device_name: String,
+    /// User-friendly mode label like "1080p59.94" — what the UI
+    /// shows. Stored alongside decklink_format_code so the streamer
+    /// can both surface human strings and pass FFmpeg the exact code.
+    decklink_output_mode: String,
+    /// FFmpeg's format_code for the picked mode — e.g. "Hp59" for
+    /// 1080p59.94. Sent to FFmpeg as `-format_code <code>`. Looked up
+    /// from device_scanner::probe_decklink_modes() when the UI
+    /// commits a mode change.
+    decklink_format_code: String,
+    /// Pixel format for the DeckLink output. Defaults to "uyvy422"
+    /// (8-bit 4:2:2 YUV, the most universally supported DeckLink
+    /// pixel format). Advanced override for 10-bit cards is forward-
+    /// looking; UI currently doesn't expose it.
+    decklink_pixel_format: String,
+
     stats: StreamStats,
 }
 
@@ -253,6 +281,11 @@ impl EncoderState {
                 streamid_override: String::new(),
                 streamid_legacy: false,
                 video_codec: "h265".into(),
+                destination_type: "atem".into(),
+                decklink_device_name: String::new(),
+                decklink_output_mode: String::new(),
+                decklink_format_code: String::new(),
+                decklink_pixel_format: "uyvy422".into(),
                 stats: StreamStats::default(),
             }),
         }
@@ -532,6 +565,30 @@ impl EncoderState {
             if let Some(v) = &o.logo_path { inner.overlay_logo_path = v.clone(); }
             if let Some(v) = o.clock { inner.overlay_clock = v; }
         }
+        // Session 12: destination_type + decklink_* fields.
+        // destination_type is validated against the known set; unknown
+        // values are silently rejected (matches video_mode / srt_mode
+        // handling above) so a stale JS client can't put state into a
+        // never-implemented destination kind.
+        if let Some(v) = &update.destination_type {
+            if matches!(v.as_str(), "atem" | "decklink") {
+                inner.destination_type = v.clone();
+            }
+        }
+        if let Some(v) = &update.decklink_device_name {
+            inner.decklink_device_name = v.clone();
+        }
+        if let Some(v) = &update.decklink_output_mode {
+            inner.decklink_output_mode = v.clone();
+        }
+        if let Some(v) = &update.decklink_format_code {
+            inner.decklink_format_code = v.clone();
+        }
+        if let Some(v) = &update.decklink_pixel_format {
+            if !v.trim().is_empty() {
+                inner.decklink_pixel_format = v.clone();
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -667,6 +724,11 @@ impl EncoderState {
                 frames_dropped: inner.stats.frames_dropped,
                 quality: round1(inner.stats.quality),
             },
+            destination_type: inner.destination_type.clone(),
+            decklink_device_name: inner.decklink_device_name.clone(),
+            decklink_output_mode: inner.decklink_output_mode.clone(),
+            decklink_format_code: inner.decklink_format_code.clone(),
+            decklink_pixel_format: inner.decklink_pixel_format.clone(),
         }
     }
 }
@@ -844,6 +906,12 @@ pub struct SettingsUpdate {
     // partial update from the UI doesn't clobber unrelated values.
     pub relay: Option<RelaySettingsUpdate>,
     pub overlay: Option<OverlaySettingsUpdate>,
+    // Session 12 destination shape. None = leave field unchanged.
+    pub destination_type: Option<String>,
+    pub decklink_device_name: Option<String>,
+    pub decklink_output_mode: Option<String>,
+    pub decklink_format_code: Option<String>,
+    pub decklink_pixel_format: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -915,6 +983,26 @@ pub struct Snapshot {
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,
     pub stats: StatsSnapshot,
+    // Session 12 destination fields. Flat on the wire — JS reads
+    // `snap.destination_type` / `snap.decklink_device_name` / etc.
+    // directly without a nested wrapper.
+    pub destination_type: String,
+    pub decklink_device_name: String,
+    pub decklink_output_mode: String,
+    pub decklink_format_code: String,
+    pub decklink_pixel_format: String,
+}
+
+impl Snapshot {
+    /// True when the operator has picked DeckLink output rather than
+    /// the default SRT-to-ATEM destination. Consumed by build_plan
+    /// (validation set differs) and build_ffmpeg_cmd (output muxer
+    /// differs — raw decklink output vs. mpegts/flv push). The
+    /// flat-field storage keeps wire compat; this helper exists so
+    /// consumers don't lift the string comparison.
+    pub fn is_decklink(&self) -> bool {
+        self.destination_type == "decklink"
+    }
 }
 
 #[derive(Serialize, Debug)]

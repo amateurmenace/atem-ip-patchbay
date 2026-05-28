@@ -148,7 +148,20 @@ const els = {
   srtListenerOnly:  $$('.srt-listener-only'),
   streamidOverride: $('#streamid-override'),
   streamidLegacy:   $('#streamid-legacy'),
+
+  // Session 12 — destination-type picker + DeckLink output config
+  destTypeRow:        $('#dest-type-row'),
+  destTypeSegs:       $$('input[name="dest-type"]'),
+  destAtemBody:       $('#dest-atem-body'),
+  destDecklinkBody:   $('#dest-decklink-body'),
+  destDecklinkUnsupported: $('#dest-decklink-unsupported'),
+  decklinkDevice:     $('#decklink-device'),
+  decklinkMode:       $('#decklink-mode'),
+  decklinkDeviceStatus: $('#decklink-device-status'),
+  decklinkRefresh:    $('#decklink-refresh'),
 };
+
+let knownDecklinkDevices = []; // populated by fetchDecklinkDevices()
 
 let lastSnapshot   = null;
 let knownDevices   = { video: [], audio: [] };
@@ -261,6 +274,129 @@ async function applySettings(patch) {
     });
     render(snap);
   } catch (_e) { /* ignore */ }
+}
+
+// -----------------------------------------------------------------
+// Session 12 — DeckLink output destination
+// -----------------------------------------------------------------
+
+/// Fetch the current DeckLink output devices + per-device modes from
+/// the backend. Empty result is the operator's "missing prerequisite"
+/// signal — distinguished from "FFmpeg lacks --enable-decklink" by
+/// the ffmpeg_decklink_available flag on /api/state.
+async function fetchDecklinkDevices(force = false) {
+  try {
+    const url = force ? '/api/decklink-outputs?force=1' : '/api/decklink-outputs';
+    const list = await fetchJSON(url);
+    knownDecklinkDevices = Array.isArray(list) ? list : [];
+  } catch (_e) {
+    knownDecklinkDevices = [];
+  }
+  // Re-render against the last-seen snapshot so the dropdowns update
+  // immediately after a refresh click without waiting for the next
+  // /api/state poll tick.
+  if (lastSnapshot) renderDecklinkDestination(lastSnapshot);
+}
+
+/// Update the DeckLink picker (device + mode dropdowns) from the
+/// current snapshot. Also gates visibility of the DeckLink body block
+/// and toggles the "FFmpeg lacks DeckLink support" warning.
+function renderDecklinkDestination(snap) {
+  if (!els.destDecklinkBody) return;
+
+  const ffmpegHasDecklink = !!snap.ffmpeg_decklink_available;
+  const destType = snap.destination_type || 'atem';
+  const isDecklink = destType === 'decklink';
+
+  // Toggle which body block is visible. The ATEM body is the existing
+  // dest-wizard div; the DeckLink body is the new dest-decklink-body
+  // sibling.
+  if (els.destAtemBody) els.destAtemBody.hidden = isDecklink;
+  els.destDecklinkBody.hidden = !isDecklink;
+
+  // Segmented control reflects current state. Disable the DeckLink
+  // radio when the FFmpeg build lacks support — surfaced with the
+  // dest-decklink-unsupported hint below the segments.
+  for (const seg of els.destTypeSegs) {
+    if (seg.value === 'decklink') {
+      seg.disabled = !ffmpegHasDecklink;
+    }
+    if (document.activeElement !== seg) {
+      seg.checked = (seg.value === destType);
+    }
+  }
+  if (els.destDecklinkUnsupported) {
+    els.destDecklinkUnsupported.hidden = ffmpegHasDecklink;
+  }
+
+  // Populate the device dropdown. Always include the current pick at
+  // the top even if it's not in the latest scan — operator might have
+  // a card temporarily unplugged that they want to re-plug; we don't
+  // erase their state.
+  const devicePicks = knownDecklinkDevices.map((d) => ({
+    value: d.name,
+    label: d.name,
+  }));
+  const currentDevice = snap.decklink_device_name || '';
+  if (currentDevice && !devicePicks.some((d) => d.value === currentDevice)) {
+    devicePicks.unshift({
+      value: currentDevice,
+      label: `${currentDevice} (not connected)`,
+    });
+  }
+  if (devicePicks.length === 0) {
+    devicePicks.push({ value: '', label: '— No DeckLink devices found —' });
+  }
+  setOptions(els.decklinkDevice, devicePicks, currentDevice);
+
+  // Populate the mode dropdown from the picked device's modes. Empty
+  // when no device picked OR when the picked device has no probed
+  // modes yet (the per-device probe is lazy — happens server-side on
+  // the first /api/decklink-outputs call for the named device).
+  const pickedDevice = knownDecklinkDevices.find((d) => d.name === currentDevice);
+  const modePicks = (pickedDevice?.modes || []).map((m) => ({
+    value: m.format_code,
+    label: humanizeDecklinkMode(m),
+  }));
+  if (modePicks.length === 0) {
+    modePicks.push({ value: '', label: '— Pick a device first —' });
+  }
+  setOptions(els.decklinkMode, modePicks, snap.decklink_format_code || '');
+
+  // Status hint below the device select — surfaces driver/build state.
+  if (els.decklinkDeviceStatus) {
+    if (!ffmpegHasDecklink) {
+      els.decklinkDeviceStatus.textContent =
+        'FFmpeg build lacks DeckLink support — reinstall the app.';
+    } else if (knownDecklinkDevices.length === 0) {
+      els.decklinkDeviceStatus.textContent =
+        'No DeckLink devices found. Install the Blackmagic DeckLink Driver and plug in a card.';
+    } else {
+      els.decklinkDeviceStatus.textContent =
+        `${knownDecklinkDevices.length} device${knownDecklinkDevices.length === 1 ? '' : 's'} available.`;
+    }
+  }
+
+  // Destination aux label in the card title — switch to DeckLink-flavored
+  // when DeckLink is active.
+  if (isDecklink) {
+    if (currentDevice) {
+      const modeLabel = snap.decklink_output_mode || snap.decklink_format_code || '—';
+      els.destAux.textContent = `DECKLINK → ${currentDevice} · ${modeLabel}`;
+    } else {
+      els.destAux.textContent = 'DECKLINK · pick a device';
+    }
+  }
+}
+
+/// Build a human-friendly mode label from a DecklinkMode object.
+/// Example: "1080p59.94 (Hp59)".
+function humanizeDecklinkMode(m) {
+  const fps = m.fps_num / Math.max(1, m.fps_den);
+  // Trim trailing zeros: 59.94 -> 59.94, 60.00 -> 60.
+  const fpsLabel = fps.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  const scan = m.interlaced ? 'i' : 'p';
+  return `${m.height}${scan}${fpsLabel}  (${m.format_code})`;
 }
 
 // -----------------------------------------------------------------
@@ -1066,6 +1202,12 @@ function render(snap) {
     els.destAux.textContent = 'no destination';
   }
 
+  // Session 12 — DeckLink destination toggling. Renders last so it
+  // can overwrite destAux with the DeckLink-flavored label when the
+  // operator has switched to a DeckLink output. Otherwise hides the
+  // DeckLink body and lets the ATEM body keep its rendering above.
+  renderDecklinkDestination(snap);
+
   if (document.activeElement !== els.srtMode) els.srtMode.value = snap.srt_mode || 'caller';
   if (document.activeElement !== els.srtLatency) els.srtLatency.value = Math.round((snap.srt_latency_us || 500000) / 1000);
   if (document.activeElement !== els.srtListenPort) els.srtListenPort.value = snap.srt_listen_port || 9710;
@@ -1521,6 +1663,45 @@ function bind() {
   els.destAddress.addEventListener('change', () => applyAddressInput(els.destAddress.value));
   els.streamKey.addEventListener('change', () => applySettings({ stream_key: els.streamKey.value }));
   els.passphrase.addEventListener('change', () => applySettings({ passphrase: els.passphrase.value }));
+
+  // Session 12 — destination-type segmented control
+  els.destTypeSegs.forEach((r) => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      // Fetch DeckLink devices on first switch into DeckLink mode so
+      // the dropdown isn't empty when the body becomes visible. Idempotent
+      // — if the device list is already populated this is a no-op refresh.
+      if (r.value === 'decklink') fetchDecklinkDevices(false);
+      applySettings({ destination_type: r.value });
+    });
+  });
+  // Device picker — also clears the picked mode so the user doesn't
+  // accidentally try to drive Card B with Card A's mode code.
+  els.decklinkDevice.addEventListener('change', () => {
+    applySettings({
+      decklink_device_name: els.decklinkDevice.value,
+      decklink_format_code: '',
+      decklink_output_mode: '',
+    });
+  });
+  els.decklinkMode.addEventListener('change', () => {
+    // Look up the human-friendly mode label from the picked device's
+    // modes so snapshot's decklink_output_mode stays in sync with the
+    // dropdown. Fall back to the format_code itself if the device
+    // isn't in our local cache (shouldn't happen — defensive).
+    const pickedCode = els.decklinkMode.value;
+    const dev = knownDecklinkDevices.find(
+      (d) => d.name === els.decklinkDevice.value,
+    );
+    const mode = dev?.modes?.find((m) => m.format_code === pickedCode);
+    applySettings({
+      decklink_format_code: pickedCode,
+      decklink_output_mode: mode ? humanizeDecklinkMode(mode) : pickedCode,
+    });
+  });
+  if (els.decklinkRefresh) {
+    els.decklinkRefresh.addEventListener('click', () => fetchDecklinkDevices(true));
+  }
 
   // Segmented controls — Protocol + Codec
   els.protoSegs.forEach((r) => r.addEventListener('change', () => {
@@ -2751,6 +2932,11 @@ bind();
 ensureDevicesLoaded();
 ensureNdiLoaded();
 ensureOmtLoaded();
+// Session 12 — populate the DeckLink device dropdown on boot so the
+// picker is ready when the operator switches to DeckLink mode. The
+// FFmpeg probe is cheap (one process invocation) and runs once per
+// process; subsequent calls hit the 60s cache.
+fetchDecklinkDevices(false);
 // Probe every IPv4 interface so the wizard can show a picker when
 // the host has more than one (Wi-Fi + Ethernet, VPN, Apple Internet
 // Sharing, etc.). The legacy /api/lan-ip single-result endpoint is
