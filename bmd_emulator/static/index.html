@@ -938,6 +938,24 @@
       <section class="card audio-mixer-card">
         <div class="card-title"><span>Audio Mixer</span></div>
 
+        <!-- alpha.31: VU meters. Hidden until meters_enabled is set
+             via the Advanced encoder/audio panel (where the toggle
+             lives). When active, /api/audio-levels polls at 4Hz and
+             repaints these canvases with green/yellow/red zones +
+             1.5s peak-hold. -->
+        <div class="audio-meters" id="audio-meters" hidden>
+          <div class="audio-meter-row">
+            <span class="audio-meter-label">L</span>
+            <canvas id="audio-meter-l" class="audio-meter-canvas" width="320" height="12"></canvas>
+            <span class="audio-meter-db" id="audio-meter-l-db">—</span>
+          </div>
+          <div class="audio-meter-row">
+            <span class="audio-meter-label">R</span>
+            <canvas id="audio-meter-r" class="audio-meter-canvas" width="320" height="12"></canvas>
+            <span class="audio-meter-db" id="audio-meter-r-db">—</span>
+          </div>
+        </div>
+
         <p class="audio-mixer-disclaimer">
           By default we pull audio straight from the Video Source you picked above
           (a webcam's built-in mic, an NDI sender's audio, the audio track of a

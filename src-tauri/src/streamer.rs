@@ -1442,6 +1442,47 @@ impl Streamer {
     }
 
     async fn handle_log_line(&self, line: &str) {
+        // alpha.31: astats metadata lines are high-volume (40+/sec
+        // when meters_enabled). Skip storing them in the LOG_TAIL_-
+        // bounded buffer or running them through the rest of the
+        // parsing pipeline — they're not interesting for log tail,
+        // status detection, or error heuristics. Parse + update the
+        // audio level fields, then bail.
+        if line.contains("lavfi.astats.") {
+            if let Some((channel, metric, value)) = parse_astats_line(line) {
+                let now = unix_epoch_secs_f64();
+                self.state.stats_in_place(|s| {
+                    let updated = match (channel, metric) {
+                        (1, AstatsMetric::Rms) => {
+                            s.audio_db_rms_l = value;
+                            true
+                        }
+                        (1, AstatsMetric::Peak) => {
+                            s.audio_db_peak_l = value;
+                            true
+                        }
+                        (2, AstatsMetric::Rms) => {
+                            s.audio_db_rms_r = value;
+                            true
+                        }
+                        (2, AstatsMetric::Peak) => {
+                            s.audio_db_peak_r = value;
+                            true
+                        }
+                        _ => false, // ignore Overall + channels 3+
+                    };
+                    if updated {
+                        s.audio_levels_at = now;
+                    }
+                });
+            }
+            // Whether or not we matched, the line is astats spam —
+            // don't fall through to the log-tail buffer or the
+            // error heuristic (which would false-positive on the
+            // word "error" in some metric names).
+            return;
+        }
+
         {
             let mut inner = self.inner.lock().await;
             if inner.last_log_lines.len() == LOG_TAIL_CAPACITY {
@@ -1508,6 +1549,53 @@ impl Streamer {
 /// recover. When any of these are seen, status flips to Interrupted
 /// and the line becomes the visible error in the UI's error banner
 /// — without waiting for the process to actually exit.
+/// alpha.31: audio meters helper. The kind of dB measurement
+/// astats reports on a given log line.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum AstatsMetric {
+    Rms,
+    Peak,
+}
+
+/// Parse a single FFmpeg stderr line for an `lavfi.astats.<channel>.
+/// <metric>=<dB>` measurement. Returns (channel_number, metric_kind,
+/// value_db) when matched. `channel_number` is 1-indexed (matches
+/// FFmpeg's astats output convention). Returns None for the "Overall"
+/// pseudo-channel + for metrics we don't render (Min_level, Max_level,
+/// DC_offset, etc.).
+///
+/// Example matched lines (the `[Parsed_ametadata_N @ 0x...]` prefix
+/// is tolerated but not required):
+///   "[Parsed_ametadata_1 @ 0x7f80] lavfi.astats.1.RMS_level=-23.456"
+///   "lavfi.astats.2.Peak_level=-12.345"
+fn parse_astats_line(line: &str) -> Option<(u32, AstatsMetric, f32)> {
+    let idx = line.find("lavfi.astats.")?;
+    let rest = &line[idx + "lavfi.astats.".len()..];
+    let dot = rest.find('.')?;
+    let channel_str = &rest[..dot];
+    // "Overall" is the pseudo-channel that aggregates all real
+    // channels; ignore it (UI is per-channel L/R).
+    let channel: u32 = channel_str.parse().ok()?;
+    let rest = &rest[dot + 1..];
+    let eq = rest.find('=')?;
+    let metric_str = &rest[..eq];
+    let metric_kind = match metric_str {
+        "RMS_level" => AstatsMetric::Rms,
+        "Peak_level" => AstatsMetric::Peak,
+        _ => return None,
+    };
+    let value_str = rest[eq + 1..].trim();
+    let value: f32 = value_str.parse().ok()?;
+    Some((channel, metric_kind, value))
+}
+
+fn unix_epoch_secs_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 /// Auto-reconnect backoff schedule (alpha.30). `next_attempt` is
 /// the attempt number we're about to fire (so 2 = first retry after
 /// the initial attempt failed). Caps at 60s. Returns 0 for
@@ -1680,6 +1768,19 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
 
     if snap.audio_mode == "silent" {
         chain.push("volume=0".into());
+    }
+
+    // alpha.31: audio level meters. astats computes per-channel RMS
+    // + peak every `length` seconds; ametadata=mode=print emits
+    // those metrics as log lines that our stderr reader parses in
+    // handle_log_line. length=0.25 gives 4Hz updates which matches
+    // the UI's polling cadence — bumping faster would generate
+    // stderr spam without UI benefit. direct=1 disables ametadata's
+    // internal buffering so the lines arrive promptly. Skip when
+    // the destination is DeckLink (raw output, no encoder pipeline).
+    if snap.meters_enabled && !snap.is_decklink() {
+        chain.push("astats=metadata=1:reset=1:length=0.25".into());
+        chain.push("ametadata=mode=print:direct=1".into());
     }
 
     if chain.is_empty() {

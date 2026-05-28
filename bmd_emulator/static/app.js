@@ -3179,6 +3179,117 @@ setInterval(() => ensureNdiLoaded(true), 30000);
 // otherwise.
 setInterval(() => ensureOmtLoaded(true), 30000);
 
+// alpha.31: audio level meters. Independent 4Hz polling so the meter
+// responsiveness doesn't hinge on the main /api/state 1Hz cadence.
+// Self-gates: when meters_enabled is false the loop just hides the
+// meters and skips the fetch.
+const audioMeterState = {
+  // Peak-hold state per channel. Each entry is { value, holdUntilMs }.
+  // value decays back to the live peak after holdUntilMs elapses.
+  peakHold: { l: { value: -120, holdUntil: 0 }, r: { value: -120, holdUntil: 0 } },
+  // Most recent live values (used when the server reports stale data
+  // — we fade meters to silence rather than freezing the bar).
+  lastFresh: { rms_l: -120, rms_r: -120, peak_l: -120, peak_r: -120, age: 0 },
+};
+const PEAK_HOLD_MS = 1500;
+const METER_DB_FLOOR = -60;
+const METER_DB_CEIL = 0;
+
+function dbToFrac(db) {
+  // Clamp + linear-map [-60, 0] dB → [0, 1].
+  if (db <= METER_DB_FLOOR) return 0;
+  if (db >= METER_DB_CEIL) return 1;
+  return (db - METER_DB_FLOOR) / (METER_DB_CEIL - METER_DB_FLOOR);
+}
+
+function renderMeter(canvas, rmsDb, peakDb, peakHoldDb) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Background bar (always visible, very dim).
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+  ctx.fillRect(0, 0, w, h);
+
+  // RMS bar — green (<-18), yellow (-18 to -6), red (-6 to 0).
+  const rmsFrac = dbToFrac(rmsDb);
+  const rmsW = Math.round(rmsFrac * w);
+  if (rmsW > 0) {
+    // Gradient stops match the dB zones.
+    const grad = ctx.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, '#1f8a3f'); // green
+    grad.addColorStop(dbToFrac(-18), '#1f8a3f');
+    grad.addColorStop(dbToFrac(-18) + 0.001, '#d9b32a'); // yellow
+    grad.addColorStop(dbToFrac(-6), '#d9b32a');
+    grad.addColorStop(dbToFrac(-6) + 0.001, '#c64545'); // red
+    grad.addColorStop(1, '#c64545');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, rmsW, h);
+  }
+
+  // Peak-hold tick: small vertical line at the held peak position.
+  const peakFrac = dbToFrac(peakHoldDb);
+  const peakX = Math.round(peakFrac * w);
+  if (peakX > 0 && peakX < w) {
+    ctx.fillStyle = peakHoldDb >= -6 ? '#ff6b6b' : peakHoldDb >= -18 ? '#ffdf6b' : '#74d791';
+    ctx.fillRect(peakX - 1, 0, 2, h);
+  }
+}
+
+function updatePeakHold(channelState, livePeakDb, nowMs) {
+  if (livePeakDb > channelState.value || nowMs >= channelState.holdUntil) {
+    channelState.value = livePeakDb;
+    channelState.holdUntil = nowMs + PEAK_HOLD_MS;
+  }
+}
+
+async function tickAudioMeters() {
+  const wrap = document.getElementById('audio-meters');
+  if (!wrap) return;
+  try {
+    const resp = await fetch('/api/audio-levels');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    // Toggle visibility based on backend's meters_enabled flag.
+    wrap.hidden = !data.meters_enabled;
+    if (!data.meters_enabled) return;
+
+    // Stale-data detection. If the server hasn't received any astats
+    // updates in >0.7s, the stream is paused or the encoder isn't
+    // running — fade meters to silence rather than freezing at the
+    // last live value.
+    const idleSecs = Math.max(0, data.server_time - (data.updated_at || 0));
+    const fresh = idleSecs < 0.7 && data.updated_at > 0;
+
+    const rmsL = fresh ? data.rms_l : -120;
+    const rmsR = fresh ? data.rms_r : -120;
+    const peakL = fresh ? data.peak_l : -120;
+    const peakR = fresh ? data.peak_r : -120;
+
+    const nowMs = performance.now();
+    updatePeakHold(audioMeterState.peakHold.l, peakL, nowMs);
+    updatePeakHold(audioMeterState.peakHold.r, peakR, nowMs);
+
+    const canL = document.getElementById('audio-meter-l');
+    const canR = document.getElementById('audio-meter-r');
+    if (canL) renderMeter(canL, rmsL, peakL, audioMeterState.peakHold.l.value);
+    if (canR) renderMeter(canR, rmsR, peakR, audioMeterState.peakHold.r.value);
+
+    const dbLEl = document.getElementById('audio-meter-l-db');
+    const dbREl = document.getElementById('audio-meter-r-db');
+    if (dbLEl) dbLEl.textContent = fresh ? `${rmsL.toFixed(1)} dB` : '—';
+    if (dbREl) dbREl.textContent = fresh ? `${rmsR.toFixed(1)} dB` : '—';
+  } catch (_e) {
+    // Silently skip — meters are a non-critical visualization, no
+    // need to surface a network error on every tick.
+  }
+}
+
+setInterval(tickAudioMeters, 250);
+tickAudioMeters();
+
 // Tauri's WebView ships with no menu bar and no built-in reload
 // shortcut, which is friction during dev iteration. Bind the same
 // keys a normal browser would: Cmd/Ctrl-R, Cmd-Shift-R (force),

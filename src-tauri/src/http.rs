@@ -103,6 +103,7 @@ pub async fn bind_with_walk(start_port: u16) -> Result<(u16, TcpListener)> {
 fn tile_api_routes() -> Router<HttpAppState> {
     Router::new()
         .route("/state", get(api_state))
+        .route("/audio-levels", get(api_audio_levels))
         .route("/lan-ip", get(api_lan_ip))
         .route("/lan-ips", get(api_lan_ips))
         .route("/preview", get(api_preview))
@@ -260,6 +261,55 @@ async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
         preview: state.preview.status().await,
         ffmpeg_decklink_available: crate::ffmpeg_path::ffmpeg_has_decklink(),
         available_encoders: crate::ffmpeg_path::available_encoders().to_vec(),
+    })
+}
+
+/// alpha.31: audio level meters. Returns the latest per-channel
+/// RMS + peak dB values for the UI's canvas VU meters, plus a
+/// server-side timestamp so the UI can detect stalled streams
+/// (audio_levels_at - server_time > ~0.5s = stream stalled,
+/// fade meters to silence). Polled at 4Hz independently of
+/// /api/state so the meter responsiveness doesn't depend on
+/// the main state poll's 1Hz cadence.
+async fn api_audio_levels(State(state): State<HttpAppState>) -> impl IntoResponse {
+    #[derive(Serialize)]
+    struct AudioLevelsResponse {
+        rms_l: f32,
+        rms_r: f32,
+        peak_l: f32,
+        peak_r: f32,
+        /// Server-clock unix epoch seconds when the levels were
+        /// last updated by the FFmpeg stderr parser. 0.0 means
+        /// they haven't been updated yet this session.
+        updated_at: f64,
+        /// Server's current wall-clock for the UI's idle detection
+        /// (always reasonably close to client time — these are
+        /// the same machine in normal operation).
+        server_time: f64,
+        /// Whether the meters_enabled toggle is set. Lets the UI
+        /// gate its 4Hz polling so we don't burn CPU on /api/state
+        /// + /api/audio-levels both at high frequency when meters
+        /// are off.
+        meters_enabled: bool,
+    }
+    let snap = state.encoder.snapshot();
+    // Snapshot already exposes stats; pull the audio fields
+    // directly. read_stats() is a separate lock acquisition to
+    // avoid serializing the whole snapshot when we only need 5
+    // floats.
+    let (rms_l, rms_r, peak_l, peak_r, updated_at) = state.encoder.read_audio_levels();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Json(AudioLevelsResponse {
+        rms_l,
+        rms_r,
+        peak_l,
+        peak_r,
+        updated_at,
+        server_time: now,
+        meters_enabled: snap.meters_enabled,
     })
 }
 

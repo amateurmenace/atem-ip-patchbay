@@ -1117,6 +1117,48 @@ button.big { padding: 14px 18px; font-size: 14px; }
 .audio-mixer-card {
   /* Inherits .card base; just need a bit of internal rhythm. */
 }
+
+/* alpha.31: VU meters above the disclaimer. Two rows (L/R) each
+   with a channel label, a canvas (drawn by app.js), and a numeric
+   dB readout. Sized to fit comfortably in the Audio Mixer card
+   without crowding the existing controls. */
+.audio-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.audio-meter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.audio-meter-label {
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+.audio-meter-canvas {
+  flex: 1;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 2px;
+}
+.audio-meter-db {
+  width: 46px;
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
 .audio-mixer-disclaimer {
   margin: 0 0 14px;
   padding: 10px 14px;

@@ -88,6 +88,18 @@ pub struct StreamStats {
     /// Resets to 0 only on a fresh user-initiated start; survives the
     /// 60s-stable counter reset so the operator sees the total churn.
     pub total_reconnects_this_session: u32,
+    /// alpha.31: audio level meters. Per-channel RMS + peak in dB
+    /// (negative = quieter than full scale). Updated by the FFmpeg
+    /// stderr parser when the astats filter is active. UI polls
+    /// /api/audio-levels at 4Hz to render canvas VU meters.
+    pub audio_db_rms_l: f32,
+    pub audio_db_rms_r: f32,
+    pub audio_db_peak_l: f32,
+    pub audio_db_peak_r: f32,
+    /// Wall-clock seconds since UNIX epoch when audio_db_* was last
+    /// updated. UI uses (server_time - this) to decide whether to
+    /// fade meters to zero on idle (>500ms = stream stalled / paused).
+    pub audio_levels_at: f64,
 }
 
 impl Default for StreamStats {
@@ -106,6 +118,15 @@ impl Default for StreamStats {
             reconnect_attempt: 0,
             reconnect_next_secs: 0,
             total_reconnects_this_session: 0,
+            // -120 dB ≈ silence. Defaulting at -120 (rather than 0)
+            // means the UI's "meter at idle" position is at the very
+            // bottom of the bar instead of pegged at full scale, which
+            // matches operator expectation.
+            audio_db_rms_l: -120.0,
+            audio_db_rms_r: -120.0,
+            audio_db_peak_l: -120.0,
+            audio_db_peak_r: -120.0,
+            audio_levels_at: 0.0,
         }
     }
 }
@@ -499,6 +520,22 @@ impl EncoderState {
     pub fn stats_in_place<F: FnOnce(&mut StreamStats)>(&self, f: F) {
         let mut inner = self.inner.write().unwrap();
         f(&mut inner.stats);
+    }
+
+    /// alpha.31: read-only fast path for /api/audio-levels. Returns
+    /// (rms_l, rms_r, peak_l, peak_r, updated_at) without going
+    /// through the full snapshot machinery — the 4Hz audio-meter
+    /// poll is on the hot path so we avoid cloning the entire
+    /// EncoderState's worth of strings.
+    pub fn read_audio_levels(&self) -> (f32, f32, f32, f32, f64) {
+        let inner = self.inner.read().unwrap();
+        (
+            inner.stats.audio_db_rms_l,
+            inner.stats.audio_db_rms_r,
+            inner.stats.audio_db_peak_l,
+            inner.stats.audio_db_peak_r,
+            inner.stats.audio_levels_at,
+        )
     }
 
     /// Set the AVFoundation / DirectShow defaults from a fresh device
