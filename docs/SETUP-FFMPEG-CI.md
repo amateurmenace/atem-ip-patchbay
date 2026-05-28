@@ -31,11 +31,11 @@ or anonymous-mirror CI can curl against. So we mirror the SDK
 1. Visit https://www.blackmagicdesign.com/support/family/capture-and-playback
 2. Select your operating system (any — the SDK is multi-platform).
 3. Find "Desktop Video SDK" in the list. As of 2026-05, the latest
-   stable is **14.4** (the version pinned in `ci/ffmpeg-pins.env`).
+   stable is **16.0** (the version pinned in `ci/ffmpeg-pins.env`).
 4. Click the download link. You'll see a registration form — fill
    it in (you may need a Blackmagic Design account). Accept the
    EULA when prompted.
-5. The download arrives as `Blackmagic_DeckLink_SDK_14.4.zip`
+5. The download arrives as `Blackmagic_DeckLink_SDK_16.0.zip`
    (~30 MB). Keep this file; you'll upload it to the mirror.
 
 > **Important:** if you bump `BMD_SDK_VERSION` in
@@ -62,14 +62,14 @@ fetches the asset directly.
 ## Step 3 — Upload the SDK as a release asset
 
 ```sh
-gh release create v14.4 \
+gh release create v16.0 \
   --repo amateurmenace/bmd-decklink-sdk-mirror \
-  --title "Blackmagic DeckLink SDK 14.4" \
+  --title "Blackmagic DeckLink SDK 16.0" \
   --notes "Mirror for CI. Source: blackmagicdesign.com (EULA-accepted download). Do not redistribute." \
-  ./Blackmagic_DeckLink_SDK_14.4.zip
+  ./Blackmagic_DeckLink_SDK_16.0.zip
 ```
 
-The tag (`v14.4`) is what `build-ffmpeg.yml` looks for. It must
+The tag (`v16.0`) is what `build-ffmpeg.yml` looks for. It must
 match `BMD_SDK_VERSION` in `ci/ffmpeg-pins.env` exactly (the `v`
 prefix is added by the workflow).
 
@@ -137,7 +137,7 @@ Subsequent dispatches against the same pins re-do the full build
 (no caching at this layer; the GitHub Release is the cache).
 
 Successful build produces a prerelease at
-`https://github.com/amateurmenace/atem-ip-patchbay/releases/tag/ffmpeg-decklink-8.1.1-bmd14.4-rev1`
+`https://github.com/amateurmenace/atem-ip-patchbay/releases/tag/ffmpeg-decklink-8.1.1-bmd16.0-rev1`
 with two assets:
 
 - `ffmpeg-n8.1.1-macos-arm64.tar.gz` (~10 MB)
@@ -179,11 +179,11 @@ To rebuild against a new FFmpeg release (e.g. n9.0):
 3. Watch the run; iterate on configure flags if upstream FFmpeg
    changed any.
 
-To rebuild against a new DeckLink SDK (e.g. 14.5):
+To rebuild against a new DeckLink SDK (e.g. 16.1):
 
 1. Repeat steps 1-3 of this guide for the new SDK version.
-2. Upload it as a new release on the mirror (e.g. `v14.5`).
-3. Edit `ci/ffmpeg-pins.env` → set `BMD_SDK_VERSION=14.5`.
+2. Upload it as a new release on the mirror (e.g. `v16.1`).
+3. Edit `ci/ffmpeg-pins.env` → set `BMD_SDK_VERSION=16.1`.
 4. Commit + push; CI auto-triggers.
 
 To force a rebuild without bumping either version (e.g. you
