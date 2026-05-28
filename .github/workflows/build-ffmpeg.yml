@@ -183,11 +183,31 @@ jobs:
         run: |
           set -e
           cd /tmp/ffmpeg-src
+          # macOS COM shim: BMD's Mac SDK doesn't ship IID_IUnknown
+          # as a top-level constant — it lives only in
+          # Examples/Mac/platform.h as a macro that calls
+          # CFUUIDGetUUIDBytes(IUnknownUUID). FFmpeg's
+          # libavdevice/decklink_*.cpp references IID_IUnknown
+          # directly in its QueryInterface implementation, so without
+          # the macro it errors with "undeclared identifier".
+          # Write a small shim header next to the SDK headers and
+          # -include it via extra-cxxflags so every decklink_*.cpp
+          # sees the macro definition globally.
+          cat > "${BMD_SDK_ROOT}/Mac/include/atem_decklink_shim.h" <<'SHIM'
+          // alpha.31 CI shim — bridges BMD Mac SDK to FFmpeg's
+          // expectation of IID_IUnknown as a free symbol.
+          #pragma once
+          #include <CoreFoundation/CFPlugInCOM.h>
+          #ifndef IID_IUnknown
+          #define IID_IUnknown CFUUIDGetUUIDBytes(IUnknownUUID)
+          #endif
+          SHIM
           ./configure \
             --prefix=/tmp/ffmpeg-install \
             --pkg-config-flags=--static \
             --extra-cflags="-I${BMD_SDK_ROOT}/Mac/include" \
-            --extra-cxxflags="-I${BMD_SDK_ROOT}/Mac/include" \
+            --extra-cxxflags="-I${BMD_SDK_ROOT}/Mac/include -include atem_decklink_shim.h" \
+            --extra-ldflags="-framework CoreFoundation" \
             --enable-gpl \
             --enable-version3 \
             --enable-nonfree \
