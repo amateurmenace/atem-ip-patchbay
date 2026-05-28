@@ -505,12 +505,43 @@ jobs:
           }
           $linecount = (Get-Content 'DeckLinkAPI.h' | Measure-Object -Line).Lines
           Write-Host "DeckLinkAPI.h: $linecount lines"
+
+          # Stub the v-version headers FFmpeg #includes individually.
+          # BMD's auxiliary .idl files (DeckLinkAPI_v*.idl etc.) are
+          # designed to be IMPORTED by DeckLinkAPI.idl, not compiled
+          # standalone — so MIDL emits all their content into the
+          # master DeckLinkAPI.h. FFmpeg's decklink_common.cpp does
+          # `#include "DeckLinkAPI_v14_2_1.h"` expecting BMD's Linux-
+          # SDK style of one-header-per-version. On Linux they ship
+          # those files; on Windows SDK 16 they don't.
+          #
+          # Workaround: for every .idl that didn't produce a .h, write
+          # a stub .h that pulls in the master DeckLinkAPI.h. The
+          # types are already there (because the .idls were import'd
+          # into DeckLinkAPI.idl), they just need to be findable
+          # under the per-version filename.
+          Write-Host "=== Stubbing missing v-headers ==="
+          foreach ($idl in (Get-ChildItem -Filter '*.idl')) {
+            $expectedH = $idl.BaseName + '.h'
+            if (-not (Test-Path $expectedH)) {
+              Write-Host "  stub: $expectedH (-> DeckLinkAPI.h)"
+              @"
+/* alpha.31 CI stub: BMD Windows SDK 16 ships only $($idl.Name); the
+ * generated content lives in DeckLinkAPI.h (MIDL inlined it). This
+ * stub satisfies FFmpeg's per-version-header includes. */
+#pragma once
+#include "DeckLinkAPI.h"
+"@ | Set-Content -Path $expectedH -Encoding UTF8
+            }
+          }
+          Get-ChildItem -Filter '*.h' | Format-Table Name, Length
           Pop-Location
           # Per-IDL MIDL failures on auxiliary files are expected
           # (they have cross-references that don't resolve when
           # compiled in isolation). What matters is that the main
           # DeckLinkAPI.h was produced — FFmpeg's require_headers
-          # check needs only that file. Explicitly succeed.
+          # check needs only that file, and our stubs cover the
+          # individual v-header #includes. Explicitly succeed.
           exit 0
 
       - name: Clone FFmpeg sources at ${{ env.FFMPEG_VERSION }}
