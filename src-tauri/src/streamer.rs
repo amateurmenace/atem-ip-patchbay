@@ -76,6 +76,21 @@ pub struct StreamPlan {
     pub decklink_device_name: String,
     pub decklink_format_code: String,
     pub decklink_pixel_format: String,
+    /// alpha.25: encoder choice — "auto" lets select_encoder pick the
+    /// best for platform + GPU + codec; specific names route directly.
+    /// Ignored on the DeckLink branch (raw output, no encoder).
+    pub video_encoder: String,
+    /// alpha.25: raw FFmpeg flags appended after the encoder block but
+    /// before the muxer block. Parsed via shlex at use site.
+    pub encoder_extra_flags: String,
+    /// alpha.25: audio codec ("aac" = AAC-LC, "aac_he", "aac_he_v2").
+    /// build_plan rejects HE on ATEM destinations.
+    pub audio_codec: String,
+    /// alpha.25: explicit audio bitrate in kbps. 0 = inherit from
+    /// active_config.audio_bitrate (XML-driven default).
+    pub audio_bitrate_kbps: u32,
+    pub audio_sample_rate: u32,
+    pub audio_channels: u8,
 }
 
 impl StreamPlan {
@@ -621,12 +636,34 @@ impl Streamer {
             .map_err(|e| anyhow!("Source resolve failed: {e}"))?;
         let audio_filter = build_audio_filter(&snap);
         let video_filter = build_video_filter(&snap, width, height, fps);
+
+        // alpha.25: audio bitrate from explicit override OR fall back
+        // to the active_config (XML profile / BMD-spec default).
+        let audio_bitrate = if snap.audio_bitrate_kbps > 0 {
+            (snap.audio_bitrate_kbps as u64) * 1000
+        } else {
+            cfg.audio_bitrate
+        };
+
+        // alpha.25: AAC-HE / AAC-HE-v2 not supported by the ATEM SRT
+        // decoder. Reject early so the operator sees a clear error
+        // instead of a stream that "works" but the ATEM silently
+        // drops audio.
+        if (snap.audio_codec == "aac_he" || snap.audio_codec == "aac_he_v2")
+            && snap.destination_type == "atem"
+        {
+            return Err(anyhow!(
+                "AAC-{} not supported by the ATEM SRT decoder. Use AAC-LC or switch destination.",
+                if snap.audio_codec == "aac_he" { "HE" } else { "HEv2" }
+            ));
+        }
+
         Ok(StreamPlan {
             width,
             height,
             fps,
             video_bitrate: cfg.bitrate,
-            audio_bitrate: cfg.audio_bitrate,
+            audio_bitrate,
             keyframe_seconds: cfg.keyframe_interval,
             output_url,
             protocol,
@@ -634,10 +671,16 @@ impl Streamer {
             video_codec: snap.video_codec.to_lowercase(),
             video_filter,
             audio_filter,
-            audio_output_mono: snap.audio_output_mono,
+            audio_output_mono: snap.audio_channels == 1,
             decklink_device_name: String::new(),
             decklink_format_code: String::new(),
             decklink_pixel_format: String::new(),
+            video_encoder: snap.video_encoder.clone(),
+            encoder_extra_flags: snap.encoder_extra_flags.clone(),
+            audio_codec: snap.audio_codec.clone(),
+            audio_bitrate_kbps: snap.audio_bitrate_kbps,
+            audio_sample_rate: snap.audio_sample_rate,
+            audio_channels: snap.audio_channels,
         })
     }
 
@@ -723,7 +766,7 @@ impl Streamer {
             video_codec: String::new(),
             video_filter,
             audio_filter,
-            audio_output_mono: snap.audio_output_mono,
+            audio_output_mono: snap.audio_channels == 1,
             decklink_device_name: snap.decklink_device_name.clone(),
             decklink_format_code: snap.decklink_format_code.clone(),
             decklink_pixel_format: if snap.decklink_pixel_format.is_empty() {
@@ -731,6 +774,15 @@ impl Streamer {
             } else {
                 snap.decklink_pixel_format.clone()
             },
+            // DeckLink path doesn't encode video, but carry the
+            // settings so audio knobs still apply (PCM is overridden
+            // in build_decklink_output_cmd; these are inert there).
+            video_encoder: snap.video_encoder.clone(),
+            encoder_extra_flags: String::new(),
+            audio_codec: snap.audio_codec.clone(),
+            audio_bitrate_kbps: snap.audio_bitrate_kbps,
+            audio_sample_rate: snap.audio_sample_rate,
+            audio_channels: snap.audio_channels,
         })
     }
 
@@ -978,152 +1030,29 @@ impl Streamer {
             cmd.push(filter.into());
         }
 
-        // Video encoder — Main profile, no B-frames, fixed GOP. H.264
-        // for broad compatibility, H.265 for Streaming Bridge native
-        // mode (matches what real BMD WPs send to ATEM Mini built-in).
-        //
-        // On macOS, route through VideoToolbox (Apple ANE + GPU) so
-        // the encoder runs on dedicated silicon rather than CPU. The
-        // libx264 veryfast path costs ~80% of one core at 1080p30 and
-        // dominates the NDI ingest profile because the receiver
-        // thread is already CPU-bound; VT drops that to single-digit
-        // % and frees headroom for everything else. The flags below
-        // produce a Main-profile, no-B-frame, CBR-ish stream that the
-        // BMD SRT decoder accepts. Set ATEM_DISABLE_VT=1 to fall back
-        // to libx264/libx265 for BMD-parity verification.
-        let bitrate_str = plan.video_bitrate.to_string();
-        let fps_str = plan.fps.to_string();
-        let use_vt = cfg!(target_os = "macos") && std::env::var("ATEM_DISABLE_VT").is_err();
+        // alpha.25: encoder selection lives in select_encoder() — it
+        // resolves "auto" to the best available encoder for platform
+        // + GPU + codec, then composes the right per-encoder flag bag
+        // (videotoolbox needs `-realtime 1 -allow_sw 1 -constant_bit_rate 1`;
+        // nvenc needs `-preset p4 -rc cbr`; etc.). Honors the legacy
+        // ATEM_DISABLE_VT env override + falls back gracefully when a
+        // user-picked encoder isn't in available_encoders().
+        cmd.extend(select_encoder(plan));
 
-        if use_vt {
-            let codec = if plan.video_codec == "h265" {
-                "hevc_videotoolbox"
-            } else {
-                "h264_videotoolbox"
-            };
-            cmd.extend(
-                [
-                    "-c:v", codec,
-                    "-profile:v", "main",
-                    "-pix_fmt", "yuv420p",
-                    // Hint VT to prioritize encode latency over
-                    // quality — drops frames before delaying when
-                    // the encoder can't keep up. Right call for
-                    // live SRT, wrong call for VOD transcode.
-                    "-realtime", "1",
-                    // Allow software fallback if hardware encoding
-                    // can't initialize (rare; happens if another
-                    // process is holding all ANE slots). Slower
-                    // than libx264 in that mode but still streams.
-                    "-allow_sw", "1",
-                    // True CBR — matches what real BMD encoders
-                    // emit and what the ATEM SRT decoder expects
-                    // for clean pacing. macOS 13+ honors this; on
-                    // older macOS, FFmpeg silently ignores the
-                    // flag and VT runs in ABR which is also
-                    // accepted by ATEM in practice.
-                    "-constant_bit_rate", "1",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
-            );
-            cmd.extend([
-                "-b:v".into(), bitrate_str,
-                // Explicit no-B-frames. VT's default profile
-                // setting may already exclude B-frames at Main
-                // profile, but the flag is load-bearing for the
-                // BMD parity guarantee — pcap analysis showed
-                // real Web Presenters never emit B-frames.
-                "-bf".into(), "0".into(),
-                "-g".into(), gop.clone(),
-                "-keyint_min".into(), gop,
-                "-sc_threshold".into(), "0".into(),
-                "-r".into(), fps_str,
-            ]);
-        } else if plan.video_codec == "h265" {
-            let bitrate_kbps = (plan.video_bitrate / 1000).to_string();
-            cmd.extend(
-                [
-                    "-c:v",
-                    "libx265",
-                    "-profile:v",
-                    "main",
-                    "-preset",
-                    "veryfast",
-                    "-tune",
-                    "zerolatency",
-                    "-pix_fmt",
-                    "yuv420p",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
-            );
-            cmd.push("-x265-params".into());
-            cmd.push(format!(
-                "bframes=0:no-scenecut=1:keyint={gop}:min-keyint={gop}:\
-                 vbv-maxrate={bitrate_kbps}:vbv-bufsize={bitrate_kbps}:\
-                 repeat-headers=1:hrd=1:log-level=warning"
-            ));
-            cmd.extend([
-                "-b:v".into(), bitrate_str,
-                "-g".into(), gop.clone(),
-                "-keyint_min".into(), gop,
-                "-sc_threshold".into(), "0".into(),
-                "-r".into(), fps_str,
-            ]);
-        } else {
-            cmd.extend(
-                [
-                    "-c:v",
-                    "libx264",
-                    "-profile:v",
-                    "main",
-                    "-preset",
-                    "veryfast",
-                    "-tune",
-                    "zerolatency",
-                    "-pix_fmt",
-                    "yuv420p",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
-            );
-            cmd.push("-x264-params".into());
-            cmd.push(format!(
-                "bframes=0:scenecut=0:keyint={gop}:min-keyint={gop}:nal-hrd=cbr"
-            ));
-            cmd.extend([
-                "-b:v".into(), bitrate_str.clone(),
-                "-maxrate".into(), bitrate_str.clone(),
-                "-minrate".into(), bitrate_str.clone(),
-                "-bufsize".into(), bitrate_str,
-                "-g".into(), gop.clone(),
-                "-keyint_min".into(), gop,
-                "-sc_threshold".into(), "0".into(),
-                "-r".into(), fps_str,
-            ]);
-        }
-
-        // Audio filter — currently only the pan filter for
-        // multi-channel devices (Dante VSC, CoreAudio aggregate). Goes
-        // before -c:a so the encoder sees the already-downmixed
-        // stereo result.
+        // Audio filter — runs BEFORE the audio codec args so the
+        // encoder sees the already-downmixed stereo result. Pan
+        // filter (Dante VSC / CoreAudio aggregate) + silent volume=0
+        // path live here; alpha.25's astats audio-meter chain
+        // appends inside build_audio_filter().
         if let Some(filter) = plan.audio_filter.as_deref() {
             cmd.push("-af".into());
             cmd.push(filter.into());
         }
-        // Audio — AAC-LC 48k. Channels: stereo by default, mono
-        // (single summed channel) when the user has set Audio Mixer
-        // -> Mono. Real BMD devices accept either, so this is purely
-        // a content choice for the operator (e.g. radio-style talk
-        // streams where mono saves bitrate for the same intelligibility).
-        let ac = if plan.audio_output_mono { "1" } else { "2" };
-        cmd.extend([
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), plan.audio_bitrate.to_string(),
-            "-ar".into(), "48000".into(),
-            "-ac".into(), ac.into(),
-        ]);
+        // Audio codec + bitrate + sample-rate + channels from the
+        // alpha.25 audio-knobs section. AAC-LC default; AAC-HE /
+        // AAC-HE-v2 supported for low-bitrate destinations
+        // (build_plan rejects them on ATEM).
+        cmd.extend(build_audio_section(plan));
 
         // Container + transport.
         match plan.protocol.as_str() {
@@ -1487,6 +1416,363 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
         None
     } else {
         Some(chain.join(","))
+    }
+}
+
+/// alpha.25: encoder selection. Resolves `plan.video_encoder`
+/// ("auto" or a specific encoder name) to a concrete encoder, then
+/// composes the right per-encoder flag bag. Returns the full encoder
+/// command segment that's spliced into build_ffmpeg_cmd between the
+/// video filter and the audio block.
+///
+/// Auto-mode priority (per the Plan agent's D2 decision): macOS
+/// VideoToolbox > nvenc > qsv > amf > libx264/libx265. Honors the
+/// legacy `ATEM_DISABLE_VT` env override for BMD-parity testing.
+///
+/// User-picked specific encoders fall back to auto-mode if the
+/// bundled FFmpeg doesn't include them (e.g. operator selected
+/// h264_nvenc on a build without it) rather than emit a broken cmd.
+fn select_encoder(plan: &StreamPlan) -> Vec<String> {
+    let codec = plan.video_codec.to_lowercase();
+    let chosen = if plan.video_encoder == "auto" || plan.video_encoder.is_empty() {
+        auto_select_encoder(&codec)
+    } else {
+        // Verify the user's pick is actually available; fall back to
+        // auto if not (logged so the operator sees what happened).
+        let available = crate::ffmpeg_path::available_encoders();
+        if available.iter().any(|e| e == &plan.video_encoder) {
+            plan.video_encoder.clone()
+        } else {
+            log::warn!(
+                "encoder '{}' not in bundled FFmpeg ({} encoders available); \
+                 falling back to auto",
+                plan.video_encoder,
+                available.len()
+            );
+            auto_select_encoder(&codec)
+        }
+    };
+    log::info!("encoder: codec={codec} requested={} chosen={chosen}", plan.video_encoder);
+    build_encoder_section(plan, &chosen)
+}
+
+/// Walk the per-codec encoder priority list, return the first one
+/// the bundled FFmpeg has. Always finds something — libx264 / libx265
+/// are universally present in the prebuilt distributions.
+fn auto_select_encoder(codec: &str) -> String {
+    let available = crate::ffmpeg_path::available_encoders();
+    let disable_vt = std::env::var("ATEM_DISABLE_VT").is_ok();
+
+    let candidates: Vec<&str> = if codec == "h265" {
+        if cfg!(target_os = "macos") {
+            vec!["hevc_videotoolbox", "hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265"]
+        } else {
+            vec!["hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265"]
+        }
+    } else if cfg!(target_os = "macos") {
+        vec!["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
+    } else {
+        vec!["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
+    };
+
+    for c in &candidates {
+        if disable_vt && c.ends_with("_videotoolbox") {
+            continue;
+        }
+        if available.iter().any(|e| e == c) {
+            return c.to_string();
+        }
+    }
+    // Pathological fallback — libx264/libx265 are always present, but
+    // if even those aren't found, name them anyway so FFmpeg emits a
+    // clear "Unknown encoder" error on the operator's terms.
+    if codec == "h265" { "libx265".into() } else { "libx264".into() }
+}
+
+/// Per-encoder flag composition. Each branch produces the same
+/// shape: `-c:v <encoder>` + encoder-specific tuning + bitrate/gop/fps.
+/// Common BMD-parity invariants (no B-frames, fixed GOP, Main profile,
+/// yuv420p) hold across all branches.
+fn build_encoder_section(plan: &StreamPlan, encoder: &str) -> Vec<String> {
+    let bitrate = plan.video_bitrate.to_string();
+    let bitrate_kbps = (plan.video_bitrate / 1000).to_string();
+    let gop = plan.gop().to_string();
+    let fps = plan.fps.to_string();
+    let mut cmd: Vec<String> = Vec::new();
+
+    match encoder {
+        "h264_videotoolbox" | "hevc_videotoolbox" => {
+            // VideoToolbox: Apple ANE + GPU. Realtime + allow_sw + CBR
+            // matches the alpha.4 BMD-parity tuning.
+            cmd.extend(
+                [
+                    "-c:v", encoder,
+                    "-profile:v", "main",
+                    "-pix_fmt", "yuv420p",
+                    "-realtime", "1",
+                    "-allow_sw", "1",
+                    "-constant_bit_rate", "1",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.extend([
+                "-b:v".into(), bitrate,
+                "-bf".into(), "0".into(),
+                "-g".into(), gop.clone(),
+                "-keyint_min".into(), gop,
+                "-sc_threshold".into(), "0".into(),
+                "-r".into(), fps,
+            ]);
+        }
+        "h264_nvenc" | "hevc_nvenc" => {
+            // NVIDIA NVENC: p4 preset = "medium speed", tune ll =
+            // low-latency. CBR for stable bitrate matching ATEM's
+            // expectations. nvenc accepts -profile:v main directly.
+            cmd.extend(
+                [
+                    "-c:v", encoder,
+                    "-preset", "p4",
+                    "-tune", "ll",
+                    "-rc", "cbr",
+                    "-profile:v", "main",
+                    "-pix_fmt", "yuv420p",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.extend([
+                "-b:v".into(), bitrate.clone(),
+                "-maxrate".into(), bitrate.clone(),
+                "-bufsize".into(), bitrate,
+                "-bf".into(), "0".into(),
+                "-g".into(), gop.clone(),
+                "-keyint_min".into(), gop,
+                "-r".into(), fps,
+            ]);
+        }
+        "h264_qsv" | "hevc_qsv" => {
+            // Intel QuickSync via libvpl. NV12 pixel format preferred
+            // (closer to the hardware's native layout). look_ahead 0
+            // for live (avoid the lookahead-induced encode delay).
+            cmd.extend(
+                [
+                    "-c:v", encoder,
+                    "-preset", "veryfast",
+                    "-look_ahead", "0",
+                    "-profile:v", "main",
+                    "-pix_fmt", "nv12",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.extend([
+                "-b:v".into(), bitrate.clone(),
+                "-maxrate".into(), bitrate,
+                "-bf".into(), "0".into(),
+                "-g".into(), gop,
+                "-r".into(), fps,
+            ]);
+        }
+        "h264_amf" | "hevc_amf" => {
+            // AMD AMF. "speed" quality preset (fastest, lowest latency).
+            // CBR rate-control. amf uses `-profile` (no `:v`) for h264.
+            cmd.extend(
+                [
+                    "-c:v", encoder,
+                    "-quality", "speed",
+                    "-rc", "cbr",
+                    "-profile", "main",
+                    "-pix_fmt", "yuv420p",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.extend([
+                "-b:v".into(), bitrate.clone(),
+                "-maxrate".into(), bitrate,
+                "-bf".into(), "0".into(),
+                "-g".into(), gop,
+                "-r".into(), fps,
+            ]);
+        }
+        "libx265" => {
+            cmd.extend(
+                [
+                    "-c:v", "libx265",
+                    "-profile:v", "main",
+                    "-preset", "veryfast",
+                    "-tune", "zerolatency",
+                    "-pix_fmt", "yuv420p",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.push("-x265-params".into());
+            cmd.push(format!(
+                "bframes=0:no-scenecut=1:keyint={gop}:min-keyint={gop}:\
+                 vbv-maxrate={bitrate_kbps}:vbv-bufsize={bitrate_kbps}:\
+                 repeat-headers=1:hrd=1:log-level=warning"
+            ));
+            cmd.extend([
+                "-b:v".into(), bitrate,
+                "-g".into(), gop.clone(),
+                "-keyint_min".into(), gop,
+                "-sc_threshold".into(), "0".into(),
+                "-r".into(), fps,
+            ]);
+        }
+        _ => {
+            // libx264 fallback — also the path for any unrecognized
+            // encoder name (defense-in-depth; auto_select_encoder
+            // already guarantees a known encoder).
+            cmd.extend(
+                [
+                    "-c:v", "libx264",
+                    "-profile:v", "main",
+                    "-preset", "veryfast",
+                    "-tune", "zerolatency",
+                    "-pix_fmt", "yuv420p",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+            cmd.push("-x264-params".into());
+            cmd.push(format!(
+                "bframes=0:scenecut=0:keyint={gop}:min-keyint={gop}:nal-hrd=cbr"
+            ));
+            cmd.extend([
+                "-b:v".into(), bitrate.clone(),
+                "-maxrate".into(), bitrate.clone(),
+                "-minrate".into(), bitrate.clone(),
+                "-bufsize".into(), bitrate,
+                "-g".into(), gop.clone(),
+                "-keyint_min".into(), gop,
+                "-sc_threshold".into(), "0".into(),
+                "-r".into(), fps,
+            ]);
+        }
+    }
+
+    // alpha.25 power-user textarea: append any extra flags the
+    // operator pasted. Parsed via parse_extra_flags (handles quoted
+    // strings + backslash escapes). Positioned AFTER the encoder
+    // block so user can override encoder params (the stated use case);
+    // BEFORE the muxer/output block (in build_ffmpeg_cmd) so users
+    // can't accidentally rewrite the transport. Bad input surfaces
+    // as an FFmpeg startup error in the existing error banner.
+    let extras = parse_extra_flags(&plan.encoder_extra_flags);
+    if !extras.is_empty() {
+        log::info!("encoder_extra_flags appending: {:?}", extras);
+        cmd.extend(extras);
+    }
+
+    cmd
+}
+
+/// alpha.25: audio codec + bitrate + sample-rate + channels block,
+/// replacing the previous hardcoded AAC-LC 48k path. AAC-HE / HEv2
+/// supported for low-bitrate destinations (build_plan rejects them
+/// on ATEM). Channels=1 is mono, 2 is stereo; 5.1 is forward-looking.
+fn build_audio_section(plan: &StreamPlan) -> Vec<String> {
+    let mut cmd: Vec<String> = Vec::new();
+    // The aac encoder handles all three sub-profiles via -profile:a.
+    cmd.push("-c:a".into());
+    cmd.push("aac".into());
+    match plan.audio_codec.as_str() {
+        "aac_he" => {
+            cmd.push("-profile:a".into());
+            cmd.push("aac_he".into());
+        }
+        "aac_he_v2" => {
+            cmd.push("-profile:a".into());
+            cmd.push("aac_he_v2".into());
+        }
+        _ => {} // AAC-LC: no profile flag needed (FFmpeg's default).
+    }
+    cmd.push("-b:a".into());
+    cmd.push(plan.audio_bitrate.to_string());
+    cmd.push("-ar".into());
+    cmd.push(plan.audio_sample_rate.to_string());
+    cmd.push("-ac".into());
+    cmd.push(plan.audio_channels.to_string());
+    cmd
+}
+
+/// alpha.25: minimal shell-style tokenizer for the encoder-extra-flags
+/// textarea. Handles double and single quotes, backslash escapes, and
+/// whitespace separation. Empty input -> empty vec. Doesn't try to
+/// expand env variables or glob — just enough to handle typical
+/// FFmpeg flag inputs like `-tune zerolatency -profile:v high` or
+/// `-x264-params "rc-lookahead=20:aq-mode=2"`.
+fn parse_extra_flags(input: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    for ch in input.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+#[cfg(test)]
+mod alpha25_tests {
+    use super::parse_extra_flags;
+
+    #[test]
+    fn parses_simple_flags() {
+        assert_eq!(
+            parse_extra_flags("-tune zerolatency -profile:v high"),
+            vec!["-tune", "zerolatency", "-profile:v", "high"]
+        );
+    }
+
+    #[test]
+    fn parses_quoted_strings() {
+        assert_eq!(
+            parse_extra_flags(r#"-x264-params "rc-lookahead=20:aq-mode=2""#),
+            vec!["-x264-params", "rc-lookahead=20:aq-mode=2"]
+        );
+    }
+
+    #[test]
+    fn parses_escapes() {
+        assert_eq!(
+            parse_extra_flags(r#"foo bar\ baz qux"#),
+            vec!["foo", "bar baz", "qux"]
+        );
+    }
+
+    #[test]
+    fn empty_returns_empty() {
+        assert!(parse_extra_flags("").is_empty());
+        assert!(parse_extra_flags("   \t\n").is_empty());
     }
 }
 
