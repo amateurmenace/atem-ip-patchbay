@@ -418,10 +418,14 @@ jobs:
           echo "=== Compiling .idl files ==="
           for idl in *.idl; do
             echo "widl: $idl"
-            # --header generates only the .h (no _i.c / _p.c). FFmpeg
-            # links against system uuid/ole32 for the COM IIDs, so
-            # we don't need the GUID stubs widl normally emits.
-            widl --header -h "$idl" || {
+            # Default widl invocation produces *.h (+ _i.c, _p.c,
+            # dlldata.c). FFmpeg only consumes the .h; the extra
+            # files are harmless artifacts left in the include/
+            # directory. `-H NAME.h` would let us name the header
+            # explicitly, but widl's default DERIVES the name from
+            # the .idl basename anyway (DeckLinkAPI.idl →
+            # DeckLinkAPI.h) which is exactly what FFmpeg expects.
+            widl "$idl" || {
               echo "::warning::widl failed for $idl (continuing — other IDLs may not depend on it)"
             }
           done
