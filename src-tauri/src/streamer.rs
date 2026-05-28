@@ -135,6 +135,30 @@ struct Inner {
     /// path) or when OMT output is disabled. Kill-on-drop so a panic
     /// can't leak an FFmpeg process.
     omt_video_tee_child: Option<Child>,
+    /// Cancellation signal for the auto-reconnect supervisor's
+    /// backoff sleep (alpha.30). When the operator clicks Stop mid-
+    /// backoff, stop() sets stop_requested + notifies this; the
+    /// supervisor's `backoff_with_cancel` select! wakes immediately
+    /// rather than waiting up to 60s for the current backoff tick to
+    /// elapse. The Notify is level-cheap: re-armed each call to
+    /// `notified()`, so repeated start/stop cycles don't accumulate
+    /// state.
+    supervisor_cancel: Arc<tokio::sync::Notify>,
+}
+
+/// Outcome of a single FFmpeg-streaming attempt. The supervisor uses
+/// this to decide whether to reconnect (UnexpectedExit) or wind down
+/// cleanly (UserStopped).
+#[derive(Debug)]
+enum AttemptOutcome {
+    /// stop_requested was set when the attempt ended — either before
+    /// the FFmpeg child exited (user clicked Stop) or because
+    /// run_one_attempt itself observed the flag flip. Supervisor
+    /// returns without reconnecting.
+    UserStopped,
+    /// FFmpeg exited without a Stop request. Supervisor consults
+    /// `auto_reconnect` + attempt counter to decide whether to retry.
+    UnexpectedExit { exit_code: Option<i32> },
 }
 
 impl Streamer {
@@ -151,6 +175,7 @@ impl Streamer {
                 omt_capture: None,
                 omt_sender: None,
                 omt_video_tee_child: None,
+                supervisor_cancel: Arc::new(tokio::sync::Notify::new()),
             }),
         })
     }
@@ -211,6 +236,49 @@ impl Streamer {
             }
         }
 
+        // First attempt — its setup errors propagate to the HTTP
+        // caller so a missing NDI source / invalid config surfaces
+        // immediately. Subsequent reconnect attempts (driven by the
+        // supervisor) treat setup errors as failed-attempts that
+        // count toward the auto_reconnect_max_attempts ceiling.
+        let stderr = self.spawn_attempt().await?;
+
+        // Reset reconnect-supervisor counters for this fresh
+        // operator-initiated session. The supervisor task itself
+        // ticks reconnect_attempt + reconnect_next_secs during
+        // backoff and increments total_reconnects_this_session on
+        // each unexpected exit.
+        self.state.stats_in_place(|s| {
+            s.reconnect_attempt = 0;
+            s.reconnect_next_secs = 0;
+            s.total_reconnects_this_session = 0;
+        });
+
+        // Spawn the supervisor task. It owns the lifecycle from
+        // here — running attempts, deciding whether to reconnect
+        // after unexpected exits, and surfacing per-attempt status
+        // to the UI. Replaces the old run_monitor-only spawn.
+        let me = self.clone();
+        tokio::spawn(async move {
+            me.run_supervisor(stderr).await;
+        });
+
+        Ok(())
+    }
+
+    /// Spawn a single FFmpeg attempt. Handles all the setup work
+    /// (preview teardown, plan build, NDI/OMT capture, OMT sender +
+    /// video tee, FFmpeg child + watchdog, stdin wiring, stats
+    /// reset, Inner storage). Returns the stderr handle so the
+    /// caller (start on first invocation, the supervisor's reconnect
+    /// loop on subsequent ones) can pipe it into run_one_attempt.
+    ///
+    /// Errors here are setup-time failures: missing NDI source,
+    /// FFmpeg binary not found, etc. They propagate to the operator
+    /// from start(); from the supervisor, they're counted as failed
+    /// reconnect attempts (the supervisor catches the Err and goes
+    /// to backoff).
+    async fn spawn_attempt(self: &Arc<Self>) -> Result<tokio::process::ChildStderr> {
         // Release any active pre-stream preview before claiming the
         // SDK/device handle for the streaming receiver. NDI: avoids
         // holding two Receivers per source from the same process
@@ -506,20 +574,22 @@ impl Streamer {
             inner.omt_video_tee_child = omt_video_tee;
         }
 
-        // Spawn the monitor task. It owns the stderr handle, parses
-        // telemetry, and on EOF awaits the child to get the exit
-        // status and clear the slot in inner.
-        let me = self.clone();
-        tokio::spawn(async move {
-            me.run_monitor(stderr).await;
-        });
-
-        Ok(())
+        // Hand stderr back to the caller. start() pipes it directly
+        // into the supervisor's first run_one_attempt; subsequent
+        // reconnect attempts have the supervisor pipe it in too.
+        Ok(stderr)
     }
 
     pub async fn stop(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.stop_requested = true;
+        // Wake the auto-reconnect supervisor's backoff sleep so a
+        // mid-backoff Stop click takes effect within ~milliseconds
+        // rather than waiting up to 60s for the current tick to
+        // elapse. notify_waiters is edge-triggered but the
+        // supervisor's stop_requested check on the next tick covers
+        // any wake-miss race.
+        inner.supervisor_cancel.notify_waiters();
         if let Some(mut capture) = inner.ndi_capture.take() {
             // Drop blocks while the receiver thread joins; do it
             // before killing FFmpeg so the rawvideo input gets a
@@ -1079,7 +1149,21 @@ impl Streamer {
         cmd
     }
 
-    async fn run_monitor(self: Arc<Self>, stderr: tokio::process::ChildStderr) {
+    /// Run one streaming attempt: read stderr until EOF, wait for
+    /// the child, tear down per-attempt resources (NDI/OMT capture,
+    /// OMT sender, video tee). Returns an outcome the supervisor
+    /// uses to decide whether to reconnect.
+    ///
+    /// Unlike alpha.29's `run_monitor`, this does NOT set the final
+    /// status (Idle / Interrupted) — that's the supervisor's call,
+    /// which knows whether another attempt is queued. For
+    /// UnexpectedExit the supervisor either transitions to
+    /// "Reconnecting" (during backoff) or to a sticky "Interrupted"
+    /// after max attempts.
+    async fn run_one_attempt(
+        self: Arc<Self>,
+        stderr: tokio::process::ChildStderr,
+    ) -> AttemptOutcome {
         // FFmpeg's progress (`frame=… fps=… bitrate=…`) terminates each
         // update with a CARRIAGE RETURN, not a newline — a terminal
         // overwrites the prior line in place. `read_until(b'\n')`
@@ -1125,17 +1209,29 @@ impl Streamer {
             self.handle_log_line(&line).await;
         }
 
-        // Stderr EOF — child is exiting. Wait for the exit code.
-        // Also tear down any OMT video tee FFmpeg + sender so the
-        // natural-exit path (source ended, FFmpeg crashed, etc.) frees
-        // resources without requiring the user to click Stop. Mirrors
-        // what stop() does for the same fields.
+        // Stderr EOF — child is exiting. Wait for the exit code and
+        // clean up per-attempt resources (NDI/OMT capture so the
+        // next attempt can re-claim the SDK handle; OMT video tee
+        // child; OMT sender). Mirrors stop() but doesn't notify the
+        // supervisor's cancel — that's a separate signal.
         let exit_code = {
             let mut inner = self.inner.lock().await;
             let mut child = match inner.child.take() {
                 Some(c) => c,
-                None => return,
+                // Slot already empty — stop() raced us. Treat as user-stop.
+                None => return AttemptOutcome::UserStopped,
             };
+            // Tear down NDI/OMT capture so the next reconnect attempt
+            // can re-probe + re-claim the SDK handle. Per the
+            // alpha.30 plan we always rebuild captures rather than
+            // try to keep them alive across an FFmpeg exit (the
+            // stdin EOF would race the next attempt's stdin-take).
+            if let Some(mut capture) = inner.ndi_capture.take() {
+                capture.stop();
+            }
+            if let Some(mut capture) = inner.omt_capture.take() {
+                capture.stop();
+            }
             if let Some(mut tee) = inner.omt_video_tee_child.take() {
                 let _ = tee.start_kill();
             }
@@ -1154,7 +1250,7 @@ impl Streamer {
             inner.stop_requested
         };
 
-        // Snapshot the recent log tail before lock-free mutation of state.
+        // Snapshot the recent log tail for error context.
         let recent_tail = {
             let inner = self.inner.lock().await;
             inner
@@ -1170,24 +1266,179 @@ impl Streamer {
                 .join(" | ")
         };
 
-        self.state.stats_in_place(|s| {
-            if stop_requested {
+        if stop_requested {
+            self.state.stats_in_place(|s| {
                 s.status = "Idle".into();
-            } else if let Some(rc) = exit_code {
-                if rc != 0 {
-                    s.status = "Interrupted".into();
-                    if s.error.is_none() {
+                s.started_at = None;
+                s.bitrate = 0;
+                s.reconnect_attempt = 0;
+                s.reconnect_next_secs = 0;
+            });
+            AttemptOutcome::UserStopped
+        } else {
+            // Don't set Idle/Interrupted — supervisor decides. But
+            // record the error context for the UI to show during
+            // reconnect / on the eventual sticky Interrupted state.
+            self.state.stats_in_place(|s| {
+                s.started_at = None;
+                s.bitrate = 0;
+                if s.error.is_none() {
+                    if let Some(rc) = exit_code {
                         s.error = Some(format!("FFmpeg exited with code {rc}: {recent_tail}"));
+                    } else {
+                        s.error = Some(format!("FFmpeg exited unexpectedly: {recent_tail}"));
                     }
-                } else {
-                    s.status = "Idle".into();
                 }
-            } else {
-                s.status = "Idle".into();
+            });
+            AttemptOutcome::UnexpectedExit { exit_code }
+        }
+    }
+
+    /// Auto-reconnect supervisor. Drives attempts + backoff over
+    /// the lifetime of one operator-initiated start session.
+    /// Returns when the operator clicks Stop OR auto_reconnect is
+    /// disabled and an attempt fails OR
+    /// auto_reconnect_max_attempts is exceeded.
+    async fn run_supervisor(
+        self: Arc<Self>,
+        initial_stderr: tokio::process::ChildStderr,
+    ) {
+        let mut attempt: u32 = 1;
+        let mut pending_stderr: Option<tokio::process::ChildStderr> = Some(initial_stderr);
+
+        loop {
+            // First iteration: use the stderr handed in by start().
+            // Subsequent: spawn a fresh attempt. spawn_attempt setup
+            // failures count as failed attempts and go to backoff.
+            let stderr = match pending_stderr.take() {
+                Some(s) => s,
+                None => match self.spawn_attempt().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        // Setup failure during a reconnect attempt
+                        // (NDI source went away, FFmpeg sidecar
+                        // gone, etc.). Count it as a failed attempt
+                        // and go to backoff. handle_unexpected_exit
+                        // returns false on max-exceeded or operator-
+                        // cancel, in which case we exit the loop.
+                        log::warn!("Reconnect spawn_attempt failed: {e}");
+                        self.state.stats_in_place(|s| {
+                            s.error = Some(format!("Reconnect setup failed: {e}"));
+                        });
+                        if !self.handle_unexpected_exit(&mut attempt).await {
+                            return;
+                        }
+                        continue;
+                    }
+                },
+            };
+
+            let started_at = std::time::Instant::now();
+            let outcome = self.clone().run_one_attempt(stderr).await;
+            let ran = started_at.elapsed();
+
+            match outcome {
+                AttemptOutcome::UserStopped => {
+                    // run_one_attempt already set status = Idle.
+                    return;
+                }
+                AttemptOutcome::UnexpectedExit { .. } => {
+                    // Reset attempt counter if the failing attempt
+                    // had a stable run (>60s). Otherwise rapid-fire
+                    // failures count toward the max.
+                    if ran > std::time::Duration::from_secs(60) {
+                        attempt = 1;
+                    }
+                    if !self.handle_unexpected_exit(&mut attempt).await {
+                        return;
+                    }
+                    // Loop back — pending_stderr is None, so the
+                    // next iteration spawns a fresh attempt.
+                }
             }
-            s.started_at = None;
-            s.bitrate = 0;
+        }
+    }
+
+    /// Helper for the supervisor's unexpected-exit branch. Increments
+    /// the attempt counter, checks against max_attempts, runs the
+    /// backoff. Returns true if the supervisor should loop to spawn
+    /// the next attempt; false if it should exit (max exceeded, user
+    /// cancelled, or auto_reconnect disabled).
+    async fn handle_unexpected_exit(self: &Arc<Self>, attempt: &mut u32) -> bool {
+        let snap = self.state.snapshot();
+        if !snap.auto_reconnect {
+            // Auto-reconnect off — surface the error as sticky
+            // Interrupted and exit.
+            self.state.stats_in_place(|s| {
+                s.status = "Interrupted".into();
+                s.reconnect_attempt = 0;
+                s.reconnect_next_secs = 0;
+            });
+            return false;
+        }
+        *attempt += 1;
+        if *attempt > snap.auto_reconnect_max_attempts {
+            self.state.stats_in_place(|s| {
+                s.status = "Interrupted".into();
+                s.error = Some(format!(
+                    "Stopped after {} reconnect attempts.",
+                    snap.auto_reconnect_max_attempts
+                ));
+                s.reconnect_attempt = 0;
+                s.reconnect_next_secs = 0;
+            });
+            return false;
+        }
+        self.state.stats_in_place(|s| {
+            s.total_reconnects_this_session = s.total_reconnects_this_session.saturating_add(1);
         });
+        let delay_secs = backoff_secs(*attempt);
+        if !self
+            .backoff_with_cancel(delay_secs, *attempt, snap.auto_reconnect_max_attempts)
+            .await
+        {
+            // Cancelled — user clicked Stop mid-backoff. Clean to Idle.
+            self.state.stats_in_place(|s| {
+                s.status = "Idle".into();
+                s.reconnect_attempt = 0;
+                s.reconnect_next_secs = 0;
+            });
+            return false;
+        }
+        true
+    }
+
+    /// 1-Hz tick that updates the UI's reconnect countdown while
+    /// waiting for backoff. Returns true if the full delay elapsed;
+    /// false if the operator clicked Stop (Stop's `notify_waiters`
+    /// wakes the select arm immediately so we don't wait up to 60s
+    /// for a tick to elapse).
+    async fn backoff_with_cancel(
+        &self,
+        delay_secs: u32,
+        attempt_num: u32,
+        max_attempts: u32,
+    ) -> bool {
+        let cancel = {
+            let inner = self.inner.lock().await;
+            inner.supervisor_cancel.clone()
+        };
+        for remaining in (1..=delay_secs).rev() {
+            self.state.stats_in_place(|s| {
+                s.status = "Reconnecting".into();
+                s.reconnect_attempt = attempt_num;
+                s.reconnect_next_secs = remaining;
+            });
+            // Early bail if stop_requested flipped between iters.
+            if self.inner.lock().await.stop_requested {
+                return false;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = cancel.notified() => return false,
+            }
+        }
+        true
     }
 
     async fn handle_log_line(&self, line: &str) {
@@ -1257,6 +1508,25 @@ impl Streamer {
 /// recover. When any of these are seen, status flips to Interrupted
 /// and the line becomes the visible error in the UI's error banner
 /// — without waiting for the process to actually exit.
+/// Auto-reconnect backoff schedule (alpha.30). `next_attempt` is
+/// the attempt number we're about to fire (so 2 = first retry after
+/// the initial attempt failed). Caps at 60s. Returns 0 for
+/// next_attempt == 1, which the supervisor shouldn't actually call
+/// — kept defensive so a future caller can't accidentally produce a
+/// pathological wait time.
+fn backoff_secs(next_attempt: u32) -> u32 {
+    match next_attempt {
+        0 | 1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 4,
+        5 => 8,
+        6 => 16,
+        7 => 32,
+        _ => 60,
+    }
+}
+
 const ERROR_TAGS: &[&str] = &[
     "connection refused",
     "connection setup failure",

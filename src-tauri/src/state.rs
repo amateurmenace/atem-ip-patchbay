@@ -77,6 +77,17 @@ pub struct StreamStats {
     pub frames_sent: u64,
     pub frames_dropped: u64,
     pub quality: f32,
+    /// Current reconnect attempt counter (1-indexed). 0 when not
+    /// in a reconnect cycle (either streaming normally or stopped).
+    pub reconnect_attempt: u32,
+    /// Seconds remaining until the next reconnect attempt. Ticked
+    /// down by the supervisor during backoff. UI surfaces "Reconnecting
+    /// in {N}s · attempt M/MAX" when non-zero.
+    pub reconnect_next_secs: u32,
+    /// Cumulative reconnect count since the operator clicked Start.
+    /// Resets to 0 only on a fresh user-initiated start; survives the
+    /// 60s-stable counter reset so the operator sees the total churn.
+    pub total_reconnects_this_session: u32,
 }
 
 impl Default for StreamStats {
@@ -92,6 +103,9 @@ impl Default for StreamStats {
             frames_sent: 0,
             frames_dropped: 0,
             quality: 0.0,
+            reconnect_attempt: 0,
+            reconnect_next_secs: 0,
+            total_reconnects_this_session: 0,
         }
     }
 }
@@ -851,6 +865,9 @@ impl EncoderState {
                 frames_sent: inner.stats.frames_sent,
                 frames_dropped: inner.stats.frames_dropped,
                 quality: round1(inner.stats.quality),
+                reconnect_attempt: inner.stats.reconnect_attempt,
+                reconnect_next_secs: inner.stats.reconnect_next_secs,
+                total_reconnects_this_session: inner.stats.total_reconnects_this_session,
             },
             destination_type: inner.destination_type.clone(),
             decklink_device_name: inner.decklink_device_name.clone(),
@@ -1216,4 +1233,11 @@ pub struct StatsSnapshot {
     pub frames_sent: u64,
     pub frames_dropped: u64,
     pub quality: f32,
+    /// Reconnect supervisor fields (alpha.30). Zero when not in a
+    /// reconnect cycle. UI uses these to render a "Reconnecting in
+    /// {N}s · attempt {M}/{MAX}" yellow status pill during backoff
+    /// instead of the red "Interrupted" state.
+    pub reconnect_attempt: u32,
+    pub reconnect_next_secs: u32,
+    pub total_reconnects_this_session: u32,
 }

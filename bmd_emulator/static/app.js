@@ -1408,11 +1408,22 @@ function render(snap) {
 
   // Status pill + body class for streaming-state animations
   const stats = snap.stats;
-  els.statusPill.textContent = stats.status.toUpperCase();
-  els.statusPill.classList.remove('streaming', 'connecting', 'interrupted');
+  // alpha.30: during auto-reconnect backoff the supervisor sets
+  // status = "Reconnecting" with reconnect_attempt / reconnect_next_secs
+  // populated. Surface the countdown so operators can see the loop
+  // is alive and know how long until the next retry. Max is from
+  // snap.auto_reconnect_max_attempts (12 default).
+  const max = snap.auto_reconnect_max_attempts || 12;
+  if (stats.status === 'Reconnecting') {
+    els.statusPill.textContent = `RECONNECTING IN ${stats.reconnect_next_secs || 0}s · ${stats.reconnect_attempt || 0}/${max}`;
+  } else {
+    els.statusPill.textContent = stats.status.toUpperCase();
+  }
+  els.statusPill.classList.remove('streaming', 'connecting', 'interrupted', 'reconnecting');
   if (stats.status === 'Streaming') els.statusPill.classList.add('streaming');
   else if (stats.status === 'Connecting') els.statusPill.classList.add('connecting');
   else if (stats.status === 'Interrupted') els.statusPill.classList.add('interrupted');
+  else if (stats.status === 'Reconnecting') els.statusPill.classList.add('reconnecting');
 
   els.body.classList.toggle('is-streaming', stats.status === 'Streaming');
   els.liveBadge.hidden = stats.status !== 'Streaming';
@@ -1420,7 +1431,9 @@ function render(snap) {
   els.duration.textContent = stats.duration;
   els.monitorAux.textContent = stats.status === 'Streaming'
     ? `live · ${Math.round((stats.bitrate || 0) / 1000)} kbps`
-    : (stats.status === 'Connecting' ? 'connecting…' : sourceLabel(snap));
+    : stats.status === 'Connecting' ? 'connecting…'
+    : stats.status === 'Reconnecting' ? `reconnecting · ${stats.total_reconnects_this_session || 0} drops this session`
+    : sourceLabel(snap);
 
   const cfg = snap.active_config;
   els.ovlSource.textContent  = sourceLabel(snap);

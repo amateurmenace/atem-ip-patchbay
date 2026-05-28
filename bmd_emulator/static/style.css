@@ -151,6 +151,7 @@ body.is-streaming .title-block h1 {
 .status-pill.streaming { color: #fff; background: #1f8a3f; border-color: #2ecc71; box-shadow: 0 0 12px rgba(46,204,113,0.4); }
 .status-pill.connecting { color: #1a1208; background: var(--amber); border-color: var(--amber); }
 .status-pill.interrupted { color: #fff; background: #5a1f1f; border-color: var(--red); }
+.status-pill.reconnecting { color: #1a1208; background: var(--amber); border-color: var(--amber); letter-spacing: 0.10em; font-size: 10px; }
 
 .refresh-btn {
   margin-left: 12px;
