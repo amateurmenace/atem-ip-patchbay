@@ -2283,6 +2283,414 @@ Roughly in order of operator-impact value:
    - Real-Windows-hardware end-to-end test for alpha.15-28
      features.
 
+### Session 14 wins (alpha.29 through alpha.34, 2026-05-28)
+
+Six tagged alphas + an entirely new cross-platform FFmpeg+
+DeckLink CI pipeline (build-ffmpeg.yml) + a private BMD SDK
+mirror. Approximately a 6-hour session. Most substantive
+single-session shipment so far. alpha.29 through alpha.33
+shipped clean to the Releases page; alpha.34 (the release.yml
+swap) failed CI on Mac at the dylib-load sanity check —
+documented in Open issues below as the immediate Session 15
+pickup.
+
+**alpha.29 (commit `92f195e`) — UDM API key form INSIDE the
+net-utility dashboard.** Session 14 priority #1, operator-
+asked-for since alpha.22 testing. Moves UDM credential entry
+from the misplaced main-app dialog (alpha.22's dead-end;
+alpha.25 removed it without surfacing a replacement) into
+the net-utility's own UDM panel.
+
+Refactor introduces `unifi::CredentialsHolder = Arc<Mutex<
+Option<UnifiCredentials>>>`, shared across the three polling
+threads (poll_loop / wan_poll_loop / system_poll_loop) and
+the /api/config POST handler. Threads now always spawn
+(previously gated on env-creds at boot); when unconfigured
+they idle in NotConfigured. Each polling tick re-reads the
+holder and rebuilds the UnifiClient on credential change,
+so a runtime update via the dashboard form takes effect
+within ~2 seconds.
+
+Lock ordering preserved (creds-before-state) across polling
+threads + request handler — no deadlock risk. Security:
+credentials never enter DashboardState (which serializes to
+/api/state); polling threads hold them via the holder Arc;
+only UnifiStatus (Connected / Connecting / Failed /
+NotConfigured) surfaces. atem-net-diag bumped to 0.2.5.
+
+Also folded in the dashboard.rs hot-fix from `61213a2`
+(`LanVisibility::PossiblyBlind` pattern match in the pre-show
+check arm — alpha.28's regression that broke both the
+build-atem-net-diag Mac job AND the build-windows job).
+
+**alpha.30 (commit `2db1888`) — auto-reconnect supervisor.**
+Session 14 priority #2. alpha.25 added the auto_reconnect
+toggle + max_attempts UI but no backend behavior; this
+alpha lands the actual supervisor.
+
+Refactor extracts `Streamer::start()` body into a new
+`spawn_attempt()` helper that returns the stderr handle.
+`run_monitor()` becomes `run_one_attempt()` returning an
+`AttemptOutcome` enum (UserStopped / UnexpectedExit). New
+`run_supervisor()` task owns the lifecycle: alternates
+run_one_attempt with `backoff_with_cancel()` ticks (1s →
+2s → 4s → 8s → 16s → 32s → 60s cap). New
+`handle_unexpected_exit()` centralizes the "reconnect or
+give up" decision. New `Inner.supervisor_cancel` (a
+`tokio::sync::Notify`) lets `stop()` wake a mid-backoff
+sleep within milliseconds rather than waiting 60s for the
+current tick.
+
+Per-attempt cleanup tears down NDI/OMT capture + OMT sender
++ video tee so the next attempt can re-claim the SDK handle.
+Watchdog (alpha.4) unchanged — each spawn_attempt spawns
+its own; self-terminates when its FFmpeg dies. No leak.
+
+UI: status pill shows "RECONNECTING IN 4s · 3/12" (amber)
+during backoff. Monitor sub-label shows total drops this
+session. Three new StreamStats fields ride through
+StatsSnapshot via /api/state.
+
+**alpha.31 (commit `e8249d1`) — audio level meters.** Session
+14 priority #3. alpha.25 added the meters_enabled toggle +
+state field; this alpha lands the actual visualization.
+
+Backend: `build_audio_filter` appends `astats=metadata=1:
+reset=1:length=0.25,ametadata=mode=print:direct=1` when
+meters_enabled (and destination_type != "decklink").
+`handle_log_line` short-circuits on any line containing
+"lavfi.astats." — parses (channel, metric, value), updates
+the corresponding StreamStats field, returns BEFORE the
+line hits the log-tail buffer or the error-heuristic scan.
+That's load-bearing: astats emits 40+ lines/sec; without
+the short-circuit it'd fill LOG_TAIL_CAPACITY in seconds.
+
+New parser `parse_astats_line` extracts `lavfi.astats.<ch>.
+<metric>=<dB>` triples. Ignores "Overall" + channels 3+
+since the UI is stereo-only. Five new StreamStats fields
+(audio_db_rms_l, audio_db_rms_r, audio_db_peak_l,
+audio_db_peak_r, audio_levels_at) defaulting to -120 dB so
+idle meters sit at the bar's bottom.
+
+New EncoderState method `read_audio_levels()` returns the
+5 fields directly without going through the full snapshot —
+the 4Hz poll endpoint is on the hot path.
+
+New `/api/audio-levels` endpoint at 4Hz polling cadence
+returns { rms_l, rms_r, peak_l, peak_r, updated_at,
+server_time, meters_enabled }. server_time + updated_at let
+the UI compute idle_secs locally + fade meters when the
+stream stalls.
+
+UI: canvas-based VU meters in the Audio Mixer card. Stale-
+data detection fades to silence when no astats updates in
+>0.7s. dB readout under each bar. CSS gradient maps -60..-18
+green, -18..-6 yellow, -6..0 red. 1.5s peak-hold rendered
+client-side via `audioMeterState.peakHold` map.
+
+Documented limitations: mono streams light only L (astats
+only emits channel 1); DeckLink destination skips meters
+(no encoder pipeline); 4Hz feels slightly choppy on very
+quiet signals (broadcast convention is 25-50Hz).
+
+**alpha.32 (commit `ffaefba`) — UDM form survives password-
+manager extensions.** Operator-reported on alpha.29: typing
+the UDM API key + clicking Save did nothing while the
+console showed Chrome's
+"async-listener / channel-closed" extension error pattern.
+
+Root cause: password managers (1Password, LastPass,
+Bitwarden, Chrome's built-in saver) hook
+`<input type="password">` + `<button type="submit">` pairs.
+When the extension's handler crashes mid-async, the form
+submission stalls and our submit closure never fires.
+
+Defense-in-depth fix:
+- Input is `type="text"` with `-webkit-text-security:disc`
+  so the key still LOOKS like bullets but extensions don't
+  see a password field. Explicit `data-1p-ignore` /
+  `data-lpignore` / `data-bwignore` opt-outs. Non-password-
+  looking name attribute.
+- Button is `type="button"` (not submit). Click listener
+  triggers submit() directly.
+- Form submit + Enter-in-input also wired (keyboard users)
+  with explicit preventDefault.
+- Inline `onsubmit="return false"` as last-resort defense.
+- Better HTTP / parse error surfacing.
+
+atem-net-diag bumped to 0.2.6.
+
+**alpha.33 (commit `a835f0c`) — per-switch pin in net-utility.**
+Operator follow-up after alpha.27/28 testing. alpha.27 added
+per-port pins (★ on individual ports). On a busy LAN with
+many switches, operators want to pin a WHOLE switch to the
+top — not just individual ports inside one.
+
+- ★/☆ button in each `switch-block-head`. Pinned switches
+  sort ABOVE the previous ATEM-auto-priority (operator's
+  explicit pin beats the heuristic).
+- Pinned switches get accent border + faint background tint.
+- New `pinnedSwitches: Set<string>` keyed by sw.mac, parallel
+  to alpha.27's pinnedPorts. Separate localStorage key
+  (`netutility_switch_pins_v1`).
+- Card summary surfaces both pin counts.
+- Click delegation extended; same listener handles both
+  `.sw-pin-btn` and `.pin-btn`.
+
+Pure JS/HTML/CSS. No Rust changes. atem-net-diag bumped to
+0.2.7.
+
+**alpha.34 (commit `0f216ba`) — release.yml swap to sidecar
+FFmpeg.** Session 14 capstone. release.yml's Mac block
+(lines 113-129) and Windows block (lines 600-653) both now
+`gh release download` the FFmpeg+DeckLink artifact from our
+build-ffmpeg.yml-produced sidecar prerelease
+(ffmpeg-decklink-8.1.1-bmd16.0-rev1) instead of curling from
+jellyfin / gyan.dev.
+
+Both blocks add a muxer-assertion sanity check after staging:
+decklink + mpegts + flv muxers, libx264 + the platform's HW
+encoder (videotoolbox on Mac, nvenc on Windows), srt protocol.
+If any miss, the build fails loudly. Regression guard for
+any future sidecar pipeline change.
+
+**Windows side: shipped clean.** Both the sidecar pipeline
+ran green AND release.yml's Windows job downloaded + verified
++ packaged successfully. The Windows .exe is technically
+present at the v0.2.0-alpha.34 tag (the build-windows job
+succeeded) but the overall release was gated by Mac.
+
+**Mac side: failed at the dylib-load sanity check.** The
+sidecar tarball's ffmpeg has dynamic dependencies on
+`/opt/homebrew/opt/srt/lib/libsrt.1.5.dylib` (and likely
+libx264, libx265). The release.yml runner didn't have those
+installed, so `ffmpeg -version` failed at dyld load. See
+Open issues from Session 14 below.
+
+The publish-release job is gated on `build-macos.result ==
+'success'`, so alpha.34's GitHub Release page was NEVER
+created. Operators continue to see alpha.33 as the latest
+release. alpha.34 tag dangles in git pointing at the working
+swap; needs the dylib-bundling fix + re-dispatch (or a new
+alpha.35 commit) before it can ship.
+
+**Cross-platform FFmpeg+DeckLink CI (build-ffmpeg.yml).**
+The session's deepest infrastructure work. 15 iterations to
+get both platforms green:
+
+- **Mac (iter 4):** Built FFmpeg n8.1.1 with --enable-decklink
+  cleanly via a small shim header that defines IID_IUnknown
+  via `CFUUIDGetUUIDBytes(IUnknownUUID)`. BMD's Mac SDK
+  doesn't ship IID_IUnknown as a top-level constant; the
+  symbol only exists in Examples/Mac/platform.h. The shim
+  is written into the SDK's Mac/include/ before configure
+  runs + -include'd via extra-cxxflags.
+
+- **Windows (iter 15):** Pivoted from MinGW widl to Microsoft
+  MIDL after 5 widl iterations surfaced increasingly
+  esoteric incompatibilities (missing IUnknown import,
+  lowercase bool, missing cross-file imports between
+  version-specific headers, deprecated tIMPORTLIB syntax,
+  undefined types chained across imports). MIDL is the
+  compiler BMD's IDLs were designed for; it handles their
+  cross-references natively.
+
+  Windows pipeline structure:
+  1. setup-msys2 (now also includes `zip` for packaging)
+  2. ilammy/msvc-dev-cmd@v1 (gives MIDL its cl.exe
+     preprocessor)
+  3. Download SDK 16.0 zip from amateurmenace/bmd-decklink-
+     sdk-mirror via BMD_SDK_PAT
+  4. Rename to no-spaces path (FFmpeg configure's word-
+     splitting can't survive spaces in paths)
+  5. Run MIDL on each .idl; emit DeckLinkAPI.h (16413 lines,
+     758 KB)
+  6. Stub the per-version v-headers (DeckLinkAPI_v14_2_1.h
+     etc.) as `#include "DeckLinkAPI.h"` — BMD's auxiliary
+     .idls are designed to be import'd, not compiled
+     standalone. The types are inlined into DeckLinkAPI.h
+     via MIDL's import handling.
+  7. Clone FFmpeg n8.1.1
+  8. ./configure with --enable-decklink + --enable-nvenc +
+     d3d11va/dxva2/mediafoundation + base flag set
+  9. make
+  10. Bundle MinGW runtime DLLs (libgcc_s_seh-1.dll,
+      libstdc++-6.dll, libwinpthread-1.dll) alongside
+      ffmpeg.exe
+  11. Sanity check muxers/encoders/protocols
+  12. zip + upload via gh release upload to the private
+      sidecar prerelease
+
+Sidecar prerelease tag is computed from ci/ffmpeg-pins.env:
+`ffmpeg-decklink-${FFMPEG_VERSION#n}-bmd${BMD_SDK_VERSION}-
+rev${BUILD_REVISION}`. Current: `ffmpeg-decklink-8.1.1-
+bmd16.0-rev1`. Both Mac (9 MB tarball) + Windows (22 MB
+zip) artifacts are live on the prerelease.
+
+**BMD SDK mirror.** Private repo `amateurmenace/bmd-decklink-
+sdk-mirror` with the SDK 16.0 zip uploaded as a `v16.0`
+release. Accessed in CI via `BMD_SDK_PAT` fine-grained PAT
+(read-only Contents access on the mirror repo only).
+docs/SETUP-FFMPEG-CI.md walks the setup steps that future
+SDK version bumps would repeat.
+
+**ci/ffmpeg-pins.env** is the single source of truth for
+FFmpeg version + SDK version + BUILD_REVISION. Bumping any
+forces a rebuild. paths-filter on build-ffmpeg.yml auto-fires
+on pin changes.
+
+### Open issues from Session 14
+
+- **Mac FFmpeg+DeckLink sidecar has dynamic dylib deps.**
+  THE blocker on alpha.34 actually shipping. Our Mac
+  build-ffmpeg.yml configure used Homebrew's srt + x264 +
+  x265 dynamically; the resulting ffmpeg binary references
+  `/opt/homebrew/opt/srt/lib/libsrt.1.5.dylib` etc. End-user
+  machines won't have those at that path. release.yml's
+  sanity check `ffmpeg -version` failed with
+  `dyld: Library not loaded`.
+
+  **Fix shape for Session 15:** in build-ffmpeg.yml's Mac
+  block, after `make`:
+  1. Run `otool -L ffmpeg` to enumerate dynamic deps
+  2. For each `/opt/homebrew/...` dylib, copy into the
+     tarball alongside ffmpeg
+  3. Run `install_name_tool -change /opt/homebrew/...
+     @executable_path/<name>` on ffmpeg so it looks for the
+     dylibs next to itself
+  4. Run `install_name_tool -id @executable_path/<name>` on
+     each copied dylib so the install names match
+  5. codesign ffmpeg + dylibs (alpha.34's release.yml does
+     this in the deep-codesign pass; needs to also pick up
+     the new dylibs at the sidecar level)
+
+  Bump `BUILD_REVISION=2` in ci/ffmpeg-pins.env to force a
+  rebuild after the fix lands. Sidecar prerelease will get
+  a new tag (`ffmpeg-decklink-8.1.1-bmd16.0-rev2`); release.yml
+  picks up the new tag automatically via the same pins-source
+  pattern.
+
+  Estimate: 1-3 CI iterations to nail the install_name_tool
+  invocations + verify the end-user .app loads cleanly.
+
+- **alpha.34 tag dangling.** Tag exists in git pointing at
+  `0f216ba` (the release.yml swap commit). The GitHub Release
+  page was never created (Mac job gated it). When the Mac
+  dylib fix lands, choices:
+  a) Delete + re-tag alpha.34 at the new commit (force-push
+     the tag — requires `git push origin :refs/tags/v0.2.0-
+     alpha.34` then re-tag + push)
+  b) Move forward: new commit becomes alpha.35; alpha.34 tag
+     stays as a historical pointer to the swap-without-fix
+     attempt
+  Probably (b) is cleaner. Decide in Session 15.
+
+- **Windows build artifacts at alpha.34.** The Windows .exe
+  did build successfully at the alpha.34 tag — but the
+  publish step was skipped (`needs.build-macos.result ==
+  'success'` gate). The Windows .exe artifact IS retrievable
+  via `gh run download` against the alpha.34 CI run, but
+  no general operator can see it on the Releases page.
+
+- **PAT in conversation history.** Same warning as Sessions
+  5 + 6: the BMD_SDK_PAT pasted into the conversation should
+  be rotated. Fine-grained, read-only, 90-day expiry, scoped
+  to one private repo — but still treat as compromised.
+  Generate a fresh PAT in the GitHub web UI, `gh secret set
+  BMD_SDK_PAT` with the new value, delete the old PAT from
+  the user's PAT page.
+
+- **build-ffmpeg.yml MIDL step emits stubs for ALL non-
+  produced .h files.** The current stub loop walks every
+  .idl and writes a stub if the corresponding .h didn't
+  exist. That's fine for the per-version v-headers FFmpeg
+  references, but some auxiliary IDLs (DeckLinkAPIStreaming_
+  v10_8.idl, DeckLinkAPIConfiguration.idl, etc.) ALSO get
+  stubbed. Harmless — FFmpeg doesn't include them — but if a
+  future FFmpeg version DOES start including one, the stub
+  might mask a real type-resolution bug. Document the
+  semantics; consider tightening to known-needed names only.
+
+- **Audio meters mono detection.** alpha.31 limitation:
+  mono input lights only the L meter (astats only emits
+  channel 1 for mono). Could mirror L→R when detected mono.
+  Small follow-up.
+
+- **DeckLink output destination skips audio meters.** Same
+  alpha.31 limitation — DeckLink path doesn't go through the
+  astats filter chain. Computing RMS in-process from the
+  frame stream would work but raw frames are bandwidth-
+  expensive to sample. Defer.
+
+- **OMT-out audio for non-raw sources.** Still deferred from
+  Session 8. Needs cross-platform pipe-FD plumbing (pipe:3 on
+  UNIX, named pipes on Windows).
+
+- **Pipe / relay custom audio.** alpha.14 fixed NDI + Custom
+  audio on Windows via `-f dshow`. Same gap remains for the
+  rest of the source types (AVF / pipe / RTSP / SRT-listen /
+  RTMP-listen). Each emits lavfi anullsrc when audio_mode=
+  custom + non-Mac platform.
+
+- **Real-Windows-hardware end-to-end testing.** Carry-over
+  from Sessions 11/12/13. Many alpha.15-34 features compile
+  + ship via CI but haven't been driven through actual
+  install → use → stream-to-ATEM on a Broadcast Pix test rig
+  (or similar). Each session adds more features to this
+  pending test pass.
+
+### Session 15 priorities (next pickup)
+
+In rough order of operator-impact value:
+
+1. **Fix the Mac dylib gap.** THE blocker on alpha.34
+   actually shipping Mac DeckLink to end users. Detailed
+   fix shape in Open issues #1 above. Bumping BUILD_REVISION
+   in ci/ffmpeg-pins.env + dispatching build-ffmpeg.yml
+   produces a new sidecar tarball; then re-attempt release.yml
+   (either re-tag alpha.34 or move forward to alpha.35).
+   ~30-60 min of CI iteration.
+
+2. **Verify alpha.34 end-to-end once Mac dylib is fixed.**
+   Install alpha.34 on a clean Mac + Windows. Pick a network
+   source (NDI camera, OMT sender, etc.). Pick "Local
+   (DeckLink | SDI/HDMI)" as destination. Verify the SDI/HDMI
+   output of a real DeckLink card lights up. End-state proof
+   of alpha.21's DeckLink output direction working on shipped
+   installers.
+
+3. **Pre-show checks panel (carryover).** Session 12 priority
+   #4 — full pre-show panel in net-utility with explicit
+   pass/warn/fail rows that the operator scans before going
+   live. alpha.28's compact pre-show banner is in place; this
+   is the larger sibling. Detailed plan in the Session 11/12
+   priorities section above.
+
+4. **Hardware accel for Windows + DeckLink-out decoding.**
+   Carry-over from Session 12. The encoder side now ships
+   nvenc via the sidecar; decoder side for the DeckLink-output
+   path is still libx264/x265 software. Plumb cuvid/qsv/amf
+   for incoming network streams.
+
+5. **OMT-out audio for non-raw sources.** Needs cross-
+   platform pipe-FD plumbing — Plan agent pass first.
+
+6. **Pipe / relay custom audio extension.** Apply alpha.14
+   Windows dshow / Mac AVF audio-injection pattern to the
+   pipe / RTSP / SRT-listen / RTMP-listen video sources.
+
+7. **Operator-side testing pass.** Many alpha.15-34 features
+   shipped through CI without operator verification on real
+   hardware. Especially: encoder picker routing to nvenc/
+   qsv/amf on a multi-GPU Windows machine, OMT discovery
+   against real OMT senders (vMix, OBS-OMT plugin),
+   alpha.32/33 form + per-switch pin behavior on production
+   networks.
+
+8. **CLAUDE.md catch-up.** This entry covers Session 14;
+   subsequent sessions should add their wins + open issues +
+   priorities in the same shape.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
@@ -2553,6 +2961,45 @@ Key implementation gotchas:
   Pass/Warn/Fail/Skip status per check. Overall verdict
   color-codes the collapsed-card summary. New types
   PreShowCheck / PreShowVerdict on the wire.
+- `v0.2.0-alpha.29` (commit `92f195e`): UDM API key form
+  INSIDE net-utility. Runtime credential injection via
+  `Arc<Mutex<Option<UnifiCredentials>>>` shared across the
+  three polling threads. Folds in the alpha.28 dashboard.rs
+  pattern fix.
+- `v0.2.0-alpha.30` (commit `2db1888`): auto-reconnect
+  supervisor. Exponential backoff (1-60s, max 12 attempts,
+  reset after 60s stable). spawn_attempt / run_one_attempt /
+  run_supervisor / handle_unexpected_exit / backoff_with_
+  cancel + new Inner.supervisor_cancel Notify.
+- `v0.2.0-alpha.31` (commit `e8249d1`): audio level meters
+  via astats + ametadata=mode=print in build_audio_filter.
+  Five new StreamStats fields + new /api/audio-levels
+  endpoint @ 4Hz + canvas VU meters in the Audio Mixer card
+  with green/yellow/red zones + 1.5s peak-hold.
+- `v0.2.0-alpha.32` (commit `ffaefba`): UDM key form
+  survives password-manager extensions. Defense-in-depth:
+  type="text" with -webkit-text-security:disc CSS, type=
+  "button" with click handler, data-*-ignore attributes,
+  inline onsubmit="return false". Plus the cross-platform
+  FFmpeg+DeckLink CI plumbing made first dispatches: Mac
+  green via shim, Windows still iterating on widl.
+- `v0.2.0-alpha.33` (commit `a835f0c`): per-switch pin in
+  net-utility. ★/☆ button in switch-block-head. New
+  pinnedSwitches Set keyed by sw.mac + separate
+  localStorage key. Pinned switches sort above ATEM-auto-
+  priority.
+- `v0.2.0-alpha.34` (commit `0f216ba`): release.yml swap
+  to sidecar FFmpeg. Mac + Windows blocks both now `gh
+  release download` from the sidecar prerelease
+  (ffmpeg-decklink-8.1.1-bmd16.0-rev1) + add muxer-
+  assertion sanity check. **Did not ship on Mac** — the
+  sidecar's Mac ffmpeg has dynamic deps on Homebrew dylibs
+  (/opt/homebrew/opt/srt/lib/libsrt.1.5.dylib etc.). The
+  publish-release job was gated on Mac success; alpha.34
+  GitHub Release page was never created. Windows build
+  did succeed but is only retrievable via the CI run's
+  artifacts, not the Releases page. See Open issues from
+  Session 14 for the dylib-bundling fix.
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -2923,40 +3370,32 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 12 direction"** + **"Session 12 priorities"**
-under the v0.2.0 direction section above for the full detail.
-Quick summary:
+See **"Session 15 priorities (next pickup)"** under the v0.2.0
+direction section above for the full detail. Quick summary:
 
-1. **DeckLink output — the bidirectional patchbay.** This is
-   the headline Session 12 direction. Today the app routes
-   local sources OUT to network destinations; the new push is
-   the OTHER direction: route NETWORK sources (NDI / OMT /
-   SRT receive) to LOCAL DeckLink SDI/HDMI outputs. End-state
-   use case: this machine becomes a "decode farm" that
-   receives N network streams and outputs each to a different
-   DeckLink output for downstream hardware switchers / monitor
-   walls / broadcast workflows. Substantial refactor — worth
-   a Plan agent pass first.
+1. **Fix the Mac dylib gap in build-ffmpeg.yml.** THE blocker
+   on alpha.34 actually shipping. The Mac sidecar tarball
+   has dynamic deps on Homebrew dylibs; end-user .apps
+   can't find them. Fix shape: `otool -L` + copy dylibs
+   into tarball + `install_name_tool` to @executable_path.
+   Bump BUILD_REVISION in ci/ffmpeg-pins.env, re-dispatch
+   build-ffmpeg.yml, re-attempt release.yml.
 
-2. **Hardware acceleration on Windows.** Today encoder routes
-   through libx264 / libx265 on non-Mac platforms; multi-
-   stream 1080p60 saturates CPU fast. Detect GPU vendor and
-   route through nvenc / qsv / amf. BtbN's FFmpeg builds
-   already include all three. Same hardware-decode story for
-   the DeckLink-output path in priority #1.
+2. **Verify alpha.34 end-to-end once Mac dylib is fixed.**
+   Install on a clean Mac + Windows. Pick a network source.
+   Pick "Local (DeckLink | SDI/HDMI)" destination. Verify
+   SDI output of a real DeckLink card lights up. Proof
+   that alpha.21's DeckLink output direction works on
+   shipped installers.
 
-3. **Debug Net Diag button on Windows.** alpha.17 bundled
-   atem-net-diag.exe, alpha.19 first-pass install: button
-   doesn't actually open anything visible. Investigate the
-   api_open_net_diag handler at src-tauri/src/http.rs:602+,
-   start with the in-app log panel.
+3. **Pre-show checks panel (carryover).** Full-width card
+   with explicit pass/warn/fail rows. Pure projection over
+   existing state.
 
-4. **Pre-show checks panel in net-diag.** Carry-over from
-   Sessions 10/11. Full-width card with explicit checks
-   (WAN IP, WAN headroom, UDM polling, ATEM reachable,
-   capture visibility, etc.). Pure projection over existing
-   state — no new polling threads. Files:
-   `tools/atem-net-diag/src/{dashboard.rs,dashboard.html}`.
+4. **Hardware accel for Windows + DeckLink-out decoding.**
+   Encoder side now ships nvenc via sidecar; decoder side
+   for DeckLink-output path is still libx264/x265 software.
+   Plumb cuvid/qsv/amf for incoming network streams.
 
 5. **OMT-out audio for non-raw sources.** alpha.13's video
    tee is video-only. Needs cross-platform pipe-FD plumbing
