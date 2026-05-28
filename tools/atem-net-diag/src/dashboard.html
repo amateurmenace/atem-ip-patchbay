@@ -961,9 +961,44 @@
       border-radius: 6px;
       padding: 10px 12px;
     }
+    /* alpha.32: pinned switches get a subtle accent border so they
+       read as "operator-priority" at a glance when scrolling the
+       grid. */
+    .switch-block.switch-pinned {
+      border-color: rgba(255, 211, 90, 0.4);
+      background: rgba(255, 211, 90, 0.04);
+    }
     .switch-block-head {
       display: flex; align-items: baseline; gap: 12px;
       margin-bottom: 8px; flex-wrap: wrap;
+    }
+    /* Per-switch pin button (alpha.32). Similar visual language to
+       the per-port .pin-btn but slightly larger since it lives in
+       the switch header. Inactive state is subtle so it doesn't
+       compete with the switch name; active state has the same
+       accent yellow the row's left border uses. */
+    .sw-pin-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: rgba(255, 255, 255, 0.25);
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      align-self: center;
+      transition: color 120ms ease, background 120ms ease;
+    }
+    .switch-block-head:hover .sw-pin-btn {
+      color: rgba(255, 255, 255, 0.55);
+    }
+    .sw-pin-btn:hover {
+      background: rgba(255, 211, 90, 0.12);
+      color: #ffd35a !important;
+    }
+    .sw-pin-btn[aria-pressed="true"] {
+      color: #ffd35a;
+      background: rgba(255, 211, 90, 0.12);
     }
     .switch-block-head .name {
       font-weight: 600; color: var(--text);
@@ -2002,12 +2037,28 @@
           commitFilter();
         });
       }
-      // Pin-click delegation on the switches card body (covers both
-      // .pin-btn buttons and any future star clicks if we extend the
-      // element class). Re-renders on toggle so the row sorts to its
-      // new position and the ★/☆ glyph flips.
+      // Pin-click delegation on the switches card body. Handles
+      // both per-port .pin-btn (alpha.27) and per-switch
+      // .sw-pin-btn (alpha.32). Re-renders on toggle so the row
+      // sorts to its new position and the ★/☆ glyph flips.
       if (filterCardBody) {
         filterCardBody.addEventListener('click', (e) => {
+          // Per-switch pin (alpha.32). Check FIRST so the broader
+          // .sw-pin-btn match wins before we fall through to the
+          // port-pin handler.
+          const swBtn = e.target.closest('.sw-pin-btn');
+          if (swBtn) {
+            e.preventDefault();
+            const mac = swBtn.dataset.swMac || '';
+            if (pinnedSwitches.has(mac)) pinnedSwitches.delete(mac);
+            else pinnedSwitches.add(mac);
+            saveSwitchPinSet(pinnedSwitches);
+            if (typeof __currentState !== 'undefined' && __currentState) {
+              renderSwitches(__currentState);
+            }
+            return;
+          }
+          // Per-port pin (alpha.27).
           const btn = e.target.closest('.pin-btn');
           if (!btn) return;
           e.preventDefault();
@@ -2026,8 +2077,26 @@
     // alpha.27: filter + pin state for the switches/ports card.
     // Persisted to localStorage so operators don't have to re-set
     // their preferred view every page reload.
+    // alpha.32: per-switch pins (in addition to per-port). Operators
+    // on busy LANs (many switches + many ports) want to pin a whole
+    // switch to the top, not just individual ports — separate Set
+    // keyed by sw.mac.
     const PIN_STORAGE_KEY = 'netutility_port_pins_v1';
+    const SWITCH_PIN_STORAGE_KEY = 'netutility_switch_pins_v1';
     const FILTER_STORAGE_KEY = 'netutility_switches_filter_v1';
+    function loadSwitchPinSet() {
+      try {
+        const raw = localStorage.getItem(SWITCH_PIN_STORAGE_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? new Set(arr) : new Set();
+      } catch (_e) { return new Set(); }
+    }
+    function saveSwitchPinSet(set) {
+      try {
+        localStorage.setItem(SWITCH_PIN_STORAGE_KEY, JSON.stringify(Array.from(set)));
+      } catch (_e) { /* non-fatal */ }
+    }
     function loadPinSet() {
       try {
         const raw = localStorage.getItem(PIN_STORAGE_KEY);
@@ -2058,8 +2127,10 @@
       } catch (_e) { /* non-fatal */ }
     }
     let pinnedPorts = loadPinSet();
+    let pinnedSwitches = loadSwitchPinSet();
     let switchesFilter = loadFilterState();
     function pinKey(swMac, portIdx) { return `${swMac || ''}:${portIdx}`; }
+    function isSwitchPinned(sw) { return pinnedSwitches.has(sw.mac || ''); }
 
     // Switch port utilization. One block per USW, with a port table
     // showing real-time tx/rx kbps, errors, link state. The ATEM's
@@ -2080,11 +2151,16 @@
         return;
       }
       empty.hidden = true;
-      // Sort: switch hosting the ATEM first, then by active-port
-      // count desc (busy switches before idle PDUs), then alphabetical.
-      // Pinning the ATEM's switch to the top means the operator's
-      // primary signal is visible the moment they expand the card.
+      // Sort: operator-pinned switches first (alpha.32), then the
+      // switch hosting the ATEM, then by active-port count desc
+      // (busy switches before idle PDUs), then alphabetical.
+      // Operator pins beat the ATEM auto-priority — if you've
+      // explicitly pinned an uplink switch, you want it on top
+      // regardless of where the ATEM lives.
       switches.sort((a, b) => {
+        const aPin = isSwitchPinned(a);
+        const bPin = isSwitchPinned(b);
+        if (aPin !== bPin) return aPin ? -1 : 1;
         const aAtem = (a.ports || []).some((p) => p.is_atem_port);
         const bAtem = (b.ports || []).some((p) => p.is_atem_port);
         if (aAtem !== bAtem) return aAtem ? -1 : 1;
@@ -2099,7 +2175,8 @@
       const sumParts = [`${switches.length} switch${switches.length === 1 ? '' : 'es'}`, `${totalPorts} active ports`];
       if (errPorts > 0) sumParts.push(`${errPorts} with errors`);
       if (atemPort) sumParts.push(`ATEM on ${atemPort}`);
-      if (pinnedPorts.size > 0) sumParts.push(`${pinnedPorts.size} pinned`);
+      if (pinnedSwitches.size > 0) sumParts.push(`${pinnedSwitches.size} pinned switch${pinnedSwitches.size === 1 ? '' : 'es'}`);
+      if (pinnedPorts.size > 0) sumParts.push(`${pinnedPorts.size} pinned port${pinnedPorts.size === 1 ? '' : 's'}`);
       updateCardSummary('switches-card', sumParts.join(' · '));
 
       // alpha.27 filter predicate. Combines text search (matches any of
@@ -2203,9 +2280,16 @@
               <span><button type="button" class="pin-btn" data-port-key="${pkey}" aria-pressed="${pinAria}" title="${pinTitle}">${isPinned ? '★' : '☆'}</button></span>
             </div>`;
         }).join('');
+        const swPinned = isSwitchPinned(sw);
+        const swPinAria = swPinned ? 'true' : 'false';
+        const swPinTitle = swPinned
+          ? 'Unpin switch'
+          : 'Pin switch (sorts to top, separate from per-port pins below)';
+        const headClass = swPinned ? 'switch-block-head pinned' : 'switch-block-head';
         return `
-          <div class="switch-block" data-sw-mac="${sw.mac || ''}">
-            <div class="switch-block-head">
+          <div class="switch-block${swPinned ? ' switch-pinned' : ''}" data-sw-mac="${sw.mac || ''}">
+            <div class="${headClass}">
+              <button type="button" class="sw-pin-btn" data-sw-mac="${sw.mac || ''}" aria-pressed="${swPinAria}" title="${swPinTitle}">${swPinned ? '★' : '☆'}</button>
               <span class="name">${sw.name}</span>
               <span class="model">${sw.model}</span>
               <span class="stats">${stats}</span>
