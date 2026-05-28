@@ -1898,6 +1898,391 @@ What this commit does NOT touch (carry-overs):
   either install LLVM via admin elevation OR continue the
   "push-and-let-CI-verify" pattern.
 
+### Session 13 wins (alpha.22 through alpha.28, 2026-05-28)
+
+Massive shipping day — nine alphas committed in a single
+operator-feedback-driven session. Alphas 22-26 shipped to
+GitHub Releases with CI green; 27-28 are committed locally
+and queue for sequential push as the prior CIs clear.
+
+**alpha.22 (commit `7554570`)** — three issues bundled.
+
+1. Switch the Windows FFmpeg distribution from BtbN's GPL
+   build to **gyan.dev's full_build**. BtbN dropped
+   `--enable-decklink` from their Windows prebuilts (Blackmagic
+   SDK redistribution issue). gyan.dev did the same — neither
+   has decklink — but gyan.dev's "full_build" includes a much
+   richer hardware-accel set (libvpl for Intel QSV, d3d11va /
+   d3d12va / dxva2 / cuvid / nvdec / mediafoundation decoders,
+   AMF + nvenc encoders) which directly supports the alpha.25
+   encoder-picker work and the queued hardware-accel work.
+   CI step's sanity check is informational only — doesn't fail
+   the build on missing decklink since neither distro ships it.
+
+2. **Net Diag dashboard "stuck on loading" bug** (live since
+   alpha.17). Root cause: duplicate `const cfg` + `const atemIp`
+   declarations inside `renderVisibilityBanner` in
+   `tools/atem-net-diag/src/dashboard.html` — chromium parses
+   them as a SyntaxError, so the entire poll loop never
+   starts and the literal "loading…" header text never gets
+   overwritten. Dropped the duplicates + reused the existing
+   variables from above. Net Diag dashboard now renders.
+
+3. **UDM API key dialog added to main app topbar** (later
+   removed in alpha.25 per operator feedback — see below).
+   ⚙ UDM button next to Net Diag, modal dialog with host +
+   key fields, env-var passthrough when api_open_net_diag
+   spawns net-diag.
+
+**alpha.23 (commit `c3fa90c`)** — UI polish on top of alpha.22.
+
+- Hero subtitle gains a reverse-direction tagline ("And do the
+  reverse: convert network sources to physical outputs using
+  DeckLink!") so the bidirectional patchbay framing reads from
+  first paint.
+- Destination-type segmented control restyled into an accent-
+  tinted card with a "Where does this stream go?" label + bigger
+  segments. Button labels reframed: "ATEM (Network · SRT)" →
+  "Remote (ATEM | Decoder)" and "DeckLink (Local · SDI/HDMI)" →
+  "Local (DeckLink | SDI/HDMI)". This isn't about a specific
+  protocol — it's about where the stream PHYSICALLY ends up.
+- Default `video_mode` flipped from `1080p30` to `1080p29.97`
+  (NTSC broadcast cadence — the more common starting point in
+  North American workflows). Operators still pick 1080p59.94
+  by hand when needed.
+
+**alpha.24 (commit `fdbb0d4`)** — OMT discoverability fix.
+
+Reverses alpha.13's "hide OMT section when empty" decision.
+The hide-when-empty UX made OMT undiscoverable for users who
+didn't know it existed. Now: the Video Source card always
+shows the "OMT senders on your network" section header. When
+`knownOmt` is empty, a single placeholder tile renders
+("No OMT senders found · click 'scan OMT' above to refresh").
+Also new: a "scan OMT" link in the Video Source card title
+parallel to the existing "scan NDI" link, wired to
+`ensureOmtLoaded(true)`. Tiny ~70-LOC UI-only change.
+
+**alpha.25 (commits `3d24ff5` + `8b5b5ed` + `0f50f19`)** — the
+production-quality starter pack. Three-commit alpha, ~1100 LOC.
+
+Background: user asked for "production ready, to be able to take
+NDI streams from the machine and into a switcher and have it
+work flawlessly, or to be able to send srt streams to an atem
+and have it work well." Specifically called out encoder choice,
+auto-reconnect, pre-show checks panel, and audio level meters.
+
+Plan agent designed a six-feature bundle (~1890 LOC). Scope was
+trimmed mid-session to keep alpha.25 shippable in a single
+session without breaking the streamer's delicate lifecycle:
+
+**Shipped in alpha.25:**
+- `available_encoders()` probe at boot — runs `ffmpeg -encoders`,
+  caches the video-encoder names in a `OnceLock<Vec<String>>`.
+  Exposed on `/api/state` as `available_encoders: Vec<String>`.
+- New state fields: `video_encoder`, `encoder_extra_flags`,
+  `audio_codec`, `audio_bitrate_kbps`, `audio_sample_rate`,
+  `audio_channels`, `auto_reconnect`, `auto_reconnect_max_attempts`,
+  `meters_enabled`. Plumbed through SettingsUpdate, apply_settings,
+  Snapshot, SettingsPayload, From impl. Validated server-side
+  (encoder against known set, audio_codec against AAC family,
+  audio_bitrate clamped 32-320, sample rate 44100/48000,
+  channels 1/2).
+- `select_encoder()` + per-encoder flag tables in streamer.rs.
+  Five encoder families: VideoToolbox (preserved alpha.4 tuning
+  exactly), NVENC (`-preset p4 -tune ll -rc cbr`), QuickSync via
+  libvpl (`-preset veryfast -look_ahead 0 -pix_fmt nv12`), AMF
+  (`-quality speed -rc cbr -profile main`), libx264/libx265
+  (preserved). Auto-mode priority: macOS VT > nvenc > qsv > amf
+  > libx*. Honors `ATEM_DISABLE_VT` env override. Falls back to
+  auto if user-picked encoder isn't in available_encoders.
+- `build_audio_section()` replaces hardcoded AAC-LC 48k path with
+  reads from state. AAC-HE / AAC-HE-v2 supported; build_plan
+  rejects them on ATEM destinations (the ATEM SRT decoder only
+  takes AAC-LC).
+- `parse_extra_flags()` hand-rolled shell-style tokenizer
+  (~30 lines, no shlex dep). Power-user textarea appends raw
+  FFmpeg flags after encoder block, before muxer block. Four
+  unit tests cover simple flags / quoted strings / escapes /
+  empty input.
+- Advanced UI disclosure in the destination card with:
+  encoder dropdown (filtered by available_encoders), auto-mode
+  resolution hint, auto-reconnect toggle, AAC codec picker,
+  audio bitrate (kbps, 0 = inherit), sample rate, channels,
+  meters-enabled checkbox, encoder-extra-flags textarea.
+- UDM API key dialog **removed** from main app per operator's
+  feedback ("UDM should be in net-diag UI, not patchbay UI").
+  Reverted: alpha.22's topbar ⚙ button, modal dialog, state
+  fields, env-var passthrough at spawn. Net-diag's existing
+  env-var workflow continues to work as a fallback.
+
+**Deferred from alpha.25 (queued for Session 14+):**
+- Auto-reconnect supervisor — the actual reconnect-on-disconnect
+  behavior. UI toggle is present; backend supervisor loop wraps
+  streamer.start() with exponential backoff. Risk-isolated to
+  its own alpha because the start/stop/run_monitor lifecycle is
+  delicate (NDI capture handoff, OMT sender Arc lifetimes,
+  watchdog bash).
+- Audio level meters — `astats` filter chain in build_audio_filter,
+  metadata parser in run_monitor, canvas VU meters above the
+  Audio Mixer card. ~400 LOC; preview-path NDI-only RMS computed
+  in-process from existing audio samples.
+- Quality presets — 5-preset ladder (Broadcast HQ / Streaming
+  Standard / Cellular / Bandwidth-Limited / Lowest). Snap-on-pick.
+- UDM API key form INSIDE net-diag dashboard — the proper
+  relocation. Needs runtime credential injection (Mutex<Option<
+  UnifiCredentials>> shared with the three polling threads;
+  threads check on each tick and rebuild the UnifiClient when
+  credentials change).
+- Persistence (state.json) — was D9 in the Plan agent's plan;
+  not strictly needed for the encoder/audio surface to be useful.
+
+**alpha.26 (commit `36ae95d`)** — Net Diag → Net Utility rename.
+
+User-facing strings only:
+- Topbar button "Net Diag" → "Net Utility".
+- Dashboard `<title>` "atem-net-diag · live" → "ATEM Net Utility · live".
+- Dashboard `<h1>` "atem-net-diag" → "ATEM Net Utility".
+
+Binary name (`atem-net-diag.exe`), repo path (`tools/atem-net-diag/`),
+`/api/open-net-diag` endpoint, and Rust internal names stay for URL
++ build + muscle-memory stability. The tool grew well past
+"diagnostics" framing — UDM polling, ATEM reachability, WAN
+headroom, per-flow SRT health, alarm forwarding, mirror-mode
+wizard, pre-show checks (alpha.28). "Utility" is the broader frame.
+
+**alpha.27 (commit `60b6212`)** — switches & ports filter + pin.
+
+Operator-feedback feature for the net-utility dashboard's
+"Switches & ports" card. On a busy LAN: many switches × 48 ports
+= wall of numbers. Operators care about a small handful (the ATEM
+port, the streamer host's uplink, problem device under
+investigation). Two affordances:
+
+- **Filter bar** above the switches grid: text search input
+  (matches switch name, model, port name, connected IP, connected
+  MAC — case-insensitive, debounced ~80ms) + chip group
+  (All / Active / Errors / ATEM / Pinned ★) + Clear button when
+  any filter is dirty.
+- **Per-port pin (★)** — click to mark a port as a favorite.
+  Pinned ports float to the top of their switch's port table with
+  a dashed separator + accent left-border. Pin state is a `Set<
+  string>` keyed by `${sw.mac}:${port_idx}`. Click delegation on
+  the card body so re-renders preserve handler bindings.
+- **localStorage persistence** — pins (key `netutility_port_pins_v1`)
+  and filter state (key `netutility_switches_filter_v1`) survive
+  page reloads. Quota/private-mode failures swallowed (features
+  still work without persistence).
+- **Flap window display** — when a port shows `N flap(s)`,
+  appended `· in ${fmtUptime(sw.uptime_secs)}` so the operator
+  sees the period the count covers. Falls back to bare text when
+  uptime not reported. Lets operators compute rate ("3 flaps in
+  8h" = low concern; "3 flaps in 5min" = active instability).
+
+Pure JS/HTML/CSS — no Rust touched, no new endpoints.
+
+**alpha.28 (commit `ac8d68d`)** — pre-show readiness check panel.
+
+Session 12 priority #4, longstanding ask. A go/no-go check panel
+above the dashboard that aggregates the existing state signals
+into clear pass/warn/fail rows. Saves the operator from manually
+cross-referencing five separate cards to answer "am I ready?"
+
+Backend (Rust):
+- New types: `PreShowStatus` (Pass/Warn/Fail/Skip),
+  `PreShowCheck` ({id, label, status, detail, hint}),
+  `PreShowVerdict` ({overall, summary, checks}).
+- `compute_preshow()` function — pure projection over existing
+  state. Seven checks today:
+  1. WAN IP detected (from wan_snapshot.wan_ip)
+  2. WAN headroom (current_up_kbps / wan_upload_cap_mbps;
+     <70% Pass, 70-90% Warn, >=90% Fail)
+  3. UDM polling (Connected → Pass, Connecting → Warn,
+     NotConfigured → Skip, Failed → Fail)
+  4. ATEM reachable (last_seen against is_atem client;
+     <60s Pass, <300s Warn, else Fail)
+  5. Capture visibility (SeesPeers → Pass, PossiblyBlind →
+     Fail with mirror-mode wizard hint, Unknown → Skip)
+  6. Active streams (flow count, info-only Pass)
+  7. Stream-key correlation (count of keys correlated via
+     SID parser, info-only, with hint when 0 and capture
+     healthy)
+- Surfaced on StateResponse as `pre_show: PreShowVerdict`.
+- Overall verdict = worst status wins.
+
+UI (HTML/JS/CSS):
+- New collapsible card below the existing pre-show banner.
+  Color-codes the collapsed-card summary (green/yellow/red)
+  based on overall verdict.
+- `renderPreshowPanel()` renders one `.preshow-check` row per
+  check with icon (✓/⚠/✗/·) + label + detail + optional
+  hint below the row when status is Fail/Skip.
+- New `escapeHtml()` helper for defense-in-depth — backend
+  strings (UDM error messages, IPs) can't inject markup.
+- Existing compact-pill `renderPreshow()` banner unchanged —
+  the two systems coexist (banner = at-a-glance, panel = detail).
+
+### Open issues from Session 13
+
+- **NSIS sidecar file lock — installer silently skips locked
+  files.** Discovered during the alpha.22 first-install testing:
+  when the user installed alpha.22 over alpha.21, the NSIS
+  installer updated `atem-ip-patchbay.exe` + static files but
+  did NOT replace `sidecar/atem-net-diag.exe` because the
+  alpha.21 net-diag was running at install time. Tauri's NSIS
+  installer doesn't kill running sidecar processes pre-install
+  and doesn't surface a "files skipped" warning. Workaround:
+  kill all `atem-net-diag.exe` and `atem-ip-patchbay.exe`
+  processes before running an installer. Long-term fix: either
+  add a Tauri pre-install hook that taskkill's the sidecar, OR
+  add an explicit "Quit and reinstall" prompt in the installer.
+
+- **No prebuilt Windows FFmpeg ships --enable-decklink.** Both
+  BtbN and gyan.dev dropped DeckLink support from their Windows
+  builds — the Blackmagic DeckLink SDK has redistribution terms
+  that prohibit shipping prebuilt FFmpeg binaries linked against
+  it. alpha.21 ships the DeckLink output UI but it can't
+  actually run on Windows without the operator installing their
+  own decklink-enabled FFmpeg and pointing `ATEM_PATCHBAY_FFMPEG`
+  at it. Chocolatey's `ffmpeg-full` package was also a dead-end —
+  it just bundles gyan.dev's full_build (no decklink).
+  **Proper fix is build-our-own FFmpeg with DeckLink SDK in CI**
+  (queued; needs MSYS2/MinGW cross-compile + SDK download + ~30-
+  60 min added CI time, possibly cached). Until then the
+  DeckLink-missing UI hint surfaces the ATEM_PATCHBAY_FFMPEG
+  override path.
+
+- **`include_str!` and CI cache.** dashboard.html embeds at
+  compile time via `include_str!`. Modern Rust (1.50+) tracks
+  these files via `cargo:rerun-if-changed` implicitly, so source
+  changes to dashboard.html DO trigger rebuilds. Verified in
+  alpha.22: after a manual reinstall on the test rig, the
+  installed binary's embedded HTML had the alpha.22 cfg-fix
+  (substring probe confirmed 5 `const cfg` not 6). The
+  apparent regression was just NSIS not replacing the locked
+  binary — see first item above.
+
+- **alpha.21-28 features not yet operator-verified end-to-end.**
+  Specifically: encoder picker actually routes to nvenc/qsv/amf
+  on Windows (need a multi-GPU machine for full coverage); audio
+  quality knobs produce expected bitrate at the destination;
+  raw-flags textarea passes through correctly; pre-show panel
+  shows expected checks against a real network; switches/ports
+  filter + pin survive page reloads; flap-window text format
+  reads right; Net Utility rename doesn't break any third-party
+  link / muscle memory.
+
+### Session 14 priorities (next pickup)
+
+Roughly in order of operator-impact value:
+
+1. **UDM API key form INSIDE the net-diag dashboard.** User has
+   been asking for this since alpha.22 testing — the alpha.22
+   dialog in main app was a misplacement; alpha.25 removed it.
+   Need the form in the net-utility's UDM panel. Implementation:
+   - Wrap UDM credentials in `Arc<Mutex<Option<UnifiCredentials>>>`
+     shared across the three polling threads (unifi clients, wan,
+     system). Threads check the mutex at the top of each tick;
+     rebuild their `UnifiClient` when credentials change.
+   - Polling threads ALWAYS spawn at startup (even when creds are
+     None — they idle in a sleep loop until creds are configured).
+     Currently the `if unifi_credentials.is_some()` gate at boot
+     prevents this; remove that gate.
+   - `/api/config` POST handler extended to accept
+     `unifi_api_key` field. Writes through the mutex. Never
+     logged. Never persisted (in-memory only; operator re-enters
+     on next launch — matches alpha.22's security model).
+   - Dashboard form in the UDM panel: visible when `state.state
+     == "not_configured"`. Password input + Save button. POSTs
+     to /api/config.
+   - ~250 LOC across `tools/atem-net-diag/src/{unifi.rs,
+     dashboard.rs, dashboard.html}`.
+
+2. **Auto-reconnect supervisor.** UI toggle is in place (alpha.25);
+   backend behavior is missing. Wrap `Streamer::start()` in a
+   supervisor loop that:
+   - Spawns FFmpeg + waits for child exit.
+   - Distinguishes "user clicked Stop" (do nothing) from
+     unexpected exit (non-zero status code OR runtime < 5s).
+   - On unexpected exit: schedule restart at exponential backoff
+     (1s, 2s, 4s, 8s, 16s, 32s, 60s cap).
+   - After `auto_reconnect_max_attempts` (default 12) consecutive
+     failures: give up and surface sticky error.
+   - Reset attempt counter after 60s of stable streaming.
+   - User-stop sets `cancel_supervisor` flag; supervisor checks
+     at every step including the backoff countdown.
+   - New StreamStats fields: `reconnect_attempt`,
+     `reconnect_next_secs`, `total_reconnects_this_session`.
+   - UI status pill becomes "Reconnecting in 4s · attempt 3/12"
+     during backoff (yellow, not red).
+   - ~250 LOC, mostly in streamer.rs. **Highest-risk piece** —
+     the existing start/stop/run_monitor lifecycle is delicate.
+     Plan agent (Session 13) explicitly recommended landing this
+     in its own commit after other work has CI-verified.
+
+3. **Audio level meters.** UI checkbox exists (alpha.25);
+   backend + canvas missing. Approach:
+   - Extend `build_audio_filter()` to append
+     `astats=metadata=1:reset=1:length=0.1,ametadata=mode=print:
+     file=pipe\\:2:key=lavfi.astats:direct=1` when `meters_enabled`
+     and destination_type != "decklink".
+   - Extend `run_monitor`'s stderr parser to recognize
+     `lavfi.astats.<n>.RMS_level=<f32>` and `lavfi.astats.<n>.
+     Peak_level=<f32>` lines.
+   - New StreamStats fields: `audio_db_l`, `audio_db_r`,
+     `audio_db_peak_l`, `audio_db_peak_r` (f32, dB).
+   - New `/api/audio-levels` endpoint at 4Hz polling (don't
+     bloat /api/state's 1Hz cycle with this).
+   - UI: pair of canvas-rendered VU meters above the audio
+     dropdown. Green / yellow / red zones (under -18 / -18 to -6
+     / -6 to 0). 1.5s peak-hold rendered client-side.
+   - Preview-path meters: for NDI sources, compute RMS in-process
+     in NdiCapture from existing audio samples (no FFmpeg
+     subprocess change needed). Other source types' preview is
+     JPEG-only today; meters skip them.
+   - ~400 LOC across streamer.rs / preview.rs / http.rs / UI.
+
+4. **Build FFmpeg + DeckLink in CI** (alpha.X). Until this lands,
+   alpha.21's DeckLink output direction is non-functional on
+   shipped installers. Approach:
+   - Download Blackmagic DeckLink SDK in CI (URL access requires
+     license-acceptance click-through historically; verify direct
+     URL availability or look for a CI-friendly mirror).
+   - Cross-compile FFmpeg from source on Windows runner via
+     MSYS2/MinGW with `--enable-decklink` + the existing flag
+     set (gpl, libsrt, libx264, libx265, nvenc, qsv via libvpl,
+     amf, etc.).
+   - Cache the build artifact aggressively — full FFmpeg compile
+     is 30-45 min from cold. Cache key based on FFmpeg version
+     pin + SDK version pin so the artifact only rebuilds when
+     either upgrades.
+   - Same for macOS (jellyfin-ffmpeg path replaced with
+     custom-built variant).
+   - Plan agent pass recommended before implementing — non-
+     trivial CI work, several dimensions of cost / time / cache
+     to balance.
+
+5. **Hardware accel for Windows decoding** (DeckLink-out path).
+   Once #4 lands and the DeckLink path is usable, plumb hardware
+   decoders for incoming network streams (cuvid / qsv / amf /
+   d3d11va). Same select_encoder pattern as the encode side.
+   ~150 LOC if the encoder side's pattern is reusable.
+
+6. **Quality presets ladder.** 5-preset segmented control:
+   Broadcast HQ (9 Mbps) / Streaming Standard (6) / Cellular
+   (3) / Bandwidth-Limited (1.5) / Lowest (0.8). Snap-on-pick
+   onto the underlying bitrate / GOP / B-frames / preset fields.
+   Coexists with XML-driven BMD-spec profiles (two parallel
+   lists). Default: Streaming Standard. ~250 LOC.
+
+7. **Carry-overs from Session 12:**
+   - OMT-out audio for non-raw sources (cross-platform pipe-FD
+     plumbing).
+   - Pipe / relay custom audio (Windows fix mirroring alpha.14's
+     NDI pattern, for each non-NDI source type).
+   - Real-Windows-hardware end-to-end test for alpha.15-28
+     features.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
@@ -2111,6 +2496,63 @@ Key implementation gotchas:
   {mode}" when DeckLink is active. Hardware accel
   deferred to alpha.22. CI green Mac + Windows first
   try.
+- `v0.2.0-alpha.22` (commit `7554570`): Windows FFmpeg
+  swap (BtbN → gyan.dev full_build) for richer HW-accel
+  set. Net Diag dashboard "stuck on loading" fix
+  (duplicate `const cfg`/`atemIp` SyntaxError live since
+  alpha.17). UDM API key dialog added to main app
+  topbar (reverted in alpha.25).
+- `v0.2.0-alpha.23` (commit `c3fa90c`): UI polish on
+  top of alpha.22. Hero gains a reverse-direction
+  tagline. Destination-type picker restyled as an
+  accent-tinted card with a "Where does this stream go?"
+  label + reframed buttons ("Remote (ATEM | Decoder)" /
+  "Local (DeckLink | SDI/HDMI)"). Default video_mode
+  flipped from 1080p30 to 1080p29.97.
+- `v0.2.0-alpha.24` (commit `fdbb0d4`): OMT
+  discoverability. Reverses alpha.13's "hide OMT when
+  empty" — the Video Source card always shows the OMT
+  section, with an empty-state placeholder when no
+  senders are discovered. New "scan OMT" link in card
+  title parallel to "scan NDI". ~70 LOC UI-only.
+- `v0.2.0-alpha.25` (commits `3d24ff5` + `8b5b5ed` +
+  `0f50f19`): production-quality starter pack.
+  Encoder picker dropdown (Auto + every encoder in the
+  bundled FFmpeg). Per-encoder flag tables for libx264,
+  libx265, videotoolbox, nvenc, qsv, amf. Auto-mode
+  resolution with platform priority + ATEM_DISABLE_VT
+  honored + fall-back to auto on user-picked-not-
+  available. Audio quality knobs (codec, bitrate,
+  sample rate, channels) with HE/HEv2 server-side block
+  on ATEM destinations. Power-user encoder-extra-flags
+  textarea with shell-style tokenizer. Advanced UI
+  disclosure inside destination card with auto-reconnect
+  toggle (UI present; supervisor lands in next alpha).
+  UDM API key dialog removed from main app per
+  operator feedback (relocates to net-diag in Session 14).
+  ~1100 LOC. CI green.
+- `v0.2.0-alpha.26` (commit `36ae95d`): rename "Net Diag"
+  to "Net Utility" in user-facing strings. Topbar button
+  + dashboard title + h1. Binary name / repo path /
+  API endpoints / Rust internals unchanged for URL +
+  build stability.
+- `v0.2.0-alpha.27` (commit `60b6212`): switches & ports
+  filter + pin in Net Utility dashboard. Text search
+  across switch/port/connected-device + chip group
+  (All / Active / Errors / ATEM / Pinned). Per-port pin
+  button (★) — pinned ports float to top of their
+  switch's port table with a dashed separator + accent
+  border. localStorage persistence for pins + filter
+  state. Flap counts now display the time period they
+  cover ("3 flaps in 8h 32m").
+- `v0.2.0-alpha.28` (commit `ac8d68d`): pre-show
+  readiness check panel in Net Utility. Seven checks
+  (WAN IP / WAN headroom / UDM polling / ATEM
+  reachable / capture visibility / active streams /
+  stream-key correlation) projected from existing state.
+  Pass/Warn/Fail/Skip status per check. Overall verdict
+  color-codes the collapsed-card summary. New types
+  PreShowCheck / PreShowVerdict on the wire.
 
 ### v0.2.0 UI / UX scope (queued)
 
