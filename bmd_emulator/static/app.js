@@ -163,6 +163,17 @@ const els = {
 
   // alpha.22's UDM config dialog elements removed in alpha.25 — UDM
   // is configured inside the net-diag dashboard now.
+
+  // alpha.25: Advanced encoding controls.
+  videoEncoder:       $('#video-encoder'),
+  videoEncoderHint:   $('#video-encoder-hint'),
+  autoReconnect:      $('#auto-reconnect'),
+  audioCodec:         $('#audio-codec'),
+  audioBitrateKbps:   $('#audio-bitrate-kbps'),
+  audioSampleRate:    $('#audio-sample-rate'),
+  audioChannelsSel:   $('#audio-channels'),
+  metersEnabled:      $('#meters-enabled'),
+  encoderExtraFlags:  $('#encoder-extra-flags'),
 };
 
 let knownDecklinkDevices = []; // populated by fetchDecklinkDevices()
@@ -406,6 +417,106 @@ function humanizeDecklinkMode(m) {
 // alpha.22's UDM config dialog functions removed in alpha.25 — UDM
 // is configured inside the net-diag dashboard now (see its UDM
 // panel form, POSTs to its own /api/config).
+
+// -----------------------------------------------------------------
+// alpha.25 — Advanced encoding controls (encoder picker + audio knobs)
+// -----------------------------------------------------------------
+
+/// Populate the Advanced disclosure pickers from the current snapshot
+/// + the available_encoders list. Called from the main render() path
+/// every poll tick. Idempotent — checks document.activeElement to
+/// avoid clobbering an input the operator is mid-typing.
+function renderEncodingAdvanced(snap) {
+  if (!els.videoEncoder) return;
+
+  // Encoder dropdown — always offer "auto" + whatever the bundled
+  // FFmpeg actually has. Filter against snap.available_encoders so
+  // we don't list nvenc on a build without it. Encoder names that
+  // start with h264_ / hevc_ are surfaced under H.264 / H.265 labels.
+  const avail = Array.isArray(snap.available_encoders) ? snap.available_encoders : [];
+  const wantedEncoders = [
+    'libx264', 'libx265',
+    'h264_videotoolbox', 'hevc_videotoolbox',
+    'h264_nvenc', 'hevc_nvenc',
+    'h264_qsv', 'hevc_qsv',
+    'h264_amf', 'hevc_amf',
+  ];
+  const present = wantedEncoders.filter((e) => avail.includes(e));
+  const options = [{ value: 'auto', label: 'Auto (best for platform)' }];
+  for (const enc of present) {
+    options.push({ value: enc, label: encoderLabel(enc) });
+  }
+  setOptions(els.videoEncoder, options, snap.video_encoder || 'auto');
+
+  // Hint below the encoder dropdown — describes what auto would
+  // pick on this platform / FFmpeg build.
+  if (els.videoEncoderHint) {
+    if ((snap.video_encoder || 'auto') === 'auto') {
+      const autoGuess = guessAutoEncoder(snap.video_codec || 'h265', avail);
+      els.videoEncoderHint.textContent = autoGuess
+        ? `Auto will pick ${encoderLabel(autoGuess)} for current codec/platform.`
+        : 'No matching encoder available in bundled FFmpeg.';
+    } else {
+      els.videoEncoderHint.textContent = 'Manual override — falls back to auto if not available.';
+    }
+  }
+
+  // Auto-reconnect toggle (state field exists; supervisor loop lands
+  // in alpha.26+, so this toggle currently round-trips the value
+  // without changing runtime behavior yet).
+  if (els.autoReconnect && document.activeElement !== els.autoReconnect) {
+    els.autoReconnect.value = snap.auto_reconnect === false ? 'false' : 'true';
+  }
+
+  // Audio knobs.
+  if (els.audioCodec && document.activeElement !== els.audioCodec) {
+    els.audioCodec.value = snap.audio_codec || 'aac';
+  }
+  if (els.audioBitrateKbps && document.activeElement !== els.audioBitrateKbps) {
+    els.audioBitrateKbps.value = snap.audio_bitrate_kbps || 0;
+  }
+  if (els.audioSampleRate && document.activeElement !== els.audioSampleRate) {
+    els.audioSampleRate.value = String(snap.audio_sample_rate || 48000);
+  }
+  if (els.audioChannelsSel && document.activeElement !== els.audioChannelsSel) {
+    els.audioChannelsSel.value = String(snap.audio_channels || 2);
+  }
+  if (els.metersEnabled && document.activeElement !== els.metersEnabled) {
+    els.metersEnabled.checked = snap.meters_enabled !== false;
+  }
+  if (els.encoderExtraFlags && document.activeElement !== els.encoderExtraFlags) {
+    els.encoderExtraFlags.value = snap.encoder_extra_flags || '';
+  }
+}
+
+/// Human-readable label for an encoder name. Keeps the dropdown
+/// concise but informative ("h264_nvenc" -> "H.264 / NVIDIA NVENC").
+function encoderLabel(name) {
+  const codec = name.startsWith('hevc_') || name === 'libx265' ? 'H.265' : 'H.264';
+  if (name === 'libx264' || name === 'libx265') return `${codec} / libx${codec === 'H.264' ? '264' : '265'} (software)`;
+  if (name.includes('videotoolbox')) return `${codec} / VideoToolbox (macOS hardware)`;
+  if (name.includes('nvenc')) return `${codec} / NVIDIA NVENC`;
+  if (name.includes('qsv')) return `${codec} / Intel QuickSync`;
+  if (name.includes('amf')) return `${codec} / AMD AMF`;
+  return name;
+}
+
+/// Mirror the Rust auto_select_encoder logic so the UI can hint at
+/// what auto-mode would pick. Doesn't have to be perfect — this is a
+/// preview, not the source of truth (server's select_encoder always
+/// makes the actual call at stream-start).
+function guessAutoEncoder(codec, available) {
+  const isMac = navigator.userAgent.includes('Mac');
+  const wantH265 = codec === 'h265';
+  const candidates = wantH265
+    ? (isMac
+        ? ['hevc_videotoolbox', 'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'libx265']
+        : ['hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'libx265'])
+    : (isMac
+        ? ['h264_videotoolbox', 'h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264']
+        : ['h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264']);
+  return candidates.find((c) => available.includes(c)) || null;
+}
 
 // -----------------------------------------------------------------
 // Browser-side device permission + enumeration
@@ -1242,6 +1353,9 @@ function render(snap) {
   // DeckLink body and lets the ATEM body keep its rendering above.
   renderDecklinkDestination(snap);
 
+  // alpha.25 — encoder picker + audio knobs + auto-reconnect toggle.
+  renderEncodingAdvanced(snap);
+
   // alpha.22's renderUdmConfigStatus removed in alpha.25 — UDM lives
   // inside the net-diag dashboard now.
 
@@ -1742,6 +1856,51 @@ function bind() {
 
   // alpha.22's UDM dialog wiring removed in alpha.25 — UDM moved into
   // the net-diag dashboard.
+
+  // alpha.25 — Advanced encoding control wiring.
+  if (els.videoEncoder) {
+    els.videoEncoder.addEventListener('change', () => {
+      applySettings({ video_encoder: els.videoEncoder.value });
+    });
+  }
+  if (els.autoReconnect) {
+    els.autoReconnect.addEventListener('change', () => {
+      applySettings({ auto_reconnect: els.autoReconnect.value === 'true' });
+    });
+  }
+  if (els.audioCodec) {
+    els.audioCodec.addEventListener('change', () => {
+      applySettings({ audio_codec: els.audioCodec.value });
+    });
+  }
+  if (els.audioBitrateKbps) {
+    els.audioBitrateKbps.addEventListener('change', () => {
+      const v = parseInt(els.audioBitrateKbps.value, 10);
+      applySettings({ audio_bitrate_kbps: isNaN(v) ? 0 : v });
+    });
+  }
+  if (els.audioSampleRate) {
+    els.audioSampleRate.addEventListener('change', () => {
+      applySettings({ audio_sample_rate: parseInt(els.audioSampleRate.value, 10) });
+    });
+  }
+  if (els.audioChannelsSel) {
+    els.audioChannelsSel.addEventListener('change', () => {
+      applySettings({ audio_channels: parseInt(els.audioChannelsSel.value, 10) });
+    });
+  }
+  if (els.metersEnabled) {
+    els.metersEnabled.addEventListener('change', () => {
+      applySettings({ meters_enabled: !!els.metersEnabled.checked });
+    });
+  }
+  if (els.encoderExtraFlags) {
+    // Save on blur (matches the SRT-mode / streamid-override fields'
+    // existing pattern). Avoids POSTing on every keystroke.
+    els.encoderExtraFlags.addEventListener('blur', () => {
+      applySettings({ encoder_extra_flags: els.encoderExtraFlags.value });
+    });
+  }
 
   // Segmented controls — Protocol + Codec
   els.protoSegs.forEach((r) => r.addEventListener('change', () => {

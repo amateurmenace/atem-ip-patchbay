@@ -198,6 +198,73 @@ body.is-streaming .title-block h1 {
    along with the UDM dialog itself. UDM config lives in atem-net-diag's
    own dashboard now. */
 
+/* alpha.25 — Advanced encoding section inside the destination card's
+   Advanced disclosure. Visually grouped so it reads as one coherent
+   "encoder + audio quality" block separate from the existing
+   streamid / label / SRT-mode controls below. */
+.encoder-section {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px 14px;
+  margin-bottom: 14px;
+  background: rgba(255,138,56,0.04);
+  border: 1px solid rgba(255,138,56,0.20);
+  border-radius: 8px;
+}
+.encoder-section .section-label {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.10em; text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+.encoder-section .row-2 {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+.encoder-section .row-3 {
+  display: grid; grid-template-columns: 1.2fr 0.9fr 0.9fr; gap: 10px;
+}
+@media (max-width: 720px) {
+  .encoder-section .row-2,
+  .encoder-section .row-3 {
+    grid-template-columns: 1fr;
+  }
+}
+.encoder-section label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted);
+}
+.encoder-section select,
+.encoder-section input[type="number"],
+.encoder-section input[type="text"],
+.encoder-section textarea {
+  font-family: inherit; font-size: 13px; font-weight: 400;
+  letter-spacing: normal; text-transform: none;
+  padding: 7px 10px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text);
+}
+.encoder-section select option {
+  /* Match alpha.18's Windows WebView2 contrast fix. */
+  background-color: #0e0f12; color: #e6e6ea;
+}
+.encoder-section textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical; min-height: 38px;
+}
+.encoder-section .field-help {
+  font-size: 11px; font-weight: 400;
+  letter-spacing: normal; text-transform: none;
+  color: var(--muted); line-height: 1.4;
+}
+.encoder-section .checkbox-row {
+  flex-direction: row; align-items: flex-start; gap: 8px;
+  text-transform: none; letter-spacing: normal; font-size: 12px;
+  color: var(--text);
+}
+.encoder-section .checkbox-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
 /* Monitor jump-button. Opens a small companion window per instance
    showing live preview + stats. Operator positions one of these per
    running stream on screen to compose a multiview-style layout.

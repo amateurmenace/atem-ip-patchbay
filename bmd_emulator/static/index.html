@@ -569,8 +569,76 @@
           </div>
 
           <details class="dest-advanced">
-            <summary>Advanced (mode, streamid, label, multi-service)</summary>
+            <summary>Advanced (encoder, audio quality, mode, streamid, label)</summary>
             <div class="advanced-body">
+              <!-- alpha.25: encoding controls. Encoder picker, audio
+                   quality knobs, auto-reconnect toggle, raw-flags
+                   textarea. UI populates encoder choices from
+                   /api/state's available_encoders so we only offer
+                   what the bundled FFmpeg actually has. -->
+              <div class="encoder-section">
+                <div class="section-label">Encoding</div>
+                <div class="row-2">
+                  <label>Video encoder
+                    <select id="video-encoder">
+                      <option value="auto">Auto (best for platform)</option>
+                    </select>
+                    <span class="field-help" id="video-encoder-hint">Auto picks
+                      hardware accel when available.</span>
+                  </label>
+                  <label>Auto-reconnect on disconnect
+                    <select id="auto-reconnect">
+                      <option value="true">On (recommended)</option>
+                      <option value="false">Off (fail-fast)</option>
+                    </select>
+                    <span class="field-help">Exponential backoff:
+                      1s, 2s, 4s, &hellip; up to 12 attempts.</span>
+                  </label>
+                </div>
+                <div class="row-3">
+                  <label>Audio codec
+                    <select id="audio-codec">
+                      <option value="aac">AAC-LC (default, ATEM-compatible)</option>
+                      <option value="aac_he">AAC-HE (low bitrate; not ATEM)</option>
+                      <option value="aac_he_v2">AAC-HEv2 (lowest; not ATEM)</option>
+                    </select>
+                  </label>
+                  <label>Audio bitrate (kbps)
+                    <input id="audio-bitrate-kbps" type="number" min="0" max="320"
+                           placeholder="0 = inherit from quality preset" />
+                    <span class="field-help">0 inherits the XML / quality preset.</span>
+                  </label>
+                  <label>Sample rate
+                    <select id="audio-sample-rate">
+                      <option value="48000">48000 Hz (broadcast)</option>
+                      <option value="44100">44100 Hz (legacy)</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="row-2">
+                  <label>Channels
+                    <select id="audio-channels">
+                      <option value="2">Stereo (default)</option>
+                      <option value="1">Mono</option>
+                    </select>
+                  </label>
+                  <label class="checkbox-row">
+                    <input id="meters-enabled" type="checkbox" checked />
+                    <span>Audio level meters
+                      <span class="field-help">Inject astats filter so
+                        the UI can show live VU meters. Disable if a
+                        pathological source breaks the parser.</span>
+                    </span>
+                  </label>
+                </div>
+                <label>Encoder extra flags (power user)
+                  <textarea id="encoder-extra-flags" rows="2"
+                            placeholder='e.g. -tune zerolatency -profile:v high'></textarea>
+                  <span class="field-help">Appended between encoder + muxer.
+                    Shell-tokenized; supports quotes + backslash escapes.
+                    Bad input surfaces as an FFmpeg startup error.</span>
+                </label>
+              </div>
               <div class="row-2 multi-service" id="multi-service-row" hidden>
                 <label>Service
                   <select id="service"></select>
