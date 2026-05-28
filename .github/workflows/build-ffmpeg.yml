@@ -448,6 +448,14 @@ jobs:
               { printf 'import "unknwn.idl";\nimport "wtypes.idl";\n'; cat "$idl"; } > "${idl}.patched"
               mv "${idl}.patched" "$idl"
             fi
+            # BMD's .idl files use lowercase `bool` in a couple of
+            # parameter declarations (e.g. DeckLinkAPI_v15_3_1.idl
+            # line ~189: `bool* supported`). MIDL accepts this
+            # leniently; widl rejects it because standard IDL uses
+            # uppercase `BOOL`. Search-and-replace to BOOL.
+            # \b word boundaries so we don't touch identifiers like
+            # `boolean_thing` (rare in IDL but worth being safe).
+            sed -i 's/\bbool\b/BOOL/g' "$idl"
           done
           for idl in *.idl; do
             echo "widl: $idl"
