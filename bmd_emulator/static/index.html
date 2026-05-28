@@ -80,6 +80,9 @@
       <strong>Blackmagic Streaming Decoders / Bridges</strong> over the single
       ethernet cable. Even route Dante audio onto a video source that maps
       directly to one of your switcher's SDI or HDMI inputs!
+      <span class="hero-headline-reverse">And do the reverse: convert
+        network sources to physical outputs using
+        <strong>DeckLink</strong>!</span>
     </div>
     <div class="hero-cols">
       <div class="hero-col">
@@ -332,10 +335,10 @@
              / hardware-switcher integration. JS toggles between the two
              body blocks below based on snap.destination_type. -->
         <div class="dest-type-row">
-          <span class="toggle-label">Destination type</span>
-          <div class="seg-control" role="radiogroup" aria-label="Destination type" id="dest-type-row">
-            <label class="seg"><input type="radio" name="dest-type" value="atem" checked /><span>ATEM (Network · SRT)</span></label>
-            <label class="seg"><input type="radio" name="dest-type" value="decklink" /><span>DeckLink (Local · SDI/HDMI)</span></label>
+          <span class="dest-type-label">Where does this stream go?</span>
+          <div class="seg-control dest-type-seg-control" role="radiogroup" aria-label="Destination type" id="dest-type-row">
+            <label class="seg"><input type="radio" name="dest-type" value="atem" checked /><span>Remote (ATEM | Decoder)</span></label>
+            <label class="seg"><input type="radio" name="dest-type" value="decklink" /><span>Local (DeckLink | SDI/HDMI)</span></label>
           </div>
         </div>
         <p class="dest-type-help" id="dest-decklink-unsupported" hidden>

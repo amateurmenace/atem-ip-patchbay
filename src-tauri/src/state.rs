@@ -252,7 +252,7 @@ impl EncoderState {
                 model: "Blackmagic Streaming Encoder HD".into(),
                 unique_id,
                 device_uuid,
-                video_mode: "1080p30".into(),
+                video_mode: "1080p29.97".into(),
                 quality_level: "Streaming High".into(),
                 source_id: "test_pattern".into(),
                 av_video_index: 0,

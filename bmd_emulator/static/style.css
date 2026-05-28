@@ -350,6 +350,19 @@ body.is-streaming .title-block h1 {
   max-width: 1080px; margin: 0 auto 18px; letter-spacing: -0.005em;
 }
 .hero-headline strong { color: var(--accent); font-weight: 700; letter-spacing: 0.01em; }
+/* alpha.23: reverse-direction tagline gets its own visual beat on a
+   new line so the bidirectional patchbay framing reads cleanly
+   without crowding the existing "network -> ATEM" pitch. */
+.hero-headline-reverse {
+  display: block;
+  margin-top: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0.002em;
+}
+.hero-headline-reverse strong {
+  color: var(--accent); font-weight: 700;
+}
 .hero-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; max-width: 1080px; margin: 0 auto; }
 .hero-col-title { font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 8px; }
 .hero-col p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
@@ -1338,18 +1351,36 @@ button.big { padding: 14px 18px; font-size: 14px; }
   padding: 10px 0;
 }
 
-/* Session 12 — destination-type segmented control. Lives above the
-   ATEM-wizard body so the operator picks where this source goes
-   before configuring the rest. Matches the .toggle-group pattern
-   used for protocol/codec/quality below the wizard. */
+/* Session 12 — destination-type segmented control. The picker that
+   drives the bidirectional patchbay (Remote ATEM/Decoder vs Local
+   DeckLink) — promoted with accent-tinted styling because it
+   reframes how the operator thinks about the whole pipeline.
+   Alpha.23 made this more prominent after operator feedback: the
+   original styling was too quiet, and the destination type is
+   actually a top-level mode decision, not a minor toggle. */
 .dest-type-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 4px 0 12px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 14px 16px;
+  margin: 4px 0 14px;
+  background: linear-gradient(180deg, rgba(255,138,56,0.10), rgba(255,138,56,0.04));
+  border: 1px solid rgba(255,138,56,0.35);
+  border-radius: 10px;
 }
-.dest-type-row .seg-control {
+.dest-type-label {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.10em; text-transform: uppercase;
+  color: var(--accent);
+}
+.dest-type-row .seg-control.dest-type-seg-control {
   flex: 0 0 auto;
+  padding: 3px;
+  background: var(--panel-2);
+  border-color: rgba(255,138,56,0.30);
+  font-size: 13px;
+}
+.dest-type-row .seg-control.dest-type-seg-control .seg span {
+  padding: 8px 14px;
+  font-weight: 500;
 }
 .dest-type-row .seg input:disabled + span {
   opacity: 0.4; cursor: not-allowed;
