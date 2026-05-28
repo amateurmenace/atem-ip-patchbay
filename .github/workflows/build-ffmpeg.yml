@@ -411,7 +411,10 @@ jobs:
           # them up unchanged.
           cd "${BMD_SDK_ROOT}/Win/include"
           which widl || { echo "::error::widl not found in MSYS2 install"; exit 1; }
-          widl --version | head -1
+          # widl doesn't support --version; -V is what it accepts.
+          # `|| true` because some MinGW builds don't even support
+          # -V and we don't want to bail on a missing version probe.
+          widl -V 2>&1 | head -1 || true
           echo "=== Compiling .idl files ==="
           for idl in *.idl; do
             echo "widl: $idl"
