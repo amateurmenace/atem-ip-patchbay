@@ -151,15 +151,24 @@ jobs:
           # Unpack — BMD ships a single zip; the layout is
           # "Blackmagic DeckLink SDK <ver>/Mac/include/*.h" etc.
           unzip -q /tmp/bmd-sdk/*.zip -d /tmp/bmd-sdk/extracted
-          SDK_ROOT=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "Blackmagic*SDK*" | head -1)
-          if [ -z "$SDK_ROOT" ]; then
-            SDK_ROOT=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "*DeckLink*SDK*" | head -1)
+          SDK_SRC=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "Blackmagic*SDK*" | head -1)
+          if [ -z "$SDK_SRC" ]; then
+            SDK_SRC=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "*DeckLink*SDK*" | head -1)
           fi
-          if [ -z "$SDK_ROOT" ]; then
+          if [ -z "$SDK_SRC" ]; then
             echo "::error::Could not locate SDK root inside zip"
             find /tmp/bmd-sdk/extracted -maxdepth 3 -type d
             exit 1
           fi
+          # Move to a no-spaces path. The original BMD ships the SDK
+          # at "Blackmagic DeckLink SDK X.Y/" — spaces break FFmpeg's
+          # configure script (the --extra-cflags arg gets word-split
+          # by the time it reaches the compiler-test invocation, so
+          # the compiler test gets garbage and fails with "gcc is
+          # unable to create an executable file" even though gcc is
+          # perfectly fine).
+          SDK_ROOT="/tmp/bmd-sdk/sdk-root"
+          mv "$SDK_SRC" "$SDK_ROOT"
           echo "BMD_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           ls -la "$SDK_ROOT/Mac/include/" | head -10
 
@@ -345,18 +354,24 @@ jobs:
             exit 1
           }
           Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
-          $sdkRoot = Get-ChildItem -Path $extract -Directory -Recurse -Depth 2 `
+          $sdkSrc = Get-ChildItem -Path $extract -Directory -Recurse -Depth 2 `
             | Where-Object { $_.Name -like 'Blackmagic*SDK*' -or $_.Name -like '*DeckLink*SDK*' } `
             | Select-Object -First 1 -ExpandProperty FullName
-          if (-not $sdkRoot) {
+          if (-not $sdkSrc) {
             Write-Host "::error::Could not locate SDK root inside zip"
             Get-ChildItem -Path $extract -Recurse -Depth 2 -Directory | Format-Table FullName
             exit 1
           }
-          # Convert to MSYS2-style forward-slash path so the configure
-          # step in MSYS2 can use it directly. cygpath would work too
-          # but isn't available outside MSYS2; PowerShell can do the
-          # same substitution.
+          # Rename to a no-spaces path. The original "Blackmagic
+          # DeckLink SDK X.Y/" name has spaces that break FFmpeg's
+          # configure script when passed via --extra-cflags (the
+          # arg gets word-split by the time it reaches the compiler
+          # test, so we see "gcc is unable to create an executable
+          # file" even though the toolchain is healthy).
+          $sdkRoot = "$env:RUNNER_TEMP\bmd-sdk\sdk-root"
+          Move-Item -Path $sdkSrc -Destination $sdkRoot -Force
+          # Convert to MSYS2-style forward-slash path so the
+          # configure step in MSYS2 can use it directly.
           $sdkRootMsys = $sdkRoot -replace '\\', '/' -replace '^C:', '/c' -replace '^D:', '/d'
           Write-Host "BMD_SDK_ROOT=$sdkRootMsys"
           "BMD_SDK_ROOT=$sdkRootMsys" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
