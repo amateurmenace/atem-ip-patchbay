@@ -1118,7 +1118,7 @@ fn compute_preshow(
             detail: "ATEM traffic observed".into(),
             hint: None,
         },
-        LanVisibility::PossiblyBlind => PreShowCheck {
+        LanVisibility::PossiblyBlind { .. } => PreShowCheck {
             id: "capture_visibility".into(),
             label: "Capture visibility".into(),
             status: PreShowStatus::Fail,
