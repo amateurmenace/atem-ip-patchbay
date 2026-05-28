@@ -121,14 +121,15 @@ jobs:
       - name: Install Homebrew build deps
         run: |
           # Match jellyfin-ffmpeg's feature set for the Mac sidecar:
-          # x264 + x265 (libx codecs), libsrt (transport for ATEM/SRT),
-          # nasm/yasm (assembler), pkg-config (configure helper).
+          # x264 + x265 (libx codecs), srt (transport for ATEM/SRT —
+          # Homebrew's package is `srt`, not `libsrt`), nasm/yasm
+          # (assembler), pkg-config (configure helper).
           # VideoToolbox is built-in to macOS frameworks — no brew dep
           # for that, just --enable-videotoolbox at configure time.
           brew update >/dev/null
-          brew install nasm yasm pkg-config x264 x265 libsrt
+          brew install nasm yasm pkg-config x264 x265 srt
           echo "brew versions:"
-          brew list --versions nasm yasm x264 x265 libsrt
+          brew list --versions nasm yasm x264 x265 srt
 
       - name: Download BMD DeckLink SDK from private mirror
         env:
@@ -313,35 +314,53 @@ jobs:
           make PREFIX=/mingw64 install
 
       - name: Download BMD DeckLink SDK from private mirror
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.BMD_SDK_PAT }}
         run: |
-          set -e
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "::error::BMD_SDK_PAT secret not configured — see docs/SETUP-FFMPEG-CI.md"
+          # Runs in pwsh (not MSYS2) because the runner's gh CLI lives
+          # in the PowerShell PATH, not inside MSYS2's environment.
+          # We download + extract here, then export the SDK path to
+          # GITHUB_ENV so the MSYS2-shelled configure step picks it up.
+          if (-not $env:GH_TOKEN) {
+            Write-Host "::error::BMD_SDK_PAT secret not configured — see docs/SETUP-FFMPEG-CI.md"
             exit 1
-          fi
-          mkdir -p /tmp/bmd-sdk
-          gh release download "v${BMD_SDK_VERSION}" \
-            --repo amateurmenace/bmd-decklink-sdk-mirror \
-            --pattern '*.zip' \
-            --dir /tmp/bmd-sdk
-          ls -lh /tmp/bmd-sdk/
-          unzip -q /tmp/bmd-sdk/*.zip -d /tmp/bmd-sdk/extracted
-          SDK_ROOT=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -iname "Blackmagic*SDK*" | head -1)
-          if [ -z "$SDK_ROOT" ]; then
-            SDK_ROOT=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -iname "*DeckLink*SDK*" | head -1)
-          fi
-          if [ -z "$SDK_ROOT" ]; then
-            echo "::error::Could not locate SDK root inside zip"
-            find /tmp/bmd-sdk/extracted -maxdepth 3 -type d
+          }
+          $sdkDir = "$env:RUNNER_TEMP\bmd-sdk"
+          New-Item -ItemType Directory -Force -Path $sdkDir | Out-Null
+          gh release download "v$env:BMD_SDK_VERSION" `
+            --repo amateurmenace/bmd-decklink-sdk-mirror `
+            --pattern '*.zip' `
+            --dir $sdkDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::gh release download failed (exit $LASTEXITCODE)"
             exit 1
-          fi
-          # MSYS2 paths use forward slashes; convert
-          # backslashes if present.
-          SDK_ROOT_MSYS=$(cygpath -u "$SDK_ROOT")
-          echo "BMD_SDK_ROOT=${SDK_ROOT_MSYS}" >> "$GITHUB_ENV"
-          ls -la "${SDK_ROOT_MSYS}/Win/include/" | head -10
+          }
+          Get-ChildItem $sdkDir | Format-Table Name, Length
+          $extract = "$sdkDir\extracted"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $zip = Get-ChildItem $sdkDir -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) {
+            Write-Host "::error::SDK zip not found in $sdkDir"
+            exit 1
+          }
+          Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
+          $sdkRoot = Get-ChildItem -Path $extract -Directory -Recurse -Depth 2 `
+            | Where-Object { $_.Name -like 'Blackmagic*SDK*' -or $_.Name -like '*DeckLink*SDK*' } `
+            | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkRoot) {
+            Write-Host "::error::Could not locate SDK root inside zip"
+            Get-ChildItem -Path $extract -Recurse -Depth 2 -Directory | Format-Table FullName
+            exit 1
+          }
+          # Convert to MSYS2-style forward-slash path so the configure
+          # step in MSYS2 can use it directly. cygpath would work too
+          # but isn't available outside MSYS2; PowerShell can do the
+          # same substitution.
+          $sdkRootMsys = $sdkRoot -replace '\\', '/' -replace '^C:', '/c' -replace '^D:', '/d'
+          Write-Host "BMD_SDK_ROOT=$sdkRootMsys"
+          "BMD_SDK_ROOT=$sdkRootMsys" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem -Path "$sdkRoot\Win\include" | Select-Object -First 10 | Format-Table Name, Length
 
       - name: Clone FFmpeg sources at ${{ env.FFMPEG_VERSION }}
         run: |
@@ -457,24 +476,42 @@ jobs:
           ls -lh /tmp/ffmpeg-${FFMPEG_VERSION}-windows-x64.zip*
 
       - name: Publish to private sidecar release
-        shell: msys2 {0}
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          # Same release as the Mac job uploads to; both are
-          # uploaded in parallel. `gh release create` is idempotent
-          # only via the conditional below — if the Mac job created
-          # it first, we skip; otherwise we create.
-          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release create "${RELEASE_TAG}" \
-              --title "FFmpeg+DeckLink sidecar — ${RELEASE_TAG}" \
-              --notes "Self-built FFmpeg ${FFMPEG_VERSION} linked against Blackmagic DeckLink SDK ${BMD_SDK_VERSION}. CI artifact for release.yml; not for end-user download. See ci/ffmpeg-pins.env." \
-              --prerelease \
-              --draft=false
-          fi
-          gh release upload "${RELEASE_TAG}" \
-            "/tmp/ffmpeg-${FFMPEG_VERSION}-windows-x64.zip" \
-            "/tmp/ffmpeg-${FFMPEG_VERSION}-windows-x64.zip.sha256" \
+          # pwsh (not MSYS2) because gh CLI is in the runner's
+          # PowerShell PATH. We need to translate the MSYS2 /tmp/...
+          # path back to a Windows path for gh release upload.
+          $msysTmp = "$env:RUNNER_TEMP\msys64\tmp"
+          # The zip + sha lived at /tmp inside MSYS2, which maps to
+          # the MSYS2 install dir's tmp. setup-msys2 documents this
+          # under RUNNER_TEMP\msys64\tmp.
+          $zipPath = "$msysTmp\ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip"
+          $shaPath = "$msysTmp\ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip.sha256"
+          if (-not (Test-Path $zipPath)) {
+            # Fallback: try the literal /tmp via cygpath -w
+            $zipPath = & cygpath -w "/tmp/ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip" 2>$null
+            $shaPath = & cygpath -w "/tmp/ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip.sha256" 2>$null
+          }
+          if (-not (Test-Path $zipPath)) {
+            Write-Host "::error::could not locate built FFmpeg zip"
+            Get-ChildItem $msysTmp -ErrorAction SilentlyContinue | Format-Table Name
+            exit 1
+          }
+          Write-Host "Uploading $zipPath"
+          # gh release create is idempotent via the view-first check;
+          # if the Mac job got there first we just upload to it.
+          gh release view "$env:RELEASE_TAG" --repo amateurmenace/atem-ip-patchbay > $null 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:RELEASE_TAG" `
+              --repo amateurmenace/atem-ip-patchbay `
+              --title "FFmpeg+DeckLink sidecar — $env:RELEASE_TAG" `
+              --notes "Self-built FFmpeg $env:FFMPEG_VERSION linked against Blackmagic DeckLink SDK $env:BMD_SDK_VERSION. CI artifact for release.yml; not for end-user download. See ci/ffmpeg-pins.env." `
+              --prerelease
+          }
+          gh release upload "$env:RELEASE_TAG" `
+            --repo amateurmenace/atem-ip-patchbay `
+            $zipPath $shaPath `
             --clobber
-          echo "Uploaded Windows x64 FFmpeg to release ${RELEASE_TAG}"
+          Write-Host "Uploaded Windows x64 FFmpeg to release $env:RELEASE_TAG"
