@@ -318,6 +318,7 @@ jobs:
             git
             make
             diffutils
+            zip
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-make
             mingw-w64-x86_64-nasm
@@ -327,7 +328,6 @@ jobs:
             mingw-w64-x86_64-srt
             mingw-w64-x86_64-x264
             mingw-w64-x86_64-x265
-            mingw-w64-x86_64-tools-git
 
       - name: Install nv-codec-headers (NVIDIA NVENC support)
         run: |
