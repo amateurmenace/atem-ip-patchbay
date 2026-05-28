@@ -436,6 +436,53 @@
     .preshow-banner.ok .preshow-label   { color: var(--good); }
     .preshow-banner.warn .preshow-label { color: var(--warn); }
     .preshow-banner.fail .preshow-label { color: var(--bad); }
+
+    /* alpha.28: detailed pre-show checks panel. One row per check
+       with status icon + label + detail + optional hint. Color of
+       the collapsed-card summary shifts with the worst check. */
+    #preshow-panel.overall-pass .card-summary { color: var(--good); }
+    #preshow-panel.overall-warn .card-summary { color: var(--warn); }
+    #preshow-panel.overall-fail .card-summary { color: var(--bad); }
+    .preshow-checks {
+      display: flex; flex-direction: column;
+      margin-top: 4px;
+    }
+    .preshow-check {
+      display: grid;
+      grid-template-columns: 22px 180px 1fr;
+      gap: 0 12px;
+      align-items: baseline;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 12px;
+    }
+    .preshow-check:last-child { border-bottom: none; }
+    .preshow-check .icon {
+      font-size: 14px; line-height: 1;
+      text-align: center;
+    }
+    .preshow-check.pass .icon  { color: var(--good); }
+    .preshow-check.warn .icon  { color: var(--warn); }
+    .preshow-check.fail .icon  { color: var(--bad);  }
+    .preshow-check.skip .icon  { color: var(--muted-2); }
+    .preshow-check .label {
+      color: var(--text); font-weight: 500;
+    }
+    .preshow-check.skip .label { color: var(--muted); }
+    .preshow-check .detail {
+      color: var(--muted); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .preshow-check.pass .detail { color: var(--muted); }
+    .preshow-check.warn .detail { color: var(--warn); }
+    .preshow-check.fail .detail { color: var(--bad);  }
+    .preshow-check .hint {
+      grid-column: 2 / -1;
+      color: var(--muted-2); font-size: 11px;
+      line-height: 1.45;
+      margin-top: 4px;
+      max-width: 720px;
+    }
     .preshow-pills { display: flex; gap: 8px; flex-wrap: wrap; }
     .preshow-pill {
       font-size: 11px; padding: 2px 8px; border-radius: 999px;
@@ -998,6 +1045,24 @@
     <span class="preshow-label" id="preshow-label">checking pre-show…</span>
     <span class="preshow-pills" id="preshow-pills"></span>
   </div>
+
+  <!-- alpha.28: pre-show readiness panel. Aggregates the existing
+       state signals (WAN IP, WAN headroom, UDM polling, ATEM
+       reachable, capture visibility, etc.) into a clickable
+       go/no-go check list. Collapsed by default; click the header
+       to expand. Color shifts with the worst-case status across
+       all checks so the collapsed-card chip already tells the
+       operator if anything needs attention. -->
+  <section class="card full collapsible" id="preshow-panel" data-collapse-key="preshow">
+    <h2>
+      Pre-show checks
+      <span class="card-summary" id="preshow-panel-summary">—</span>
+      <span class="chevron">▾</span>
+    </h2>
+    <div class="card-body">
+      <div class="preshow-checks" id="preshow-checks-list"></div>
+    </div>
+  </section>
 
   <!-- Active alarms — red banner, hidden when zero alarms. Polled
        from the UDM's /list/alarm endpoint every 5s. -->
@@ -1580,6 +1645,57 @@
       pillsEl.innerHTML = checks.map((c) => `<span class="preshow-pill ${c.s}">${c.t}</span>`).join('');
     }
 
+    // alpha.28: detailed pre-show checks panel. Reads the
+    // server-computed `state.pre_show` field (PreShowVerdict) and
+    // renders the per-check list. The compact banner above (built
+    // client-side by renderPreshow) stays as the at-a-glance signal;
+    // this panel surfaces the full check ladder with hints for
+    // remediation when something's failing.
+    function renderPreshowPanel(state) {
+      const panel = document.getElementById('preshow-panel');
+      const list = document.getElementById('preshow-checks-list');
+      const summaryEl = document.getElementById('preshow-panel-summary');
+      if (!panel || !list || !summaryEl) return;
+      const verdict = state.pre_show;
+      if (!verdict || !Array.isArray(verdict.checks)) {
+        list.innerHTML = '';
+        summaryEl.textContent = '—';
+        return;
+      }
+      // Overall status drives the color of the collapsed-card summary.
+      panel.classList.remove('overall-pass', 'overall-warn', 'overall-fail', 'overall-skip');
+      panel.classList.add(`overall-${verdict.overall || 'skip'}`);
+      summaryEl.textContent = verdict.summary || '—';
+      const icons = { pass: '✓', warn: '⚠', fail: '✗', skip: '·' };
+      list.innerHTML = verdict.checks.map((c) => {
+        const icon = icons[c.status] || '·';
+        const hint = c.hint
+          ? `<span class="hint">${escapeHtml(c.hint)}</span>`
+          : '';
+        return `
+          <div class="preshow-check ${c.status}" data-check-id="${escapeHtml(c.id || '')}">
+            <span class="icon" aria-hidden="true">${icon}</span>
+            <span class="label">${escapeHtml(c.label || '')}</span>
+            <span class="detail">${escapeHtml(c.detail || '')}</span>
+            ${hint}
+          </div>`;
+      }).join('');
+    }
+
+    // Tiny HTML escape so backend-provided strings (UDM error
+    // messages, IP addresses, etc.) can't inject markup. Pure
+    // defense in depth — net-diag is a same-machine localhost
+    // service, but the habit is cheap.
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // Collapse state for the small config cards. Persists in
     // localStorage so the operator's preference survives reloads.
     function initCollapsibles() {
@@ -2106,6 +2222,7 @@
 
       renderModeBanner(cfg.mode || 'live');
       renderPreshow(s);
+      renderPreshowPanel(s);
       renderAlarms(s);
       renderVisibility(s);
       renderWan(s);

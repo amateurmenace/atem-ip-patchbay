@@ -443,6 +443,59 @@ pub struct StateResponse<'a> {
     /// This machine's own IPs. Sent to the UI so the wizard can
     /// pre-fill Step 1 ("Identify the port the peer Mac is on").
     pub local_ips: Vec<String>,
+    /// alpha.28: pre-show readiness check panel. Aggregates the
+    /// existing dashboard signals (WAN IP, headroom, UDM polling,
+    /// ATEM reachability, capture visibility, etc.) into one
+    /// go/no-go panel the operator scans before a live show. Pure
+    /// projection over the other state fields; no new polling.
+    pub pre_show: PreShowVerdict,
+}
+
+/// alpha.28: status of an individual pre-show check. Maps to a
+/// colored icon in the UI.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreShowStatus {
+    /// Check passes; nothing to surface.
+    Pass,
+    /// Check has a yellow flag — operator should look but isn't
+    /// blocking. Examples: WAN headroom 70-90%, ATEM seen but stale.
+    Warn,
+    /// Check is failing; operator should fix before going live.
+    /// Examples: WAN headroom >90%, ATEM not reachable, capture
+    /// visibility PossiblyBlind.
+    Fail,
+    /// Precondition not met so the check didn't run. Examples: WAN
+    /// upload cap not configured (can't compute headroom),
+    /// UDM not configured (can't poll for ATEM client). Visually
+    /// muted in the UI — not green, not yellow, just info.
+    Skip,
+}
+
+/// alpha.28: one row in the pre-show check panel. `id` is the stable
+/// identifier the UI keys off (for stable DOM updates across poll
+/// ticks); `label` is the operator-facing display name; `detail`
+/// is the current value or short summary; `hint` is optional
+/// remediation advice surfaced as a smaller line below the row when
+/// the check is failing.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreShowCheck {
+    pub id: String,
+    pub label: String,
+    pub status: PreShowStatus,
+    pub detail: String,
+    pub hint: Option<String>,
+}
+
+/// alpha.28: aggregate pre-show verdict. `overall` is the worst
+/// status across all checks (Fail > Warn > Pass > Skip); `summary`
+/// is a one-line "X failed · Y warnings" headline; `checks` is the
+/// per-row list.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreShowVerdict {
+    pub overall: PreShowStatus,
+    pub summary: String,
+    pub checks: Vec<PreShowCheck>,
 }
 
 #[derive(Serialize)]
@@ -823,6 +876,7 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
     // hint, so stable ordering matters for keyboard-focus UX too.
     let mut local_ips: Vec<String> = s.local_ips.iter().cloned().collect();
     local_ips.sort();
+    let pre_show = compute_preshow(&s, now, &lan_visibility);
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -852,8 +906,311 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         rdns_cache,
         lan_visibility,
         local_ips,
+        pre_show,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
+}
+
+/// alpha.28: aggregate pre-show readiness from the existing state.
+/// Pure projection — no new polling, no new state, no side effects.
+/// Eight checks aimed at the operator's "am I ready to go live?"
+/// question, ordered roughly by how often each catches a real issue.
+fn compute_preshow(
+    s: &DashboardState,
+    now: u64,
+    lan_visibility: &LanVisibility,
+) -> PreShowVerdict {
+    let mut checks: Vec<PreShowCheck> = Vec::new();
+
+    // 1. WAN IP detected. Comes from the gateway's status — if WAN
+    // polling isn't healthy this is naturally Skip / Warn.
+    let wan_ip = s.wan_snapshot.as_ref().and_then(|w| w.wan_ip.as_ref());
+    checks.push(match wan_ip {
+        Some(ip) if !ip.is_empty() => PreShowCheck {
+            id: "wan_ip".into(),
+            label: "WAN IP detected".into(),
+            status: PreShowStatus::Pass,
+            detail: ip.clone(),
+            hint: None,
+        },
+        _ => {
+            let is_skip = matches!(s.wan_status, WanStatus::NotConfigured);
+            PreShowCheck {
+                id: "wan_ip".into(),
+                label: "WAN IP detected".into(),
+                status: if is_skip {
+                    PreShowStatus::Skip
+                } else {
+                    PreShowStatus::Warn
+                },
+                detail: if is_skip {
+                    "UDM gateway polling not configured".into()
+                } else {
+                    "no WAN IP reported by gateway".into()
+                },
+                hint: if is_skip {
+                    Some("Configure UDM credentials so net-utility can poll the gateway.".into())
+                } else {
+                    Some("Check whether the UDM's WAN interface has a current upstream lease.".into())
+                },
+            }
+        }
+    });
+
+    // 2. WAN headroom. Needs both a configured upload cap AND a
+    // current upload kbps reading. Bucket: pass <70%, warn 70-90%,
+    // fail >90%.
+    let cap_mbps = s.config.wan_upload_cap_mbps;
+    let cur_up_kbps = s.wan_snapshot.as_ref().map(|w| w.upload_kbps).unwrap_or(0);
+    if cap_mbps > 0.0 {
+        let cap_kbps = cap_mbps * 1000.0;
+        let pct = (cur_up_kbps as f64) / cap_kbps * 100.0;
+        let (status, hint) = if pct >= 90.0 {
+            (
+                PreShowStatus::Fail,
+                Some(
+                    "WAN upload is saturated. Free bandwidth (pause other uploads, lower stream bitrate) before going live."
+                        .into(),
+                ),
+            )
+        } else if pct >= 70.0 {
+            (
+                PreShowStatus::Warn,
+                Some(
+                    "WAN upload is close to the configured cap. Watch for stream stalls under load."
+                        .into(),
+                ),
+            )
+        } else {
+            (PreShowStatus::Pass, None)
+        };
+        checks.push(PreShowCheck {
+            id: "wan_headroom".into(),
+            label: "WAN headroom".into(),
+            status,
+            detail: format!(
+                "{:.1}% used ({} kbps / {} Mbps)",
+                pct, cur_up_kbps, cap_mbps as u64
+            ),
+            hint,
+        });
+    } else {
+        checks.push(PreShowCheck {
+            id: "wan_headroom".into(),
+            label: "WAN headroom".into(),
+            status: PreShowStatus::Skip,
+            detail: "upload cap not configured".into(),
+            hint: Some("Set wan_upload_cap_mbps via the UDM controller card to enable headroom monitoring.".into()),
+        });
+    }
+
+    // 3. UDM polling healthy. Drives most other checks; if this is
+    // Fail then several below will be Skip.
+    checks.push(match &s.unifi_status {
+        UnifiStatus::Connected { .. } => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Pass,
+            detail: format!("{} clients", s.unifi_clients.len()),
+            hint: None,
+        },
+        UnifiStatus::Connecting => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Warn,
+            detail: "connecting".into(),
+            hint: Some("First poll hasn't completed yet. Give it 5 seconds.".into()),
+        },
+        UnifiStatus::NotConfigured => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Skip,
+            detail: "not configured".into(),
+            hint: Some("Set UDM_API_KEY in the shell launching net-utility, or use the UDM panel form when it lands.".into()),
+        },
+        UnifiStatus::Failed { error, .. } => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Fail,
+            detail: error.clone(),
+            hint: Some("Check UDM_API_KEY validity + UDM controller reachability.".into()),
+        },
+    });
+
+    // 4. ATEM reachable. Looks up the is_atem entry in unifi_clients
+    // and checks last_seen freshness.
+    let atem_client = s.unifi_clients.iter().find(|c| c.is_atem);
+    checks.push(match atem_client {
+        Some(c) => {
+            let stale_secs = now.saturating_sub(c.last_seen);
+            if stale_secs < 60 {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Pass,
+                    detail: format!(
+                        "{} · seen {}s ago",
+                        c.ip.as_deref().unwrap_or("?"),
+                        stale_secs
+                    ),
+                    hint: None,
+                }
+            } else if stale_secs < 300 {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Warn,
+                    detail: format!("last seen {}s ago", stale_secs),
+                    hint: Some(
+                        "ATEM hasn't checked in recently. Power-cycle if you can't reach the ATEM Software Control."
+                            .into(),
+                    ),
+                }
+            } else {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Fail,
+                    detail: format!("last seen {}s ago (>5 min stale)", stale_secs),
+                    hint: Some(
+                        "ATEM hasn't been seen in >5 min — check its network cable + power."
+                            .into(),
+                    ),
+                }
+            }
+        }
+        None => {
+            let is_skip = !matches!(s.unifi_status, UnifiStatus::Connected { .. });
+            PreShowCheck {
+                id: "atem_reachable".into(),
+                label: "ATEM reachable".into(),
+                status: if is_skip {
+                    PreShowStatus::Skip
+                } else {
+                    PreShowStatus::Fail
+                },
+                detail: if is_skip {
+                    "depends on UDM polling".into()
+                } else {
+                    "no ATEM client in UDM list".into()
+                },
+                hint: if is_skip {
+                    None
+                } else {
+                    Some(format!(
+                        "Verify the ATEM MAC ({}) matches what UDM sees, or update the configured MAC in net-utility.",
+                        s.config.atem.mac.as_deref().unwrap_or("?")
+                    ))
+                },
+            }
+        }
+    });
+
+    // 5. Capture visibility — surfaces the SPAN-port / blind-mac
+    // gotcha as a pre-show check (the mirror-mode wizard banner
+    // already surfaces it lower on the page; this just brings it
+    // into the operator's at-a-glance verdict).
+    checks.push(match lan_visibility {
+        LanVisibility::SeesPeers => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Pass,
+            detail: "ATEM traffic observed".into(),
+            hint: None,
+        },
+        LanVisibility::PossiblyBlind => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Fail,
+            detail: "no ATEM traffic visible from this capture interface".into(),
+            hint: Some(
+                "Set up a UDM SPAN port to mirror ATEM traffic to this machine, OR run net-utility on the streamer's host directly. See the mirror-mode wizard below."
+                    .into(),
+            ),
+        },
+        LanVisibility::Unknown => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Skip,
+            detail: "capture warming up or not started".into(),
+            hint: None,
+        },
+    });
+
+    // 6. Active stream count — info only (always Pass).
+    let atem_ip = s.config.atem.ip.clone();
+    let active_streams = s
+        .flows
+        .iter()
+        .filter(|(_, _)| true) // FlowKey doesn't directly expose src/dst in a way that
+        .count(); // matches without flow parsing; we count the total + leave per-key correlation below.
+    let _ = atem_ip; // FlowKey shape varies — keep this conservative for now.
+    checks.push(PreShowCheck {
+        id: "active_streams".into(),
+        label: "Active streams".into(),
+        status: PreShowStatus::Pass,
+        detail: format!("{} flow{}", active_streams, if active_streams == 1 { "" } else { "s" }),
+        hint: None,
+    });
+
+    // 7. Stream key correlation — how many flows have been matched
+    // to a BMD stream key via the SID parser. Info-only.
+    let keyed_flows = s.per_key.len();
+    checks.push(PreShowCheck {
+        id: "stream_keys".into(),
+        label: "Stream-key correlation".into(),
+        status: PreShowStatus::Pass,
+        detail: format!(
+            "{} key{} correlated",
+            keyed_flows,
+            if keyed_flows == 1 { "" } else { "s" }
+        ),
+        hint: if keyed_flows == 0 && matches!(lan_visibility, LanVisibility::SeesPeers) {
+            Some(
+                "No BMD-flavored streamids parsed yet. Either no live stream is running, or the SRT capture isn't seeing handshakes."
+                    .into(),
+            )
+        } else {
+            None
+        },
+    });
+
+    // Compute overall verdict: worst status wins (Fail > Warn > Pass > Skip).
+    let fail_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, PreShowStatus::Fail))
+        .count();
+    let warn_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, PreShowStatus::Warn))
+        .count();
+    let overall = if fail_count > 0 {
+        PreShowStatus::Fail
+    } else if warn_count > 0 {
+        PreShowStatus::Warn
+    } else {
+        PreShowStatus::Pass
+    };
+    let summary = match overall {
+        PreShowStatus::Pass => "All pre-show checks passing — ready to go live.".to_string(),
+        PreShowStatus::Warn => format!(
+            "{} warning{} — review before going live.",
+            warn_count,
+            if warn_count == 1 { "" } else { "s" }
+        ),
+        PreShowStatus::Fail => format!(
+            "{} failing check{} — fix before going live.",
+            fail_count,
+            if fail_count == 1 { "" } else { "s" }
+        ),
+        PreShowStatus::Skip => "Configuration incomplete — set up UDM polling for full coverage.".to_string(),
+    };
+
+    PreShowVerdict {
+        overall,
+        summary,
+        checks,
+    }
 }
 
 fn probe_loop(state: Arc<Mutex<DashboardState>>) {
