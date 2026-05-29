@@ -524,6 +524,88 @@ impl Streamer {
             }
         }
 
+        // Windows equivalent of the unix watchdog above. Spawns a tiny
+        // PowerShell that polls both PIDs every second and force-kills
+        // FFmpeg if the parent disappears first. Critical because the
+        // multiview rework (alpha.39+) bumps EncoderFleet::TILE_COUNT
+        // from 1 to 8 — at 1 channel a parent crash leaks 1 orphan
+        // FFmpeg, but at 8 channels it'd leak 8, each holding a
+        // DeckLink output the driver won't release until taskkill or
+        // device replug. Without this, Windows multiview multiplies
+        // the Windows-only orphan-FFmpeg footgun by 8 right when the
+        // operator's recovery path gets noisier (8x stale outputs to
+        // identify and kill).
+        //
+        // Why PowerShell instead of cmd.exe taskkill polling: PowerShell
+        // has Get-Process with structured -ErrorAction SilentlyContinue
+        // suppression. taskkill's equivalent would be parsing the exit
+        // code of `tasklist /FI "PID eq N"` which is brittle against
+        // localization. PowerShell ships on every supported Windows.
+        //
+        // Why DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP:
+        //   - DETACHED_PROCESS: the watchdog gets no console, doesn't
+        //     show up next to the Tauri window. Implies CREATE_NO_WINDOW
+        //     semantics for console processes (per MSDN, CREATE_NO_WINDOW
+        //     is ignored when DETACHED_PROCESS is set).
+        //   - CREATE_NEW_PROCESS_GROUP: a Ctrl+C / Ctrl+Break sent to
+        //     the parent's console group doesn't propagate to the
+        //     watchdog. Without this, the watchdog dies before it can
+        //     do its job in the most-likely "user-closes-console"
+        //     scenario.
+        //
+        // Why force-kill (no soft-SIGTERM equivalent): Windows console
+        // processes don't process WM_CLOSE in any useful way; FFmpeg's
+        // graceful-shutdown trigger is `q` on stdin, which the
+        // watchdog can't reach. Force-kill is the only reliable option
+        // and matches the parent-crashed semantics (graceful shutdown
+        // already happened or never will).
+        #[cfg(windows)]
+        if let Some(ff_pid) = child.id() {
+            let parent_pid = std::process::id();
+            // PowerShell -Command takes the script as one argument. Curly
+            // braces inside format! must be doubled. The script:
+            //   1. Spin while BOTH processes are alive.
+            //   2. If the parent's gone, force-stop the ffmpeg PID.
+            //      (If ffmpeg died first, parent is still alive, so the
+            //       second `if` is false and we exit 0.)
+            let ps_script = format!(
+                "while ((Get-Process -Id {parent_pid} -EA SilentlyContinue) -and \
+                       (Get-Process -Id {ff_pid} -EA SilentlyContinue)) {{ \
+                    Start-Sleep -Seconds 1 \
+                }}; \
+                if (-not (Get-Process -Id {parent_pid} -EA SilentlyContinue)) {{ \
+                    Stop-Process -Id {ff_pid} -Force -EA SilentlyContinue \
+                }}"
+            );
+            let mut watchdog = std::process::Command::new("powershell");
+            watchdog
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    &ps_script,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            watchdog.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+
+            match watchdog.spawn() {
+                Ok(_) => log::info!(
+                    "FFmpeg watchdog armed (windows): parent={parent_pid} -> ffmpeg pid={ff_pid}"
+                ),
+                Err(e) => log::warn!(
+                    "FFmpeg watchdog spawn failed (parent crash will leave orphans): {e}"
+                ),
+            }
+        }
+
         // Wire NDI/OMT -> FFmpeg stdin via a small drainer task. The
         // task body just consumes Vec<u8>s from the channel and
         // writes them to stdin — same shape regardless of which SDK
