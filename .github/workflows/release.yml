@@ -1,0 +1,1063 @@
+# v0.2.0 release pipeline — Tauri (Rust + JS UI).
+# Triggered by pushing a tag matching v* from tauri-rewrite (or any
+# branch with this workflow file). Builds signed Mac arm64 .dmg and
+# Windows x64 NSIS installer + portable .exe via cargo-tauri, then
+# attaches everything to a GitHub Release.
+#
+# Mac code-signing is opt-in via repository secrets (same pattern as
+# v0.1.0):
+#   MACOS_SIGN_IDENTITY      — full identity name
+#                              ("Developer ID Application: NAME (TEAMID)")
+#   MACOS_CERTIFICATE_P12    — base64-encoded .p12 export of the cert
+#   MACOS_CERTIFICATE_PWD    — password set when exporting the .p12
+#   MACOS_KEYCHAIN_PWD       — fresh password for the throwaway runner keychain
+# When those aren't set, the .dmg ships unsigned and end users get
+# Gatekeeper "unidentified developer" on first launch (recoverable
+# via right-click → Open). Windows always ships unsigned for now (no
+# EV cert).
+#
+# Notarization secrets (also opt-in; only run when ALL three are set
+# AND signing succeeds):
+#   APPLE_ID                 — Apple ID email associated with the cert
+#   APPLE_PASSWORD           — app-specific password from appleid.apple.com
+#                              (Sign-In & Security → App-Specific Passwords)
+#   APPLE_TEAM_ID            — Team ID (e.g. 6M536MV7GT, last paren of the
+#                              signing identity)
+# When set, the .dmg gets submitted to Apple's notary service and
+# stapled before upload. End users on macOS 10.15+ launch with no
+# Gatekeeper prompt at all.
+#
+# NDI runtime dependency: libndi.dylib is now bundled into
+# Contents/Frameworks/ via tauri.conf.json's bundle.macOS.frameworks
+# config. End users no longer need NDI Tools installed for direct
+# NDI ingest. The build still pulls the SDK headers from NewTek's
+# Apple installer because grafton-ndi's build.rs uses bindgen.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed by gh release create
+
+jobs:
+
+  # ---------------------------------------------------------------
+  # macOS arm64 — produces "ATEM IP Patchbay_<version>_aarch64.dmg"
+  # ---------------------------------------------------------------
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-macos-arm64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install NDI SDK (Apple)
+        run: |
+          # The grafton-ndi crate's build.rs needs the NDI SDK headers
+          # at /Library/NDI SDK for Apple/include. NewTek's macOS .pkg
+          # installs them there. Network blip falls through to error
+          # so the failure mode is loud (vs the ci.yml soft-skip).
+          curl -fSL -o /tmp/ndi-sdk.pkg \
+            "https://downloads.ndi.tv/SDK/NDI_SDK_Mac/Install_NDI_SDK_v6_Apple.pkg"
+          sudo installer -pkg /tmp/ndi-sdk.pkg -target /
+          ls -la "/Library/NDI SDK for Apple/include" | head -3
+
+      - name: Stage libndi.dylib at /usr/local/lib for bundle.macOS.frameworks
+        run: |
+          # bundle.macOS.frameworks in tauri.conf.json points at
+          # /usr/local/lib/libndi.dylib (the standard NDI Tools install
+          # location end users have). CI runners don't have NDI Tools
+          # installed — we install the SDK above which puts the dylib
+          # under /Library/NDI SDK for Apple/lib/macOS/. Copy it to
+          # /usr/local/lib/ so the bundler's framework-copy step can
+          # find it. Whichever filename the SDK ships (libndi.dylib,
+          # libndi_for_macOS.dylib, etc.) gets normalized to libndi.dylib
+          # at /usr/local/lib/.
+          SDK_LIB="/Library/NDI SDK for Apple/lib/macOS"
+          echo "SDK lib directory contents:"
+          ls -la "$SDK_LIB/" || true
+          DYLIB=$(ls "$SDK_LIB/"libndi*.dylib 2>/dev/null | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: no libndi*.dylib found in $SDK_LIB/" >&2
+            exit 1
+          fi
+          sudo mkdir -p /usr/local/lib
+          sudo cp -v "$DYLIB" /usr/local/lib/libndi.dylib
+          # Pin install_name so binaries linking against this dylib
+          # get @rpath/libndi.dylib in their load commands — matches
+          # the NDI Tools shipped install_name and what the bundled
+          # .app expects via its LC_RPATH (added in build.rs).
+          sudo install_name_tool -id "@rpath/libndi.dylib" /usr/local/lib/libndi.dylib
+          ls -lh /usr/local/lib/libndi*
+          otool -D /usr/local/lib/libndi.dylib
+
+      - name: Download FFmpeg+DeckLink sidecar (our build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # alpha.34: switched from jellyfin-ffmpeg to our own
+          # FFmpeg+DeckLink build (see ci/ffmpeg-pins.env +
+          # .github/workflows/build-ffmpeg.yml). Both shipped with
+          # --enable-decklink so alpha.21's DeckLink output direction
+          # actually works on end-user installs without operators
+          # having to point ATEM_PATCHBAY_FFMPEG at a custom build.
+          #
+          # Same flag set as jellyfin's Mac build otherwise: libsrt,
+          # libx264, libx265, videotoolbox. Pinned via ci/ffmpeg-
+          # pins.env so the CI cache + downstream version expectations
+          # stay deterministic.
+          set -a
+          source ci/ffmpeg-pins.env
+          set +a
+          FFMPEG_VERSION_TRIM="${FFMPEG_VERSION#n}"
+          RELEASE_TAG="ffmpeg-decklink-${FFMPEG_VERSION_TRIM}-bmd${BMD_SDK_VERSION}-rev${BUILD_REVISION}"
+          ARTIFACT="ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz"
+          echo "Downloading $ARTIFACT from sidecar release $RELEASE_TAG"
+          gh release download "$RELEASE_TAG" --pattern "$ARTIFACT" --dir /tmp
+          mkdir -p src-tauri/sidecar
+          # alpha.35: tarball is now flat (ffmpeg + bundled
+          # /opt/homebrew dylibs at the root, no top-level dir).
+          # Extract directly into src-tauri/sidecar/ so the dylibs
+          # land alongside ffmpeg where its embedded @executable_path
+          # load commands expect them. Pre-alpha.35 the tarball
+          # contained only ffmpeg and `cp /tmp/ffmpeg sidecar/`
+          # worked, but the released binary then failed at dyld load
+          # on any machine without Homebrew's libsrt etc. installed.
+          tar -xzf "/tmp/$ARTIFACT" -C src-tauri/sidecar
+          chmod +x src-tauri/sidecar/ffmpeg
+          ls -lh src-tauri/sidecar/
+          # Quick audit — fails the build loud if /opt/homebrew refs
+          # somehow survived the build-ffmpeg.yml bundle pass (e.g.
+          # if a sidecar tarball from before alpha.35 got pulled).
+          if otool -L src-tauri/sidecar/ffmpeg 2>/dev/null | grep -qE '^\s+/(opt/homebrew|usr/local)/'; then
+            echo "::error::sidecar/ffmpeg still references non-system dylibs — did the sidecar build skip the bundling step?"
+            otool -L src-tauri/sidecar/ffmpeg | grep -E '^\s+/(opt/homebrew|usr/local)/'
+            exit 1
+          fi
+          src-tauri/sidecar/ffmpeg -version | head -3
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
+          MUXERS=$(src-tauri/sidecar/ffmpeg -hide_banner -muxers 2>/dev/null)
+          ENCODERS=$(src-tauri/sidecar/ffmpeg -hide_banner -encoders 2>/dev/null)
+          PROTOCOLS=$(src-tauri/sidecar/ffmpeg -hide_banner -protocols 2>/dev/null)
+          for need in decklink mpegts flv; do
+            echo "$MUXERS" | grep -qE "\\s${need}\\s" || { echo "::error::muxer '${need}' missing"; exit 1; }
+          done
+          for need in libx264 h264_videotoolbox; do
+            echo "$ENCODERS" | grep -qE "${need}" || { echo "::error::encoder '${need}' missing"; exit 1; }
+          done
+          echo "$PROTOCOLS" | grep -qE '^\s*srt\s*$' || { echo "::error::protocol 'srt' missing"; exit 1; }
+          echo "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
+
+      - name: Download + stage libomt for OMT support (Mac arm64)
+        run: |
+          # alpha.18: OMT (Open Media Transport) — needed so OMT
+          # sources actually appear in the discovery dropdown. The
+          # libomt crate is feature-gated behind `omt`; enabling it
+          # requires libomt.dylib + libvmx.dylib at link time AND at
+          # runtime. Download URL matches the libomt-rs crate's
+          # mise.toml `native:download` task — official OMT 1.0.0.14
+          # binaries from openmediatransport/libomtnet GitHub
+          # releases.
+          OMT_VERSION="v1.0.0.14"
+          URL="https://github.com/openmediatransport/libomtnet/releases/download/${OMT_VERSION}/OpenMediaTransport.Binaries.Release.${OMT_VERSION}.zip"
+          curl -fSL -o /tmp/omt.zip "$URL"
+          mkdir -p /tmp/omt-extract
+          unzip -jo /tmp/omt.zip "Libraries/MacOS/libomt.dylib" "Libraries/MacOS/libvmx.dylib" -d /tmp/omt-extract
+          # Install at /usr/local/lib/ alongside libndi.dylib so
+          # tauri.conf.json's bundle.macOS.frameworks (absolute
+          # paths) can find them at bundle time. install_name_tool
+          # rewrites the LC_ID_DYLIB to @rpath/<name> so binaries
+          # link against the rpath-relative location the .app's
+          # build.rs sets via -Wl,-rpath,@executable_path/../Frameworks.
+          sudo mkdir -p /usr/local/lib
+          sudo cp -v /tmp/omt-extract/libomt.dylib /usr/local/lib/libomt.dylib
+          sudo cp -v /tmp/omt-extract/libvmx.dylib /usr/local/lib/libvmx.dylib
+          sudo install_name_tool -id "@rpath/libomt.dylib" /usr/local/lib/libomt.dylib
+          sudo install_name_tool -id "@rpath/libvmx.dylib" /usr/local/lib/libvmx.dylib
+          ls -lh /usr/local/lib/libomt* /usr/local/lib/libvmx*
+          # Export LIBOMT_PATH so the libomt-rs build.rs links
+          # against /usr/local/lib instead of its vendored stub
+          # location. Persists across subsequent CI steps.
+          echo "LIBOMT_PATH=/usr/local/lib" >> $GITHUB_ENV
+
+      - name: Import signing identity (if secrets are set)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KC_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "MACOS_CERTIFICATE_P12 not set — building unsigned. Users will see Gatekeeper on first launch."
+            exit 0
+          fi
+          # Decode the base64 cert into a temp file.
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          # Throwaway keychain — never touches the runner's default.
+          security create-keychain -p "$KC_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PWD" build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" build.keychain
+          # Make our keychain the default + first in the search list so
+          # `security find-identity` and tauri-cli pick up the cert.
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm /tmp/cert.p12
+
+      - name: Disable signing in tauri.conf.json (no cert configured)
+        if: ${{ env.HAS_CERT != 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+        run: |
+          # When no cert is in the runner's keychain, tauri-cli's
+          # codesign call against the hardcoded "Developer ID
+          # Application: Stephen Walter (6M536MV7GT)" identity fails
+          # with "specified item could not be found in the keychain".
+          # Strip the signingIdentity field so the build produces an
+          # unsigned .app — Gatekeeper warns on first launch
+          # (recoverable via right-click -> Open), same as v0.1.0
+          # without a configured cert.
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('src-tauri/tauri.conf.json')
+          d = json.loads(p.read_text())
+          mac = d.get('bundle', {}).get('macOS', {})
+          mac.pop('signingIdentity', None)
+          p.write_text(json.dumps(d, indent=2) + '\n')
+          print('removed signingIdentity from tauri.conf.json')
+          "
+
+      - name: Build .app + .dmg
+        env:
+          # When the cert IS configured, APPLE_SIGNING_IDENTITY (and
+          # bundle.macOS.signingIdentity in tauri.conf.json) drive the
+          # signing. The env var lets Phase 9's MACOS_SIGN_IDENTITY
+          # secret override the hardcoded identity in the conf.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        working-directory: src-tauri
+        run: cargo tauri build --features omt
+
+      - name: Copy libomt + libvmx into the .app's Contents/Frameworks
+        run: |
+          # alpha.18: libomt + libvmx need to ride along inside the .app
+          # for OMT to work at runtime. We don't put them in tauri.conf
+          # bundle.macOS.frameworks (that requires the dylibs at config-
+          # load time, which would break local cargo check for anyone
+          # who hasn't run `mise run native:download`) — copy them in
+          # post-build instead, after `cargo tauri build` has produced
+          # the .app and before the deep-codesign step picks them up.
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          FW="$APP/Contents/Frameworks"
+          mkdir -p "$FW"
+          cp -v /usr/local/lib/libomt.dylib "$FW/libomt.dylib"
+          cp -v /usr/local/lib/libvmx.dylib "$FW/libvmx.dylib"
+          ls -lh "$FW/"
+          # install_name on each dylib should already be @rpath/... from
+          # the earlier staging step; verify so a misconfig fails loud
+          # rather than producing a non-loadable binary.
+          otool -D "$FW/libomt.dylib"
+          otool -D "$FW/libvmx.dylib"
+
+      - name: Deep codesign every Mach-O in the .app (hardened runtime)
+        # Tauri 2's bundler signs the main binary in Contents/MacOS/
+        # and the dylibs in Contents/Frameworks/ but does NOT touch
+        # arbitrary files placed via bundle.resources. Our FFmpeg
+        # sidecar lands at Contents/Resources/sidecar/ffmpeg
+        # un-signed (Jellyfin's GPL build is signed by Jellyfin, but
+        # by the time the bundler copies it the original signature
+        # may also be missing depending on the tarball + Apple's
+        # notary REQUIRES every Mach-O in the bundle to be signed
+        # by us with hardened runtime).
+        #
+        # alpha.6 came back from Apple's notary with status: Invalid
+        # for exactly this reason. Re-sign every Mach-O in the .app
+        # explicitly with --options runtime + our identity + a
+        # timestamp before submitting. Sign inside-out so the outer
+        # .app's signature reflects the final inner state.
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+
+          echo "===== Pre-sign state of embedded Mach-O binaries ====="
+          while IFS= read -r f; do
+            if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
+              line=$(codesign -dvv "$f" 2>&1 | grep -E "TeamIdentifier=|flags=|Identifier=" | tr '\n' ' ' || true)
+              printf '  %s: %s\n' "${f#$APP/}" "$line"
+            fi
+          done < <(find "$APP" -type f)
+
+          # SIGN INSIDE-OUT: leaves first (Frameworks/* + Resources/*
+          # subcomponents that the main binary embeds-and-seals),
+          # then the main binary in MacOS/, then the outer bundle.
+          # Without this order, codesign refuses to sign the main
+          # binary with "code object is not signed at all" because
+          # one of its embedded subcomponents (e.g. libomt /
+          # libvmx that we just dropped into Frameworks/ post-build)
+          # is still ad-hoc / linker-signed. alpha.18 hit this when
+          # we added libomt + libvmx but didn't enforce signing order.
+          sign_one() {
+            local f="$1"
+            if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
+              echo "  signing ${f#$APP/}"
+              codesign --force --options runtime --timestamp \
+                --sign "$SIGN_IDENTITY" "$f"
+            fi
+          }
+
+          echo "===== Phase 1: re-sign Frameworks/* (leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Frameworks" -type f 2>/dev/null)
+
+          echo "===== Phase 2: re-sign Resources/* (sidecar leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Resources" -type f 2>/dev/null)
+
+          echo "===== Phase 3: re-sign main binary in MacOS/ ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/MacOS" -type f 2>/dev/null)
+
+          echo "===== Phase 4: re-sign the outer .app bundle ====="
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+
+          echo "===== Final verification (must exit 0) ====="
+          codesign --verify --strict --deep --verbose=4 "$APP" 2>&1 | tail -20
+          codesign -dvvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime"
+
+      - name: Rebuild .dmg from re-signed .app
+        # The .dmg Tauri produced is a snapshot of the .app from
+        # BEFORE our deep codesign pass — so it still contains the
+        # old (notary-rejecting) signatures. Discard it and build a
+        # fresh .dmg from the now-properly-signed .app on disk.
+        # hdiutil + UDZO matches Tauri's .dmg format; the difference
+        # vs Tauri's bundle_dmg.sh is we lose the styled background +
+        # custom layout, but for an alpha that's an acceptable trade.
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          if [ -z "$DMG" ]; then
+            echo "ERROR: no .dmg from cargo tauri build to replace" >&2
+            exit 1
+          fi
+          echo "Replacing $DMG with a fresh build from the re-signed .app"
+
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+
+          rm -f "$DMG"
+          hdiutil create \
+            -volname "ATEM IP Patchbay" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "$DMG"
+          rm -rf "$STAGE"
+
+          codesign --force --sign "$SIGN_IDENTITY" "$DMG"
+          ls -lh "$DMG"
+
+      - name: Sanity-check the bundle
+        run: |
+          ls -lh "src-tauri/target/release/bundle/dmg/"
+          ls -lh "src-tauri/target/release/bundle/macos/"
+          echo "===== .app codesign ====="
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          echo "===== libndi.dylib ====="
+          ls -lh "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/" 2>&1 || true
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Frameworks/libndi.dylib" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          echo "===== sidecar/ffmpeg ====="
+          codesign -dvvv "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Resources/sidecar/ffmpeg" 2>&1 | grep -E "Identifier|Authority|TeamId|Runtime" || true
+          echo "===== Resources/static/ (UI bundle check) ====="
+          ls -lh "src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app/Contents/Resources/static/" 2>&1 | head -10 || true
+
+      - name: Notarize + staple .dmg
+        # NO continue-on-error: if Apple rejects or stapling fails we
+        # want the workflow to fail loudly rather than upload an
+        # un-notarized .dmg masquerading as a notarized release. That
+        # was the alpha.6 bug — notarytool returned status: Invalid,
+        # the staple step couldn't fetch a non-existent ticket, and
+        # `continue-on-error: true` allowed the unstapled .dmg to ship
+        # to end users who then saw Gatekeeper warnings.
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_NOTARY" != "true" ]; then
+            echo "Notarization secrets not set — skipping. End users will see Gatekeeper on first launch."
+            exit 0
+          fi
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          if [ -z "$DMG" ]; then
+            echo "No .dmg found to notarize — bailing." >&2
+            exit 1
+          fi
+
+          echo "Submitting $DMG to Apple's notary service..."
+          # --wait blocks until the notary returns a verdict. We
+          # capture the JSON output to parse status + submission id
+          # — notarytool returns 0 even on Invalid status, so we MUST
+          # read the response body to know if it actually passed.
+          SUBMIT_OUT=$(mktemp)
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" \
+            --wait \
+            --output-format json | tee "$SUBMIT_OUT"
+
+          SUBMIT_ID=$(jq -r '.id // empty' "$SUBMIT_OUT" || echo "")
+          SUBMIT_STATUS=$(jq -r '.status // empty' "$SUBMIT_OUT" || echo "")
+
+          echo "Notary submission id: $SUBMIT_ID"
+          echo "Notary verdict: $SUBMIT_STATUS"
+
+          if [ "$SUBMIT_STATUS" != "Accepted" ]; then
+            echo "::error::Notarization rejected (status=$SUBMIT_STATUS, id=$SUBMIT_ID)"
+            if [ -n "$SUBMIT_ID" ]; then
+              echo "===== Detailed log from Apple's notary service ====="
+              # `notarytool log` returns the full per-file rejection
+              # JSON. Most useful field: .issues[] which lists each
+              # binary that failed and why ("not signed with hardened
+              # runtime", "missing entitlement", etc.).
+              xcrun notarytool log "$SUBMIT_ID" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_PASSWORD" \
+                /dev/stdout || true
+              echo "===== End of notary log ====="
+            fi
+            exit 1
+          fi
+
+          # Staple BOTH the .app and the .dmg. The .dmg's staple
+          # covers the first-launch-from-mounted-volume path; the
+          # .app's staple is what protects users who drag the .app
+          # to /Applications and then go offline before first launch.
+          # Apple's CloudKit ticket lookup keys on the codesign hash,
+          # so stapling the on-disk .app — which has the same
+          # codesign hash as the copy inside the .dmg — gets a valid
+          # ticket attached.
+          echo "Stapling $APP..."
+          xcrun stapler staple "$APP"
+          echo "Stapling $DMG..."
+          xcrun stapler staple "$DMG"
+
+          echo "Verifying staples..."
+          xcrun stapler validate "$APP"
+          xcrun stapler validate "$DMG"
+          spctl --assess --verbose=4 --type install "$DMG"
+          spctl --assess --verbose=4 --type exec "$APP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Windows x64 — produces "ATEM IP Patchbay_<version>_x64-setup.exe"
+  # via the NSIS bundle target. Unsigned for now.
+  # ---------------------------------------------------------------
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-windows-x64-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install NDI SDK (Windows)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          # NewTek's NDI 6 SDK Windows installer hangs in CI no matter
+          # what silent flag we pass — /S (NSIS), /SILENT, /VERYSILENT
+          # (Inno Setup), /s /v"/qn" (InstallShield wrapper around MSI),
+          # /quiet — all timeout. There's a EULA-acceptance dialog or
+          # UAC elevation prompt that no flag bypasses on a non-
+          # interactive runner. Both alpha.6 and alpha.7 burned the
+          # full 5-min step timeout here.
+          #
+          # Skip the installer entirely. The wrapper EXE is **Inno
+          # Setup 6.1.0 unicode** (confirmed by `innoextract --test`
+          # locally — section names .itext / .didata are the giveaway,
+          # plus innoextract reads it cleanly). 7-Zip alone can't
+          # extract Inno Setup payloads — it sees the wrapper's PE
+          # sections plus an unnamed `[0]` blob (the compressed Inno
+          # data) that it rejects as "not an archive."
+          #
+          # alpha.6-7-8: PowerShell parser bug (`$extract:` not
+          #              `${extract}:`) — never reached extraction.
+          # alpha.9    : parser fixed, but only handled inner *.msi
+          #              (NDI 5 era). NDI 6's [0] payload not handled.
+          # alpha.10   : recursive 7-Zip extraction tried [0] but
+              #              7-Zip rejected the Inno Setup format.
+          # alpha.11   : switch to innoextract (this commit). Direct
+          #              extract of the Inno Setup data; SDK files
+          #              land at app/Include/, app/Lib/x64/, app/Bin/x64/.
+          $url = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20SDK.exe"
+          $out = "$env:RUNNER_TEMP\ndi-sdk.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Write-Host "Downloaded $([math]::Round((Get-Item $out).Length / 1MB, 1)) MB installer to $out"
+
+          # Install innoextract via Chocolatey (preinstalled on
+          # windows-latest runners). ~10 seconds. We pin to a known
+          # version once we confirm CI behavior; for now, latest is
+          # fine since innoextract is a stable, mature tool.
+          Write-Host "Installing innoextract..."
+          choco install innoextract -y --no-progress 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: choco install innoextract failed"
+            exit 1
+          }
+          # Locate innoextract binary — chocolatey shims it into
+          # C:\ProgramData\chocolatey\bin\, which is on PATH for
+          # subsequent steps but may not be on the current process's
+          # PATH yet. Fall back to direct lookup.
+          $innoExe = "innoextract"
+          if (-not (Get-Command $innoExe -ErrorAction SilentlyContinue)) {
+            $innoExe = "C:\ProgramData\chocolatey\bin\innoextract.exe"
+            if (-not (Test-Path $innoExe)) {
+              Write-Host "ERROR: innoextract not found after install"
+              exit 1
+            }
+          }
+          & $innoExe --version 2>&1 | Select-Object -First 1 | Write-Host
+
+          $extract = "$env:RUNNER_TEMP\ndi-sdk-extracted"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Write-Host "Extracting NDI SDK with innoextract..."
+          & $innoExe -d $extract -e --silent $out
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: innoextract failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+
+          # innoextract drops the SDK at $extract\app\... — Include/,
+          # Lib/x64/, Bin/x64/ are siblings. Find the canonical
+          # marker (Processing.NDI.Lib.h) to anchor the SDK root.
+          $header = Get-ChildItem -Path $extract -Filter "Processing.NDI.Lib.h" -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
+          if ($null -eq $header) {
+            Write-Host "ERROR: Processing.NDI.Lib.h not found in innoextract output"
+            Write-Host "Top-level contents of ${extract}:"
+            Get-ChildItem -Path $extract -Recurse -Depth 2 -ErrorAction SilentlyContinue `
+              | Format-Table FullName, Length -AutoSize
+            exit 1
+          }
+          $sdkRoot = $header.Directory.Parent.FullName
+          Write-Host "Found SDK root at: $sdkRoot"
+          Get-ChildItem $sdkRoot | Format-Table
+
+          # Verify the .lib import library is present (grafton-ndi's
+          # build.rs links against this). Bail loudly if missing.
+          $libPath = Join-Path $sdkRoot "Lib\x64\Processing.NDI.Lib.x64.lib"
+          if (-not (Test-Path $libPath)) {
+            Write-Host "ERROR: $libPath not present — grafton-ndi link will fail"
+            Write-Host "Lib tree:"
+            if (Test-Path "$sdkRoot\Lib") {
+              Get-ChildItem "$sdkRoot\Lib" -Recurse | Format-Table
+            }
+            exit 1
+          }
+          Write-Host "Verified .lib at $libPath"
+
+          # Stage the .dll alongside ffmpeg.exe in the bundle's
+          # sidecar/ dir so end users don't need NDI Tools installed
+          # separately. tauri-bundler's resources glob picks it up
+          # via "sidecar/*" in tauri.conf.json. The grafton-ndi-
+          # produced .exe imports Processing.NDI.Lib.x64.dll at
+          # runtime; bundling it next to ffmpeg.exe means ffmpeg_path
+          # / NDI runtime resolution finds it via the same Resources/
+          # path lookup.
+          $dllPath = Join-Path $sdkRoot "Bin\x64\Processing.NDI.Lib.x64.dll"
+          if (Test-Path $dllPath) {
+            New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+            Copy-Item $dllPath -Destination "src-tauri\sidecar\Processing.NDI.Lib.x64.dll" -Force
+            Write-Host "Staged Processing.NDI.Lib.x64.dll into src-tauri\sidecar\ for bundling"
+          } else {
+            Write-Host "WARNING: $dllPath not present — end users will need NDI Tools at runtime"
+          }
+
+          # Export NDI_SDK_DIR so grafton-ndi's build.rs picks it up
+          # at link time. Build.rs honors this env var explicitly.
+          "NDI_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Exported NDI_SDK_DIR=$sdkRoot"
+
+      - name: Download FFmpeg+DeckLink sidecar (our build)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # alpha.34: switched from gyan.dev to our own FFmpeg+
+          # DeckLink build. See ci/ffmpeg-pins.env + .github/
+          # workflows/build-ffmpeg.yml for the pipeline. The
+          # bundled FFmpeg now ships --enable-decklink so alpha.21's
+          # DeckLink output direction works out of the box on end-
+          # user Windows installs — no more ATEM_PATCHBAY_FFMPEG
+          # workaround.
+          #
+          # Same feature set as gyan.dev's full_build otherwise:
+          # libsrt, libx264, libx265, NVENC (NVIDIA hardware
+          # encode), d3d11va/dxva2/mediafoundation decoders.
+
+          # Read pins.
+          $pins = @{}
+          Get-Content ci/ffmpeg-pins.env | Where-Object { $_ -match '^\s*[A-Z_]+=' } | ForEach-Object {
+            $parts = $_ -split '=', 2
+            $pins[$parts[0].Trim()] = $parts[1].Trim()
+          }
+          $version = $pins['FFMPEG_VERSION']
+          $versionTrim = $version -replace '^n', ''
+          $sdkVer = $pins['BMD_SDK_VERSION']
+          $rev = $pins['BUILD_REVISION']
+          $releaseTag = "ffmpeg-decklink-$versionTrim-bmd$sdkVer-rev$rev"
+          $artifact = "ffmpeg-$version-windows-x64.zip"
+          Write-Host "Downloading $artifact from sidecar release $releaseTag"
+          gh release download $releaseTag --pattern $artifact --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Failed to download FFmpeg sidecar artifact"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+          Expand-Archive -Path "$env:RUNNER_TEMP\$artifact" -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract" -Force
+          # The sidecar zip contains ffmpeg.exe + MinGW runtime
+          # DLLs (libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-
+          # 1.dll). All need to land next to ffmpeg.exe so the
+          # Windows loader finds them at process startup.
+          Copy-Item "$env:RUNNER_TEMP\ffmpeg-extract\*" -Destination "src-tauri\sidecar\" -Force
+          Get-ChildItem src-tauri\sidecar
+          & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
+
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
+          $muxers = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -muxers
+          $encoders = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -encoders
+          $protocols = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -protocols
+          foreach ($need in @('decklink', 'mpegts', 'flv')) {
+            if (-not ($muxers | Select-String -Pattern "\s$need\s" -Quiet)) {
+              Write-Host "::error::muxer '$need' missing"
+              exit 1
+            }
+          }
+          foreach ($need in @('libx264', 'h264_nvenc')) {
+            if (-not ($encoders | Select-String -Pattern $need -Quiet)) {
+              Write-Host "::error::encoder '$need' missing"
+              exit 1
+            }
+          }
+          if (-not ($protocols | Select-String -Pattern '^\s*srt\s*$' -Quiet)) {
+            Write-Host "::error::protocol 'srt' missing"
+            exit 1
+          }
+          Write-Host "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
+
+      - name: Download + stage libomt for OMT support (Windows x64)
+        shell: pwsh
+        run: |
+          # alpha.18: OMT (Open Media Transport) bundling for Windows.
+          # libomt.dll + libvmx.dll go into sidecar/ next to ffmpeg.exe
+          # and Processing.NDI.Lib.x64.dll; libomt.lib (the import
+          # library) goes into a separate vendor dir that LIBOMT_PATH
+          # points at for build-time linking.
+          $OMT_VERSION = "v1.0.0.14"
+          $url = "https://github.com/openmediatransport/libomtnet/releases/download/$OMT_VERSION/OpenMediaTransport.Binaries.Release.$OMT_VERSION.zip"
+          $out = "$env:RUNNER_TEMP\omt.zip"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Write-Host "Downloaded OMT binaries: $([math]::Round((Get-Item $out).Length / 1MB, 1)) MB"
+          $extract = "$env:RUNNER_TEMP\omt-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Expand-Archive -Path $out -DestinationPath $extract -Force
+          # Pin to Libraries\Winx64\ explicitly — the OMT zip also
+          # contains WinArm64 builds, and a -Recurse -Filter "*.dll"
+          # picks up the FIRST match in filesystem walk order which
+          # may be the ARM64 one. alpha.18 hit this: the resulting
+          # x64 cargo build emitted "library machine type 'ARM64'
+          # conflicts with target machine type 'x64'" with 30 LNK2019
+          # unresolved-external errors.
+          $omtRoot = Join-Path $extract "Libraries\Winx64"
+          if (-not (Test-Path $omtRoot)) {
+            # Some zip arrangements use Libraries/Winx64 with forward
+            # slashes — find it case- and slash-insensitively.
+            $omtRoot = Get-ChildItem -Path $extract -Directory -Recurse `
+              | Where-Object { $_.Name -ieq "Winx64" } `
+              | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $omtRoot -or -not (Test-Path $omtRoot)) {
+            Write-Host "ERROR: Winx64 directory not found in OMT zip"
+            Get-ChildItem -Path $extract -Recurse -Depth 3 | Format-Table FullName, Length -AutoSize
+            exit 1
+          }
+          Write-Host "Using OMT root: $omtRoot"
+          $omtDll = Get-Item (Join-Path $omtRoot "libomt.dll") -ErrorAction SilentlyContinue
+          $vmxDll = Get-Item (Join-Path $omtRoot "libvmx.dll") -ErrorAction SilentlyContinue
+          $omtLib = Get-Item (Join-Path $omtRoot "libomt.lib") -ErrorAction SilentlyContinue
+          if (-not $omtDll -or -not $vmxDll -or -not $omtLib) {
+            Write-Host "ERROR: missing one of libomt.dll/libvmx.dll/libomt.lib in $omtRoot"
+            Get-ChildItem -Path $omtRoot | Format-Table Name, Length -AutoSize
+            exit 1
+          }
+          # Stage DLLs into sidecar/ so they ship in the NSIS installer
+          # AND get picked up by SetDllDirectoryW at runtime (the same
+          # mechanism that finds Processing.NDI.Lib.x64.dll).
+          New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+          Copy-Item $omtDll.FullName -Destination "src-tauri\sidecar\libomt.dll" -Force
+          Copy-Item $vmxDll.FullName -Destination "src-tauri\sidecar\libvmx.dll" -Force
+          # Stage .lib for build-time linking. Cargo's build.rs reads
+          # LIBOMT_PATH to locate the import library.
+          $libomtVendor = "$env:RUNNER_TEMP\libomt-vendor"
+          New-Item -ItemType Directory -Force -Path $libomtVendor | Out-Null
+          Copy-Item $omtDll.FullName -Destination "$libomtVendor\libomt.dll" -Force
+          Copy-Item $omtLib.FullName -Destination "$libomtVendor\libomt.lib" -Force
+          # Persist LIBOMT_PATH for subsequent steps. The libomt-rs
+          # build.rs joins it with `libomt.dll` to test for presence
+          # then links against libomt.lib from the same directory.
+          "LIBOMT_PATH=$libomtVendor" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Staged OMT binaries:"
+          Get-ChildItem src-tauri\sidecar | Where-Object { $_.Name -like "libomt*" -or $_.Name -like "libvmx*" } | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,2)}}
+
+      - name: Build atem-net-diag.exe + stage into sidecar
+        shell: pwsh
+        run: |
+          # alpha.17: bundle the net-diag CLI into the Windows installer
+          # so the Net Diag topbar button actually works on Windows.
+          # Builds the same companion tool that's been Mac-arm64-only
+          # since alpha.4 and stages it next to ffmpeg.exe so the main
+          # app's runtime path resolver can find it.
+          #
+          # tshark is NOT bundled — the capture (--monitor) feature
+          # needs Wireshark installed separately on Windows. UDM
+          # polling + active probe + dashboard UI work without it,
+          # which is most of net-diag's value for the operator.
+          Write-Host "Building atem-net-diag.exe..."
+          Push-Location tools\atem-net-diag
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: atem-net-diag build failed"
+            exit 1
+          }
+          Pop-Location
+
+          $netdiag = "tools\atem-net-diag\target\release\atem-net-diag.exe"
+          if (-not (Test-Path $netdiag)) {
+            Write-Host "ERROR: atem-net-diag.exe not found at $netdiag"
+            exit 1
+          }
+          Copy-Item $netdiag -Destination "src-tauri\sidecar\atem-net-diag.exe"
+          $sizeMB = [math]::Round((Get-Item "src-tauri\sidecar\atem-net-diag.exe").Length / 1MB, 1)
+          Write-Host "Staged atem-net-diag.exe ($sizeMB MB) into src-tauri\sidecar\"
+
+      - name: Build .exe + NSIS installer
+        working-directory: src-tauri
+        run: cargo tauri build --features omt
+
+      - name: Sanity-check the artifacts
+        shell: pwsh
+        run: |
+          # NSIS installer present + sized
+          Get-ChildItem src-tauri\target\release\bundle\nsis | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+
+          # Verify the staged sidecar contents — these are what get
+          # bundled into the NSIS installer's resources\sidecar\ subdir
+          # and what SetDllDirectoryW points at runtime in lib.rs.
+          # Without these the .exe launches but NDI features silently
+          # fail with "module not found" at first NDI use.
+          $sidecar = "src-tauri\sidecar"
+          $required = @(
+            "Processing.NDI.Lib.x64.dll",
+            "ffmpeg.exe",
+            "atem-net-diag.exe",
+            "libomt.dll",
+            "libvmx.dll"
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            $path = Join-Path $sidecar $f
+            if (Test-Path $path) {
+              $sizeMB = [math]::Round((Get-Item $path).Length / 1MB, 1)
+              Write-Host "  [OK] sidecar\$f ($sizeMB MB)"
+            } else {
+              Write-Host "  [MISSING] sidecar\$f"
+              $missing += $f
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "ERROR: required sidecar files missing — Windows .exe will not work end-to-end"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      # alpha.38: Session 16 Phase A diagnostic. Spawns N concurrent
+      # decklink_enc FFmpeg children against the operator's real rig
+      # to verify whether the multiview rework can use a single Tauri
+      # process (Option A — EncoderFleet TILE_COUNT=8) or needs to
+      # spread across N processes (Option B). One-off diagnostic, not
+      # bundled into the NSIS installer — separate .exe so operators
+      # can run it standalone without disturbing their app install.
+      - name: Build decklink-spike.exe
+        shell: pwsh
+        run: |
+          Write-Host "Building decklink-spike.exe (Session 16 Phase A)..."
+          Push-Location tools\decklink-spike
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: decklink-spike build failed"
+            exit 1
+          }
+          Pop-Location
+          $spike = "tools\decklink-spike\target\release\decklink-spike.exe"
+          if (-not (Test-Path $spike)) {
+            Write-Host "ERROR: decklink-spike.exe not found at $spike"
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $spike).Length / 1MB, 2)
+          Write-Host "Built decklink-spike.exe ($sizeMB MB)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-decklink-spike
+          path: tools/decklink-spike/target/release/decklink-spike.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # atem-net-diag companion tool — Mac arm64 tarball + .app.zip,
+  # signed with the same Developer ID + hardened runtime as the
+  # main app. Until alpha.9 this binary was distributed via iCloud
+  # Drive only; landing it as a release asset gives users on
+  # Ubiquiti networks a one-click download path for the operator
+  # dashboard. Windows / Linux builds intentionally deferred —
+  # tshark path discovery + signing differ enough on each platform
+  # to warrant their own pass.
+  # ---------------------------------------------------------------
+  build-atem-net-diag:
+    name: Build atem-net-diag (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/atem-net-diag/target
+          key: cargo-net-diag-macos-arm64-${{ hashFiles('tools/atem-net-diag/Cargo.lock') }}
+
+      - name: Import signing identity (if secrets are set)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KC_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+        run: |
+          # Same throwaway-keychain pattern as build-macos. When
+          # secrets aren't set, build-package.sh falls through to
+          # ad-hoc signing (still loadable on the user's own Mac
+          # but Gatekeeper challenges on download from elsewhere).
+          if [ -z "$CERT_P12" ]; then
+            echo "MACOS_CERTIFICATE_P12 not set — atem-net-diag will be ad-hoc signed."
+            exit 0
+          fi
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p "$KC_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KC_PWD" build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KC_PWD" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm /tmp/cert.p12
+
+      - name: Build + sign + tarball + .app.zip
+        working-directory: tools/atem-net-diag
+        run: |
+          # build-package.sh produces three artifacts under dist/:
+          #   1. atem-net-diag-<version>-macos-arm64.tar.gz  (CLI users)
+          #   2. atem-net-diag.app/                          (raw bundle)
+          #   3. atem-net-diag-<version>-macos-arm64.app.zip (AirDrop)
+          # We upload (1) and (3); (2) is just an intermediate.
+          chmod +x build-package.sh
+          ./build-package.sh
+          ls -lh dist/
+
+      - name: Notarize + staple (if all Apple secrets are set)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Notarization is opt-in. With all three secrets set,
+          # submit the tarball + .app.zip to Apple's notary service
+          # so end users see no Gatekeeper prompt at all on first
+          # launch. Without secrets, this step skips and the
+          # binaries ship signed-but-not-notarized (Gatekeeper
+          # challenges once on first launch, recoverable).
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "Apple notarization secrets not all set — skipping notarization."
+            exit 0
+          fi
+          cd tools/atem-net-diag/dist
+          for f in *.tar.gz *.app.zip; do
+            if [ -f "$f" ]; then
+              echo "==> Submitting $f for notarization"
+              xcrun notarytool submit "$f" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --wait || echo "  (notarization failed for $f — continuing)"
+            fi
+          done
+          # Staple the .app.zip — tarballs of folders can't be
+          # stapled (the staple goes onto the .app, which the user
+          # extracts and ad-hoc trusts). For .app.zip we extract,
+          # staple the .app inside, and re-zip. For the tarball we
+          # rely on Apple's online notary check on first launch.
+          if [ -f atem-net-diag-*.app.zip ]; then
+            ZIP=$(ls atem-net-diag-*.app.zip | head -1)
+            unzip -q "$ZIP" -d /tmp/staple-extract
+            xcrun stapler staple /tmp/staple-extract/atem-net-diag.app || true
+            rm "$ZIP"
+            (cd /tmp/staple-extract && zip -qr "/tmp/$ZIP" atem-net-diag.app)
+            mv "/tmp/$ZIP" "$ZIP"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atem-net-diag-macos-arm64
+          path: |
+            tools/atem-net-diag/dist/*.tar.gz
+            tools/atem-net-diag/dist/*.app.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Pull both artifacts together and create the GitHub Release.
+  # ---------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows, build-atem-net-diag]
+    # Release if the Mac build succeeded — even if Windows
+    # failed/cancelled. Mac-only alphas are still useful, and
+    # blocking the .dmg publish on a flaky Windows installer was
+    # what stranded alpha.6's Mac build at the artifact-only stage
+    # for an hour. The Windows .exe simply doesn't appear in the
+    # release if its build failed; users see a clear absence rather
+    # than a stale .exe from a previous run.
+    if: always() && needs.build-macos.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history for --generate-notes
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Build the file list dynamically — Windows + atem-net-diag
+          # artifacts may be missing if their builds failed (we still
+          # publish whatever Mac succeeded with). The release-job's
+          # gating (`if: always() && needs.build-macos.result == 'success'`)
+          # makes Mac the only required artifact; everything else is
+          # additive.
+          FILES=()
+          if compgen -G "artifacts/macos-arm64/*.dmg" > /dev/null; then
+            FILES+=(artifacts/macos-arm64/*.dmg)
+          fi
+          if compgen -G "artifacts/windows-x64/*.exe" > /dev/null; then
+            FILES+=(artifacts/windows-x64/*.exe)
+          fi
+          if compgen -G "artifacts/atem-net-diag-macos-arm64/*.tar.gz" > /dev/null; then
+            FILES+=(artifacts/atem-net-diag-macos-arm64/*.tar.gz)
+          fi
+          if compgen -G "artifacts/atem-net-diag-macos-arm64/*.app.zip" > /dev/null; then
+            FILES+=(artifacts/atem-net-diag-macos-arm64/*.app.zip)
+          fi
+          # alpha.38: Session 16 Phase A spike diagnostic. Only built
+          # for Windows since the operator's test rig is the
+          # Broadcast Pix Windows machine. Optional artifact — release
+          # publishes even if spike build was skipped or failed.
+          if compgen -G "artifacts/windows-x64-decklink-spike/*.exe" > /dev/null; then
+            FILES+=(artifacts/windows-x64-decklink-spike/*.exe)
+          fi
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            "${FILES[@]}"

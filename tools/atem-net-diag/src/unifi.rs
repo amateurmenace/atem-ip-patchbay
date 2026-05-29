@@ -1,0 +1,1079 @@
+//! UDM (UniFi OS / Network Application) HTTP client. Polls per-
+//! client bandwidth stats from the local controller so the
+//! dashboard can show "what's flowing to the ATEM right now"
+//! without active probing — pure passive data collection that
+//! doesn't touch the production stream.
+//!
+//! Auth surfaces:
+//! - **Local Controller API key** (UniFi OS 9.0+): created via
+//!   the Network app's Settings → Control Plane → Integrations.
+//!   Sent as `X-API-KEY` header. Stateless, no session refresh.
+//! - **Local-account cookie auth**: POST /api/auth/login with
+//!   username + password, capture TOKEN cookie + CSRF token,
+//!   include on subsequent requests. For older UniFi OS that
+//!   doesn't yet support local API keys.
+//!
+//! Endpoint preference: legacy `/proxy/network/api/s/default/
+//! stat/sta` first, since it returns per-client tx_bytes /
+//! rx_bytes counters that we delta-derive into kbps. The newer
+//! integration API at `/proxy/network/integration/v1/sites/
+//! {siteId}/clients` is read-mostly and the bandwidth fields are
+//! still rolling out as of early 2026 — we fall back to it only
+//! if the legacy path returns 401 (i.e. the API key only works
+//! against the integration surface).
+//!
+//! Self-signed certs: the UDM ships with a self-signed cert by
+//! default. We accept any cert when talking to the configured
+//! UDM host. Trade-off: a MITM on the LAN could intercept the
+//! API key. Acceptable for a diagnostic tool on a trusted LAN;
+//! NOT acceptable for credential storage or remote access.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+use ureq::Agent;
+
+use crate::dashboard::{
+    AlarmSnapshot, DashboardState, SwitchPortSnapshot, SwitchSnapshot, SystemStatus,
+    UnifiClientSnapshot, UnifiStatus, WanSnapshot, WanStatus,
+};
+
+/// How often to poll. Faster = tighter bandwidth resolution but
+/// more load on the UDM. 2s is a good live-monitoring balance —
+/// matches the operator's perception of "real time" without
+/// hammering the controller's CPU.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// HTTP request timeout. UDM API endpoints typically respond in
+/// 100-500ms even for /stat/sta on a busy network. 5s catches
+/// a hung controller without long blocking.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Backoff after a poll error before retrying. Short enough that
+/// transient network blips don't make the dashboard look dead,
+/// long enough that a UDM reboot doesn't get hammered.
+const ERROR_BACKOFF: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnifiCredentials {
+    ApiKey(String),
+    Login { username: String, password: String },
+}
+
+/// Shared credentials slot. Set by /api/config POST handler when the
+/// operator enters a key in the dashboard form, read by every
+/// polling thread on each tick. None = not configured (threads idle).
+/// Some = polling threads (re)build their UnifiClient on the next tick.
+///
+/// Lives outside DashboardState so the credentials never enter the
+/// JSON returned by /api/state. The polling threads access the inner
+/// Option directly; the only thing that leaks to the dashboard is the
+/// `UnifiStatus` they publish (Connected / Connecting / Failed /
+/// NotConfigured).
+pub type CredentialsHolder = std::sync::Arc<std::sync::Mutex<Option<UnifiCredentials>>>;
+
+/// Read UDM credentials from environment variables. Preferred:
+/// `UDM_API_KEY` (Local Controller API key from UniFi OS 9.0+).
+/// Fallback: `UDM_USERNAME` + `UDM_PASSWORD` (cookie-auth login
+/// flow for older UniFi OS or read-only local accounts). Returns
+/// None when neither is set — the polling thread idles in that
+/// case until the operator supplies a key via the dashboard form,
+/// at which point the threads pick up the new creds on their
+/// next tick.
+pub fn read_credentials_from_env() -> Option<UnifiCredentials> {
+    if let Ok(key) = std::env::var("UDM_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Some(UnifiCredentials::ApiKey(key));
+        }
+    }
+    let user = std::env::var("UDM_USERNAME").ok()?.trim().to_string();
+    let pass = std::env::var("UDM_PASSWORD").ok()?;
+    if user.is_empty() || pass.is_empty() {
+        return None;
+    }
+    Some(UnifiCredentials::Login {
+        username: user,
+        password: pass,
+    })
+}
+
+struct UnifiClient {
+    host: String,
+    agent: Agent,
+    creds: UnifiCredentials,
+    site: String,
+    /// CSRF token captured from cookie-auth login. Required on
+    /// modifying requests; GETs typically work without it but we
+    /// send it anyway when present for forward compat.
+    csrf: Option<String>,
+}
+
+impl UnifiClient {
+    fn new(host: String, creds: UnifiCredentials) -> Result<Self, String> {
+        let connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| format!("tls connector init failed: {e}"))?;
+        let agent = ureq::AgentBuilder::new()
+            .timeout(HTTP_TIMEOUT)
+            .tls_connector(Arc::new(connector))
+            .build();
+        Ok(Self {
+            host: host.trim_end_matches('/').to_string(),
+            agent,
+            creds,
+            site: "default".to_string(),
+            csrf: None,
+        })
+    }
+
+    /// Cookie-auth login. No-op for ApiKey auth — that path uses
+    /// the X-API-KEY header on each request directly.
+    fn login(&mut self) -> Result<(), String> {
+        let creds = self.creds.clone();
+        match &creds {
+            UnifiCredentials::ApiKey(_) => Ok(()),
+            UnifiCredentials::Login { username, password } => {
+                let url = format!("{}/api/auth/login", self.host);
+                let body = serde_json::json!({
+                    "username": username,
+                    "password": password,
+                    "remember": true,
+                });
+                let resp = self
+                    .agent
+                    .post(&url)
+                    .set("Content-Type", "application/json")
+                    .send_string(&body.to_string())
+                    .map_err(stringify_ureq_err)?;
+                // The CSRF token comes back in one of two headers
+                // depending on UniFi OS version. Capture either.
+                if let Some(csrf) = resp.header("X-Updated-CSRF-Token-After-Login") {
+                    self.csrf = Some(csrf.to_string());
+                } else if let Some(csrf) = resp.header("X-CSRF-Token") {
+                    self.csrf = Some(csrf.to_string());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_auth_headers(&self, mut req: ureq::Request) -> ureq::Request {
+        match &self.creds {
+            UnifiCredentials::ApiKey(key) => {
+                req = req.set("X-API-KEY", key);
+                req = req.set("Accept", "application/json");
+            }
+            UnifiCredentials::Login { .. } => {
+                if let Some(c) = &self.csrf {
+                    req = req.set("X-CSRF-Token", c);
+                }
+            }
+        }
+        req
+    }
+
+    fn get(&self, path: &str) -> Result<ureq::Response, String> {
+        let url = format!("{}{}", self.host, path);
+        let req = self.apply_auth_headers(self.agent.get(&url));
+        req.call().map_err(stringify_ureq_err)
+    }
+
+    /// Returns one entry per client the controller has data for
+    /// (currently active + recently disconnected). Caller filters
+    /// by last_seen for "currently online".
+    fn list_clients(&self) -> Result<Vec<RawClient>, String> {
+        // Try the legacy stat/sta endpoint first — it returns the
+        // bandwidth counters we delta-derive. If the API key
+        // doesn't grant access to the legacy surface (some older
+        // UniFi OS releases gate it differently), fall back to
+        // the newer integration API.
+        let legacy_path = format!("/proxy/network/api/s/{}/stat/sta", self.site);
+        match self.get(&legacy_path) {
+            Ok(resp) => {
+                let parsed: LegacyStatResponse = resp
+                    .into_json()
+                    .map_err(|e| format!("legacy stat/sta JSON parse: {e}"))?;
+                Ok(parsed.data)
+            }
+            Err(legacy_err) => {
+                // Some newer UDMs gate the legacy path; try the
+                // integration API as fallback. Note: the integration
+                // API doesn't expose tx_bytes/rx_bytes counters as
+                // of early 2026, so bandwidth will read 0 in this
+                // path. We still surface the client list so the
+                // operator can see the ATEM and the source clients.
+                let integ_path = format!(
+                    "/proxy/network/integration/v1/sites/{}/clients",
+                    self.site
+                );
+                match self.get(&integ_path) {
+                    Ok(resp) => {
+                        let parsed: IntegrationClientsResponse = resp
+                            .into_json()
+                            .map_err(|e| format!("integration clients JSON parse: {e}"))?;
+                        Ok(parsed.data.into_iter().map(RawClient::from_integration).collect())
+                    }
+                    Err(integ_err) => Err(format!(
+                        "legacy stat/sta failed: {legacy_err}; integration API also failed: {integ_err}"
+                    )),
+                }
+            }
+        }
+    }
+}
+
+/// Convert ureq's typed errors into a flat string suitable for
+/// surfacing in UnifiStatus::Failed { error }. ureq's error type
+/// distinguishes Status (got an HTTP response with bad status)
+/// from Transport (connection / TLS / timeout failure); we
+/// preserve enough detail to diagnose without exposing the
+/// internal type.
+fn stringify_ureq_err(err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            let snippet = body.chars().take(200).collect::<String>();
+            format!("HTTP {code}: {snippet}")
+        }
+        ureq::Error::Transport(t) => format!("transport: {t}"),
+    }
+}
+
+#[derive(Deserialize)]
+struct LegacyStatResponse {
+    data: Vec<RawClient>,
+}
+
+#[derive(Deserialize)]
+struct IntegrationClientsResponse {
+    data: Vec<IntegrationClient>,
+}
+
+/// Fields we use from the integration API response. The integration
+/// API uses camelCase. Fewer fields are exposed here than via the
+/// legacy stat/sta — most notably no per-client byte counters as
+/// of early 2026, so tx/rx kbps will read 0 when this fallback
+/// fires.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationClient {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mac_address: Option<String>,
+    #[serde(default)]
+    ip_address: Option<String>,
+    #[serde(default)]
+    uplink_device_id: Option<String>,
+    #[serde(default)]
+    last_seen: Option<String>, // ISO-8601 timestamp
+    #[serde(default)]
+    connected_at: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>, // "WIRED" | "WIRELESS"
+}
+
+/// Normalized client record fed into the snapshot builder. Either
+/// source path (legacy / integration) maps into this shape.
+///
+/// Byte counters: the legacy stat/sta endpoint reports two
+/// disjoint pairs depending on how the client connects. Wireless
+/// clients populate `tx_bytes`/`rx_bytes`; clients attached via a
+/// USW switch populate `wired-tx_bytes`/`wired-rx_bytes` and leave
+/// the plain pair zero. We deserialize both and let
+/// [`Self::effective_tx_bytes`] / [`Self::effective_rx_bytes`] sum
+/// them — safe because the two pairs are mutually exclusive in the
+/// observed data (a client is either wired-via-switch or wireless,
+/// never both at once for the same poll).
+#[derive(Deserialize, Debug, Clone, Default)]
+struct RawClient {
+    #[serde(default)]
+    mac: String,
+    #[serde(default)]
+    ip: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    oui: Option<String>,
+    #[serde(default)]
+    last_seen: Option<u64>,
+    #[serde(default)]
+    tx_bytes: u64,
+    #[serde(default)]
+    rx_bytes: u64,
+    #[serde(default, rename = "wired-tx_bytes")]
+    wired_tx_bytes: u64,
+    #[serde(default, rename = "wired-rx_bytes")]
+    wired_rx_bytes: u64,
+    /// UDM-reported rate fields (bytes/sec). The controller smooths
+    /// these over its internal sampling window (~5-10s), which is
+    /// LONGER than our 2s poll interval — so deriving kbps from
+    /// our own (current_bytes - prev_bytes) / dt produces wildly
+    /// jumpy numbers (most polls see no counter movement, then one
+    /// poll sees ~10s of accumulated bytes). When these rate
+    /// fields are populated we use them directly for stable kbps
+    /// and only fall back to delta math when the UDM doesn't
+    /// surface a rate (e.g., the integration API path).
+    #[serde(default, rename = "tx_bytes-r")]
+    tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")]
+    rx_bytes_r: f64,
+    #[serde(default, rename = "wired-tx_bytes-r")]
+    wired_tx_bytes_r: f64,
+    #[serde(default, rename = "wired-rx_bytes-r")]
+    wired_rx_bytes_r: f64,
+    #[serde(default)]
+    is_wired: bool,
+}
+
+impl RawClient {
+    /// Bytes leaving this client (toward the switch/AP). UniFi's
+    /// stat/sta reports counters from the **infrastructure's**
+    /// perspective: a client's TX is what the AP/switch port RX'd
+    /// from it. We invert here so the dashboard's `tx_kbps` /
+    /// `rx_kbps` reflect device-perspective — which matches the
+    /// documented intent ("show what's flowing to the ATEM").
+    fn effective_tx_bytes(&self) -> u64 {
+        self.rx_bytes.saturating_add(self.wired_rx_bytes)
+    }
+    fn effective_rx_bytes(&self) -> u64 {
+        self.tx_bytes.saturating_add(self.wired_tx_bytes)
+    }
+
+    /// Device-perspective TX/RX rates in kbps, sourced from the
+    /// UDM's smoothed rate fields. Returns `None` if the UDM
+    /// didn't include any rate field (caller falls back to delta-
+    /// derived rates from the byte counters). Same perspective
+    /// inversion as the byte counters.
+    fn udm_rate_kbps(&self) -> Option<(u64, u64)> {
+        let any_present = self.tx_bytes_r > 0.0
+            || self.rx_bytes_r > 0.0
+            || self.wired_tx_bytes_r > 0.0
+            || self.wired_rx_bytes_r > 0.0;
+        if !any_present {
+            return None;
+        }
+        let device_tx_bps = self.rx_bytes_r + self.wired_rx_bytes_r;
+        let device_rx_bps = self.tx_bytes_r + self.wired_tx_bytes_r;
+        Some((
+            (device_tx_bps * 8.0 / 1000.0) as u64,
+            (device_rx_bps * 8.0 / 1000.0) as u64,
+        ))
+    }
+}
+
+impl RawClient {
+    fn from_integration(c: IntegrationClient) -> Self {
+        Self {
+            mac: c.mac_address.unwrap_or_default(),
+            ip: c.ip_address,
+            hostname: None,
+            name: c.name,
+            oui: None,
+            last_seen: parse_iso8601_to_unix(c.last_seen.as_deref()),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            wired_tx_bytes: 0,
+            wired_rx_bytes: 0,
+            tx_bytes_r: 0.0,
+            rx_bytes_r: 0.0,
+            wired_tx_bytes_r: 0.0,
+            wired_rx_bytes_r: 0.0,
+            is_wired: c.r#type.as_deref().map(|t| t.eq_ignore_ascii_case("WIRED")).unwrap_or(false),
+        }
+    }
+}
+
+/// Best-effort ISO-8601 → Unix-seconds parser. Returns None on
+/// any parse error so the caller can fall through to "unknown".
+/// Avoids pulling in `chrono` for a one-line conversion.
+fn parse_iso8601_to_unix(s: Option<&str>) -> Option<u64> {
+    let s = s?;
+    // Format examples: "2026-04-26T18:30:45.123Z" or with
+    // "+00:00" offset. We accept both by stripping the fraction
+    // and timezone suffix and parsing the YYYY-MM-DDTHH:MM:SS
+    // prefix as UTC. Good enough for "show last_seen idle time".
+    let head = s.split('.').next().unwrap_or(s);
+    let head = head.trim_end_matches('Z').trim_end_matches('+').trim_end_matches('-');
+    let head = head.split('+').next().unwrap_or(head);
+    let head = head.split_once('T')?;
+    let date = head.0;
+    let time = head.1;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Days from year-0001 → epoch 1970-01-01. Use the standard
+    // civil-from-days algorithm (Howard Hinnant). Slightly more
+    // code than necessary but avoids a chrono dep.
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * (month + (if month > 2 { -3 } else { 9 })) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u64;
+    let days_from_epoch = era * 146097 + doe as i64 - 719468;
+    let secs = days_from_epoch * 86400 + hour * 3600 + minute * 60 + second;
+    if secs < 0 {
+        None
+    } else {
+        Some(secs as u64)
+    }
+}
+
+/// Polling loop. Manages a lifecycle around the inner poll work so
+/// credentials can be injected at runtime via the dashboard form.
+///
+/// Outer `'lifecycle` loop reads creds from the shared holder on each
+/// iteration; when None, the thread idles until the operator supplies
+/// a key. When creds change underneath us, the inner loop bails to
+/// outer to rebuild the UnifiClient. This is how POST /api/config
+/// with a new `unifi_api_key` takes effect within ~2 seconds.
+pub fn poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
+    {
+        let mut s = state.lock().unwrap();
+        s.unifi_thread_alive = true;
+    }
+
+    'lifecycle: loop {
+        // Re-read host + creds at the top of each lifecycle iter.
+        // If creds are absent, idle in NotConfigured — the dashboard's
+        // UDM panel will surface the form so the operator can set them.
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().unifi_status = UnifiStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
+        };
+        let host = state.lock().unwrap().config.unifi_host.clone();
+
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().unifi_status = UnifiStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
+
+        state.lock().unwrap().unifi_status = UnifiStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            // Login failure is meaningful for cookie-auth; for ApiKey
+            // auth login is a no-op, so this branch only fires for
+            // username/password. Surface the error, sleep, and retry
+            // — the operator may be re-entering the password via
+            // the dashboard form.
+            state.lock().unwrap().unifi_status = UnifiStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        // Per-MAC last-poll counters → delta → kbps. This map can
+        // grow unbounded if clients churn fast (a noisy guest network
+        // would feed thousands over hours), but in a typical
+        // production network it stays under a few hundred entries.
+        // Add LRU eviction later if it becomes a problem.
+        let mut prev: HashMap<String, (u64, u64, Instant)> = HashMap::new();
+
+        loop {
+            // Bail to outer if creds changed under us (operator updated
+            // the API key in the dashboard form, or cleared it).
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
+            let atem_mac_lower = state
+                .lock()
+                .unwrap()
+                .config
+                .atem
+                .mac
+                .as_deref()
+                .map(|m| m.to_ascii_lowercase());
+            match client.list_clients() {
+            Ok(raw_clients) => {
+                let now = Instant::now();
+                let snapshots: Vec<UnifiClientSnapshot> = raw_clients
+                    .into_iter()
+                    .map(|r| {
+                        let mac_lower = r.mac.to_ascii_lowercase();
+                        let is_atem = atem_mac_lower
+                            .as_deref()
+                            .map(|m| m == mac_lower)
+                            .unwrap_or(false);
+                        let tx_total = r.effective_tx_bytes();
+                        let rx_total = r.effective_rx_bytes();
+                        let (tx_kbps, rx_kbps) = if let Some(rates) = r.udm_rate_kbps() {
+                            rates
+                        } else {
+                            // Fallback path (integration API or other source
+                            // without rate fields): derive from byte deltas.
+                            // Subject to the same UDM-refresh-cadence jitter
+                            // we'd see on the legacy path without rates, so
+                            // these numbers may be jumpy.
+                            match prev.get(&mac_lower) {
+                                Some((prev_tx, prev_rx, prev_at)) => {
+                                    let dt = now.duration_since(*prev_at).as_secs_f64();
+                                    if dt > 0.1 {
+                                        let tx_dbits = tx_total.saturating_sub(*prev_tx) as f64 * 8.0;
+                                        let rx_dbits = rx_total.saturating_sub(*prev_rx) as f64 * 8.0;
+                                        (
+                                            (tx_dbits / dt / 1000.0) as u64,
+                                            (rx_dbits / dt / 1000.0) as u64,
+                                        )
+                                    } else {
+                                        (0, 0)
+                                    }
+                                }
+                                None => (0, 0),
+                            }
+                        };
+                        prev.insert(mac_lower.clone(), (tx_total, rx_total, now));
+                        UnifiClientSnapshot {
+                            mac: mac_lower,
+                            ip: r.ip,
+                            hostname: r.hostname,
+                            name: r.name,
+                            oui: r.oui,
+                            last_seen: r.last_seen.unwrap_or(0),
+                            tx_bytes: tx_total,
+                            rx_bytes: rx_total,
+                            tx_kbps,
+                            rx_kbps,
+                            is_atem,
+                            is_wired: r.is_wired,
+                        }
+                    })
+                    .collect();
+                let now_unix = now_secs();
+                let mut s = state.lock().unwrap();
+                s.unifi_clients = snapshots;
+                s.last_unifi_poll_at = now_unix;
+                s.unifi_status = UnifiStatus::Connected {
+                    last_poll_at: now_unix,
+                };
+                drop(s);
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => {
+                let mut s = state.lock().unwrap();
+                s.unifi_status = UnifiStatus::Failed {
+                    error: e,
+                    last_attempt: now_secs(),
+                };
+                drop(s);
+                std::thread::sleep(ERROR_BACKOFF);
+            }
+            }
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ---- WAN gateway monitoring ----------------------------------------------
+//
+// Polls /proxy/network/api/s/default/stat/health and pulls the `subsystem:
+// "wan"` entry, which exposes:
+//   - `tx_bytes-r` / `rx_bytes-r` (bytes/sec, gateway-perspective: tx is
+//     **upload** out of the LAN, rx is **download** into the LAN)
+//   - `wan_ip`, `isp_name`, `isp_organization` (broadcast pre-show context)
+// And `subsystem: "www"` for `latency` (gateway-to-internet ping in ms).
+//
+// Cadence matches the client poll (2s). The same UDM-side ~5-10s refresh
+// caveat applies, but again we use the controller's smoothed `*-r` rates
+// rather than self-derived deltas.
+
+const WAN_HISTORY_LEN: usize = 60;
+
+#[derive(Deserialize)]
+struct HealthEnvelope {
+    data: Vec<HealthSubsystem>,
+}
+
+#[derive(Deserialize)]
+struct HealthSubsystem {
+    #[serde(default)]
+    subsystem: String,
+    #[serde(default, rename = "tx_bytes-r")]
+    tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")]
+    rx_bytes_r: f64,
+    #[serde(default)]
+    wan_ip: Option<String>,
+    #[serde(default)]
+    isp_name: Option<String>,
+    #[serde(default)]
+    isp_organization: Option<String>,
+    #[serde(default)]
+    latency: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
+    /// Gateway-side runtime stats. Strings in the UDM response
+    /// because the controller stringifies floats like "19.2".
+    #[serde(default, rename = "gw_system-stats")]
+    gw_system_stats: Option<GwSysStats>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct GwSysStats {
+    #[serde(default)]
+    cpu: Option<String>,
+    #[serde(default)]
+    mem: Option<String>,
+    #[serde(default)]
+    uptime: Option<String>,
+}
+
+pub fn wan_poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
+    {
+        let mut s = state.lock().unwrap();
+        s.wan_thread_alive = true;
+    }
+
+    'lifecycle: loop {
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().wan_status = WanStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
+        };
+        let host = state.lock().unwrap().config.unifi_host.clone();
+
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().wan_status = WanStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
+
+        state.lock().unwrap().wan_status = WanStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            state.lock().unwrap().wan_status = WanStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        loop {
+            // Bail to outer on creds change (operator updated the
+            // API key in the dashboard form).
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
+            match client.get("/proxy/network/api/s/default/stat/health") {
+            Ok(resp) => match resp.into_json::<HealthEnvelope>() {
+                Ok(env) => {
+                    let wan = env.data.iter().find(|s| s.subsystem == "wan");
+                    let www = env.data.iter().find(|s| s.subsystem == "www");
+                    if let Some(w) = wan {
+                        // Convert bytes/sec → kbps. UDM fields are
+                        // gateway-perspective: tx is upload, rx is
+                        // download. We surface them as such.
+                        let upload_kbps = (w.tx_bytes_r * 8.0 / 1000.0) as u64;
+                        let download_kbps = (w.rx_bytes_r * 8.0 / 1000.0) as u64;
+                        let now = now_secs();
+                        let mut s = state.lock().unwrap();
+                        s.wan_upload_history.push_back((now, upload_kbps));
+                        s.wan_download_history.push_back((now, download_kbps));
+                        while s.wan_upload_history.len() > WAN_HISTORY_LEN {
+                            s.wan_upload_history.pop_front();
+                        }
+                        while s.wan_download_history.len() > WAN_HISTORY_LEN {
+                            s.wan_download_history.pop_front();
+                        }
+                        let parse_pct = |s: &Option<String>| -> Option<f64> {
+                            s.as_deref().and_then(|x| x.parse().ok())
+                        };
+                        let parse_u64 = |s: &Option<String>| -> Option<u64> {
+                            s.as_deref().and_then(|x| x.parse().ok())
+                        };
+                        s.wan_snapshot = Some(WanSnapshot {
+                            upload_kbps,
+                            download_kbps,
+                            wan_ip: w.wan_ip.clone(),
+                            isp_name: w.isp_name.clone(),
+                            isp_org: w.isp_organization.clone(),
+                            wan_latency_ms: www.and_then(|w| w.latency),
+                            wan_status: w.status.clone(),
+                            gw_cpu_pct: w.gw_system_stats.as_ref().and_then(|g| parse_pct(&g.cpu)),
+                            gw_mem_pct: w.gw_system_stats.as_ref().and_then(|g| parse_pct(&g.mem)),
+                            gw_uptime_secs: w.gw_system_stats.as_ref().and_then(|g| parse_u64(&g.uptime)),
+                        });
+                        s.wan_status = WanStatus::Connected { last_poll_at: now };
+                        s.last_wan_poll_at = now;
+                    } else {
+                        let mut s = state.lock().unwrap();
+                        s.wan_status = WanStatus::Failed {
+                            error: "no `wan` subsystem in health response".into(),
+                            last_attempt: now_secs(),
+                        };
+                    }
+                    drop(state.lock());
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.wan_status = WanStatus::Failed {
+                        error: format!("health JSON parse: {e}"),
+                        last_attempt: now_secs(),
+                    };
+                    drop(s);
+                    std::thread::sleep(ERROR_BACKOFF);
+                }
+            },
+            Err(e) => {
+                let mut s = state.lock().unwrap();
+                s.wan_status = WanStatus::Failed {
+                    error: e,
+                    last_attempt: now_secs(),
+                };
+                drop(s);
+                std::thread::sleep(ERROR_BACKOFF);
+            }
+            }
+        }
+    }
+}
+
+
+// ---- Switches + alarms (slower-cadence system poll) ---------------------
+//
+// These endpoints change less frequently than client / WAN throughput,
+// so polling them at 5s is plenty. One thread iterates through both
+// per cycle, which keeps the UDM API call rate predictable.
+// Events endpoint (/list/event, /stat/event) was tried with multiple
+// query-param shapes — all returned 400/404 against this UniFi OS 9
+// controller with a Local Controller API key. Likely gated behind
+// admin/superadmin permissions; left as a TODO.
+// DPI endpoint returned empty data (DPI feature is opt-in per-site
+// and not enabled on this controller). Left as a TODO.
+
+const SYSTEM_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize)]
+struct DeviceEnvelope {
+    data: Vec<RawDevice>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawDevice {
+    #[serde(default)] mac: String,
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] hostname: Option<String>,
+    #[serde(default)] model: Option<String>,
+    #[serde(default, rename = "type")] dtype: String, // "usw", "uap", "udm"
+    #[serde(default)] uptime: Option<u64>,
+    #[serde(default, rename = "system-stats")] system_stats: Option<DevSysStats>,
+    #[serde(default)] port_table: Vec<RawPort>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSysStats {
+    #[serde(default)] cpu: Option<String>,
+    #[serde(default)] mem: Option<String>,
+    #[serde(default)] uptime: Option<String>,
+}
+
+/// Optionally-numeric / optionally-string field. The UDM is
+/// inconsistent — some firmware versions return SFP optical metrics
+/// as JSON strings ("66.765"), others as JSON numbers. Accept both.
+#[derive(Default, Debug, Clone)]
+struct Numericish(Option<f64>);
+
+impl<'de> Deserialize<'de> for Numericish {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(Numericish(match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Number(n) => n.as_f64(),
+            _ => None,
+        }))
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct RawPort {
+    #[serde(default)] port_idx: u32,
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] media: Option<String>,
+    #[serde(default)] speed: Option<u32>,
+    #[serde(default)] up: bool,
+    #[serde(default)] enable: bool,
+    #[serde(default, rename = "tx_bytes-r")] tx_bytes_r: f64,
+    #[serde(default, rename = "rx_bytes-r")] rx_bytes_r: f64,
+    #[serde(default)] tx_errors: u64,
+    #[serde(default)] rx_errors: u64,
+    #[serde(default)] tx_dropped: u64,
+    #[serde(default)] rx_dropped: u64,
+    #[serde(default)] link_down_count: u64,
+    #[serde(default)] last_connection: Option<LastConnection>,
+    #[serde(default)] sfp_temperature: Numericish,
+    #[serde(default)] sfp_txpower: Numericish,
+    #[serde(default)] sfp_rxpower: Numericish,
+}
+
+#[derive(Deserialize, Default)]
+struct LastConnection {
+    #[serde(default)] mac: Option<String>,
+    #[serde(default)] ip: Option<String>,
+    #[serde(default)] connected: bool,
+}
+
+#[derive(Deserialize)]
+struct AlarmEnvelope {
+    data: Vec<RawAlarm>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawAlarm {
+    #[serde(default, rename = "_id")] id: Option<String>,
+    #[serde(default)] key: Option<String>,
+    #[serde(default)] msg: Option<String>,
+    #[serde(default)] subsystem: Option<String>,
+    #[serde(default)] time: Option<u64>,
+    #[serde(default)] archived: bool,
+    #[serde(default)] severity: Option<String>,
+}
+
+pub fn system_poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
+    {
+        let mut s = state.lock().unwrap();
+        s.system_thread_alive = true;
+    }
+
+    'lifecycle: loop {
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().system_status = SystemStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
+        };
+        let host = state.lock().unwrap().config.unifi_host.clone();
+
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().system_status = SystemStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
+
+        state.lock().unwrap().system_status = SystemStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            state.lock().unwrap().system_status = SystemStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        let atem_mac_lower: Option<String> = state.lock().unwrap().config.atem.mac.as_deref().map(|m| m.to_ascii_lowercase());
+
+        loop {
+            // Bail to outer on creds change.
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
+        let mut last_err: Option<String> = None;
+
+        // /stat/device → switches + APs + UDM. We surface USWs (port
+        // tables) and the UDM (just for the device-level system
+        // stats which we already have via WAN health, so we mostly
+        // ignore that here). UAPs have no port_table.
+        match client.get("/proxy/network/api/s/default/stat/device") {
+            Ok(resp) => match resp.into_json::<DeviceEnvelope>() {
+                Ok(env) => {
+                    let mut switches: Vec<SwitchSnapshot> = Vec::new();
+                    for dev in env.data {
+                        if dev.dtype != "usw" { continue; }
+                        let cpu_pct = dev.system_stats.as_ref().and_then(|s| s.cpu.as_deref().and_then(|x| x.parse::<f64>().ok()));
+                        let mem_pct = dev.system_stats.as_ref().and_then(|s| s.mem.as_deref().and_then(|x| x.parse::<f64>().ok()));
+                        let mut ports: Vec<SwitchPortSnapshot> = Vec::new();
+                        for p in &dev.port_table {
+                            // Skip totally idle disabled ports for the operator-facing list.
+                            if !p.enable && !p.up && p.tx_bytes_r == 0.0 && p.rx_bytes_r == 0.0 { continue; }
+                            // Only surface a connected_mac/ip when the port
+                            // is actually up AND the last_connection record
+                            // says it's currently connected. Otherwise
+                            // last_connection is just history (the MAC that
+                            // *used to* be on this port) which produces
+                            // false-positive ATEM matches on dead ports.
+                            let lc_active = p.last_connection.as_ref().map(|c| c.connected).unwrap_or(false) && p.up;
+                            let connected_mac = if lc_active {
+                                p.last_connection.as_ref().and_then(|c| c.mac.clone()).map(|m| m.to_ascii_lowercase())
+                            } else { None };
+                            let connected_ip = if lc_active {
+                                p.last_connection.as_ref().and_then(|c| c.ip.clone())
+                            } else { None };
+                            let is_atem_port = atem_mac_lower.as_deref().zip(connected_mac.as_deref())
+                                .map(|(a, c)| a == c).unwrap_or(false);
+                            ports.push(SwitchPortSnapshot {
+                                port_idx: p.port_idx,
+                                name: p.name.clone().unwrap_or_else(|| format!("Port {}", p.port_idx)),
+                                media: p.media.clone(),
+                                speed_mbps: p.speed.unwrap_or(0),
+                                up: p.up,
+                                tx_kbps: (p.tx_bytes_r * 8.0 / 1000.0) as u64,
+                                rx_kbps: (p.rx_bytes_r * 8.0 / 1000.0) as u64,
+                                tx_errors: p.tx_errors,
+                                rx_errors: p.rx_errors,
+                                tx_dropped: p.tx_dropped,
+                                rx_dropped: p.rx_dropped,
+                                link_down_count: p.link_down_count,
+                                connected_mac,
+                                connected_ip,
+                                is_atem_port,
+                                sfp_temp_c: p.sfp_temperature.0,
+                                sfp_tx_dbm: p.sfp_txpower.0,
+                                sfp_rx_dbm: p.sfp_rxpower.0,
+                            });
+                        }
+                        switches.push(SwitchSnapshot {
+                            mac: dev.mac.clone(),
+                            name: dev.name.clone().or(dev.hostname.clone()).unwrap_or_else(|| dev.mac.clone()),
+                            model: dev.model.clone().unwrap_or_default(),
+                            cpu_pct,
+                            mem_pct,
+                            uptime_secs: dev.uptime,
+                            ports,
+                        });
+                    }
+                    state.lock().unwrap().switches = switches;
+                }
+                Err(e) => last_err = Some(format!("device JSON: {e}")),
+            },
+            Err(e) => last_err = Some(format!("device fetch: {e}")),
+        }
+
+        // /list/alarm → unarchived alarms. Empty list when healthy.
+        match client.get("/proxy/network/api/s/default/list/alarm") {
+            Ok(resp) => match resp.into_json::<AlarmEnvelope>() {
+                Ok(env) => {
+                    let alarms: Vec<AlarmSnapshot> = env.data.into_iter()
+                        .filter(|a| !a.archived)
+                        .map(|a| AlarmSnapshot {
+                            key: a.key.unwrap_or_default(),
+                            msg: a.msg.unwrap_or_default(),
+                            subsystem: a.subsystem.unwrap_or_default(),
+                            time: a.time.unwrap_or(0),
+                            severity: a.severity,
+                        })
+                        .collect();
+                    state.lock().unwrap().alarms = alarms;
+                }
+                Err(e) => last_err = Some(format!("alarm JSON: {e}")),
+            },
+            Err(e) => last_err = Some(format!("alarm fetch: {e}")),
+        }
+
+        let now = now_secs();
+        let mut s = state.lock().unwrap();
+        if let Some(e) = last_err {
+            s.system_status = SystemStatus::Failed { error: e, last_attempt: now };
+        } else {
+            s.system_status = SystemStatus::Connected { last_poll_at: now };
+            s.last_system_poll_at = now;
+        }
+        drop(s);
+        std::thread::sleep(SYSTEM_POLL_INTERVAL);
+        }
+    }
+}
+
+// ---- Reverse DNS worker --------------------------------------------------
+//
+// Resolves source IPs to PTR records using the system `host` command.
+// Spawned once at startup; reads from a queue of pending IPs the main
+// poller fills as new flow source IPs are seen. Cached in a HashMap on
+// DashboardState; stays for the lifetime of the binary.
+//
+// Rationale for shelling out: avoids a heavy-weight DNS resolver crate
+// and keeps the binary surface small. `host -W 2` enforces a 2-second
+// per-query timeout so a slow public resolver does not stall the worker.
+
+pub fn rdns_worker_loop(state: Arc<Mutex<DashboardState>>) {
+    use std::process::Command;
+    loop {
+        // Pop the next un-resolved IP off the in-progress set, or
+        // sleep when there is nothing to do. We intentionally do
+        // not lock the mutex while shelling out.
+        let next: Option<String> = {
+            let s = state.lock().unwrap();
+            s.rdns_pending.iter().next().cloned()
+        };
+        let Some(ip) = next else {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        };
+
+        let resolved: Option<String> = Command::new("host")
+            .args(["-W", "2", &ip])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if !out.status.success() { return None; }
+                let s = String::from_utf8_lossy(&out.stdout);
+                // host output: "1.2.3.4.in-addr.arpa domain name pointer foo.example.com."
+                for line in s.lines() {
+                    if let Some(idx) = line.find("domain name pointer ") {
+                        let name = &line[idx + "domain name pointer ".len()..];
+                        let name = name.trim().trim_end_matches('.').to_string();
+                        if !name.is_empty() { return Some(name); }
+                    }
+                }
+                None
+            });
+
+        let mut s = state.lock().unwrap();
+        s.rdns_cache.insert(ip.clone(), resolved);
+        s.rdns_pending.remove(&ip);
+    }
+}
+

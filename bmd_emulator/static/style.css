@@ -1,0 +1,2506 @@
+/* ATEM IP Patchbay — control panel
+ * Dark broadcast aesthetic. Cool greys with restrained orange accent.
+ */
+
+:root {
+  --bg:        #0a0d12;
+  --bg-grad:   linear-gradient(180deg, #11151c 0%, #0a0d12 100%);
+  --panel:     #141923;
+  --panel-2:   #1c2230;
+  --panel-3:   #232a3a;
+  --line:      #2a3142;
+  --line-soft: #1f2533;
+  --text:      #e7ecf2;
+  --muted:     #8a93a3;
+  --muted-2:   #5e6779;
+  --accent:    #ff7833;     /* BMD orange — kept as accent, not CTA */
+  --accent-dim:#c25320;
+  --signal:    #4ea7ff;     /* cool blue, primary CTA */
+  --signal-dim:#2c7ed4;
+  --green:     #2ecc71;
+  --red:       #ff3b30;
+  --amber:     #ffb547;
+  --shadow:    0 6px 18px rgba(0,0,0,0.55);
+  --shadow-sm: 0 2px 6px rgba(0,0,0,0.45);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  font-family: -apple-system, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  min-height: 100vh;
+}
+
+a { color: var(--signal); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-size: 0.9em; }
+
+/* ============= TOP NAV ===================================== */
+.topbar {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-grad);
+}
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 28px;
+  max-width: 1080px;
+  margin: 0 auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 6px 8px;
+  margin: -6px -8px;
+  border-radius: 12px;
+  color: inherit;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+.brand:hover { background: rgba(255,255,255,0.025); transform: translateY(-1px); }
+.brand:active { transform: translateY(0); }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
+.brand-mark { width: 64px; height: 64px; flex-shrink: 0; color: var(--text); transition: filter 0.25s ease; }
+.brand:hover .brand-mark { filter: drop-shadow(0 0 12px rgba(255,120,51,0.45)); }
+
+.bm-bar { opacity: 0.55; transition: opacity 0.4s ease; transform-origin: center; }
+.bm-bar:nth-child(1), .bm-bar:nth-child(6) { opacity: 1; }
+.bm-bar:nth-child(2), .bm-bar:nth-child(5) { opacity: 0.75; }
+.bm-bar:nth-child(3), .bm-bar:nth-child(4) { opacity: 0.5; }
+.brand:hover .bm-bar { animation: bar-wave 1.2s ease-in-out infinite; }
+.brand:hover .bm-bar:nth-child(1) { animation-delay: 0s; }
+.brand:hover .bm-bar:nth-child(2) { animation-delay: 0.08s; }
+.brand:hover .bm-bar:nth-child(3) { animation-delay: 0.16s; }
+.brand:hover .bm-bar:nth-child(4) { animation-delay: 0.24s; }
+.brand:hover .bm-bar:nth-child(5) { animation-delay: 0.32s; }
+.brand:hover .bm-bar:nth-child(6) { animation-delay: 0.40s; }
+@keyframes bar-wave {
+  0%, 100% { opacity: 0.45; transform: scaleY(1); }
+  50%      { opacity: 1;    transform: scaleY(1.05); }
+}
+.bm-dot { transform-origin: center; animation: dot-pulse 2.6s ease-in-out infinite; }
+.bm-dot:nth-of-type(2) { animation-delay: 1.3s; }
+@keyframes dot-pulse {
+  0%, 100% { opacity: 0.55; r: 1.6; }
+  50%      { opacity: 1;    r: 2.2; }
+}
+body.is-streaming .brand-mark { color: #fff; }
+body.is-streaming .bm-bar { animation: bar-wave 1s ease-in-out infinite; }
+body.is-streaming .bm-bar:nth-child(1) { animation-delay: 0s; }
+body.is-streaming .bm-bar:nth-child(2) { animation-delay: 0.07s; }
+body.is-streaming .bm-bar:nth-child(3) { animation-delay: 0.14s; }
+body.is-streaming .bm-bar:nth-child(4) { animation-delay: 0.21s; }
+body.is-streaming .bm-bar:nth-child(5) { animation-delay: 0.28s; }
+body.is-streaming .bm-bar:nth-child(6) { animation-delay: 0.35s; }
+body.is-streaming .bm-dot { animation-duration: 1.2s; }
+
+.title-block { min-width: 0; }
+.title-block h1 {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  background: linear-gradient(95deg, var(--text) 0%, var(--text) 60%, #ffd5b8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  transition: filter 0.25s ease;
+}
+.brand:hover .title-block h1 { filter: drop-shadow(0 0 14px rgba(255,120,51,0.35)); }
+body.is-streaming .title-block h1 {
+  background: linear-gradient(95deg, var(--text) 0%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.title-block .kicker {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.status-block { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+.status-pill {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status-pill.streaming { color: #fff; background: #1f8a3f; border-color: #2ecc71; box-shadow: 0 0 12px rgba(46,204,113,0.4); }
+.status-pill.connecting { color: #1a1208; background: var(--amber); border-color: var(--amber); }
+.status-pill.interrupted { color: #fff; background: #5a1f1f; border-color: var(--red); }
+.status-pill.reconnecting { color: #1a1208; background: var(--amber); border-color: var(--amber); letter-spacing: 0.10em; font-size: 10px; }
+
+.refresh-btn {
+  margin-left: 12px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.refresh-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(255,138,56,0.08); }
+.refresh-btn:active { transform: translateY(1px); }
+
+/* Net Diag jump-button. Same shape as .refresh-btn but accent-tinted
+   by default since it surfaces a separate app, not a UI action. The
+   hover state lights it up fully — this is the "go look at the
+   network" affordance the operator reaches for during a show. */
+.net-diag-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: rgba(255,138,56,0.06);
+  border: 1px solid rgba(255,138,56,0.30);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.net-diag-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(255,138,56,0.16);
+}
+.net-diag-btn:active { transform: translateY(1px); }
+
+/* alpha.22's .udm-config-btn / .udm-dialog styles removed in alpha.25
+   along with the UDM dialog itself. UDM config lives in atem-net-diag's
+   own dashboard now. */
+
+/* alpha.25 — Advanced encoding section inside the destination card's
+   Advanced disclosure. Visually grouped so it reads as one coherent
+   "encoder + audio quality" block separate from the existing
+   streamid / label / SRT-mode controls below. */
+.encoder-section {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px 14px;
+  margin-bottom: 14px;
+  background: rgba(255,138,56,0.04);
+  border: 1px solid rgba(255,138,56,0.20);
+  border-radius: 8px;
+}
+.encoder-section .section-label {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.10em; text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+.encoder-section .row-2 {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+.encoder-section .row-3 {
+  display: grid; grid-template-columns: 1.2fr 0.9fr 0.9fr; gap: 10px;
+}
+@media (max-width: 720px) {
+  .encoder-section .row-2,
+  .encoder-section .row-3 {
+    grid-template-columns: 1fr;
+  }
+}
+.encoder-section label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted);
+}
+.encoder-section select,
+.encoder-section input[type="number"],
+.encoder-section input[type="text"],
+.encoder-section textarea {
+  font-family: inherit; font-size: 13px; font-weight: 400;
+  letter-spacing: normal; text-transform: none;
+  padding: 7px 10px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text);
+}
+.encoder-section select option {
+  /* Match alpha.18's Windows WebView2 contrast fix. */
+  background-color: #0e0f12; color: #e6e6ea;
+}
+.encoder-section textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical; min-height: 38px;
+}
+.encoder-section .field-help {
+  font-size: 11px; font-weight: 400;
+  letter-spacing: normal; text-transform: none;
+  color: var(--muted); line-height: 1.4;
+}
+.encoder-section .checkbox-row {
+  flex-direction: row; align-items: flex-start; gap: 8px;
+  text-transform: none; letter-spacing: normal; font-size: 12px;
+  color: var(--text);
+}
+.encoder-section .checkbox-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+/* Monitor jump-button. Opens a small companion window per instance
+   showing live preview + stats. Operator positions one of these per
+   running stream on screen to compose a multiview-style layout.
+   Cyan-tinted to distinguish from Net Diag's orange so a fast scan
+   tells which button is which. */
+.monitor-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #7fc8ff;
+  background: rgba(98, 184, 255, 0.06);
+  border: 1px solid rgba(98, 184, 255, 0.30);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.monitor-btn:hover {
+  color: #cfe3ff;
+  border-color: rgba(98, 184, 255, 0.6);
+  background: rgba(98, 184, 255, 0.16);
+}
+.monitor-btn:active { transform: translateY(1px); }
+.monitor-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.duration { font-family: "SF Mono", monospace; font-size: 22px; letter-spacing: 0.05em; color: var(--text); }
+
+/* ============= HERO ====================================== */
+.hero {
+  padding: 22px 28px 24px;
+  background: linear-gradient(180deg, rgba(78,167,255,0.04) 0%, transparent 100%);
+  border-bottom: 1px solid var(--line-soft);
+}
+.hero-headline {
+  font-size: 18px; line-height: 1.45; font-weight: 400; color: var(--text);
+  max-width: 1080px; margin: 0 auto 18px; letter-spacing: -0.005em;
+}
+.hero-headline strong { color: var(--accent); font-weight: 700; letter-spacing: 0.01em; }
+/* alpha.23: reverse-direction tagline gets its own visual beat on a
+   new line so the bidirectional patchbay framing reads cleanly
+   without crowding the existing "network -> ATEM" pitch. */
+.hero-headline-reverse {
+  display: block;
+  margin-top: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0.002em;
+}
+.hero-headline-reverse strong {
+  color: var(--accent); font-weight: 700;
+}
+.hero-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; max-width: 1080px; margin: 0 auto; }
+.hero-col-title { font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 8px; }
+.hero-col p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+
+.hero-credit {
+  max-width: 1080px;
+  margin: 18px auto 0;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.hero-credit a { color: var(--accent); border-bottom: 1px dotted var(--accent); }
+.hero-credit a:hover { color: #ffa166; text-decoration: none; }
+
+/* Quiet "fine print" beat between the two-column intro and the
+   credit. Same horizontal bounds (max-width + auto margins) as
+   .hero-cols and .hero-credit so it reads as part of the same
+   stack rather than a colored interruption. */
+.hero-disclaimer {
+  max-width: 1080px;
+  margin: 18px auto 0;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted-2, var(--muted));
+  text-align: left;
+}
+
+/* ============= MAIN GRID ================================== */
+.grid {
+  display: grid;
+  grid-template-columns: minmax(440px, 1.15fr) minmax(380px, 1fr);
+  gap: 18px;
+  padding: 20px 28px;
+  max-width: 1480px;
+  margin: 0 auto;
+  align-items: start;
+}
+.config-stack { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+/* ============= CARD ====================================== */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.card-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 14px;
+  font-weight: 700;
+}
+.card-title-aux {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: none;
+  font-weight: 500;
+}
+a.card-title-aux { color: var(--signal); }
+a.card-title-aux:hover { color: #7cc0ff; text-decoration: none; }
+
+details.card.collapsible { padding: 0; }
+details.card.collapsible > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 20px;
+  margin: 0;
+}
+details.card.collapsible > summary::-webkit-details-marker { display: none; }
+details.card.collapsible > summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.18s ease;
+  font-size: 14px;
+}
+details.card.collapsible[open] > summary::before { transform: rotate(90deg); }
+details.card.collapsible[open] > *:not(summary) { padding: 0 20px 18px; }
+
+/* ============= MONITOR =================================== */
+.monitor { display: flex; flex-direction: column; gap: 14px; }
+.preview-frame {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid var(--line);
+  background: #000;
+  aspect-ratio: 16/9;
+  min-height: 240px;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+/* Live indicator: red border + glow when streaming. */
+body.is-streaming .preview-frame {
+  border-color: var(--red);
+  box-shadow: 0 0 0 1px var(--red), 0 0 22px rgba(255,59,48,0.45);
+  animation: live-pulse 2s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--red), 0 0 22px rgba(255,59,48,0.45); }
+  50%      { box-shadow: 0 0 0 1px var(--red), 0 0 32px rgba(255,59,48,0.65); }
+}
+
+#preview-video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.bars { display: flex; height: 100%; width: 100%; }
+.bar { flex: 1; }
+.bar-white   { background: #c0c0c0; }
+.bar-yellow  { background: #c0c000; }
+.bar-cyan    { background: #00c0c0; }
+.bar-green   { background: #00c000; }
+.bar-magenta { background: #c000c0; }
+.bar-red     { background: #c00000; }
+.bar-blue    { background: #0000c0; }
+
+.preview-message {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 11, 16, 0.92);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+  line-height: 1.6;
+}
+.preview-message strong { color: var(--text); display: block; margin-bottom: 6px; }
+.preview-message a { color: var(--signal); border-bottom: 1px dotted var(--signal); }
+.preview-message a:hover { color: #7cc0ff; text-decoration: none; }
+
+/* The user-agent [hidden] { display: none } rule has the same
+   specificity as .bars and .preview-message (both 0,1,0), and our
+   display:flex declarations come later in the cascade so they win
+   — meaning element.hidden = true doesn't actually hide them. The
+   camera <video> element happens to be position:absolute over the
+   bars so the bug is invisible there; NDI preview <img> revealed
+   it. Force the rule with !important so all hidden-via-attribute
+   calls in app.js (and any future ones) Just Work. */
+[hidden] { display: none !important; }
+
+.live-badge {
+  position: absolute;
+  top: 12px; left: 12px;
+  background: var(--red);
+  color: #fff;
+  padding: 5px 11px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  z-index: 5;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  animation: live-blink 1.5s ease-in-out infinite;
+}
+@keyframes live-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+
+.preview-overlay {
+  position: absolute;
+  bottom: 12px; left: 12px; right: 12px;
+  background: rgba(8, 11, 16, 0.82);
+  border: 1px solid rgba(78,167,255,0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  font-size: 12px;
+  backdrop-filter: blur(6px);
+  z-index: 4;
+}
+.ovl-row { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ovl-row span { color: var(--muted); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; }
+.ovl-row strong { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.controls-row {
+  display: grid;
+  /* Start (primary CTA) | Preview | Stop | Receive jump. Start gets
+     the most width so it stays visually dominant; Preview is
+     secondary; Stop is narrow (single click after verifying); the
+     Receive jump button gets a generous slot because the label is
+     long and it's the secondary CTA we want users to discover. */
+  grid-template-columns: 1.7fr 1.2fr 0.85fr 1.5fr;
+  gap: 10px;
+}
+@media (max-width: 720px) {
+  /* On narrow widths the four-column row gets cramped. Wrap to a
+     2x2 grid so each button keeps a usable hit target. */
+  .controls-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* "Receive a Stream" navigation button. Styled with the same green
+   accent the receive-stream wizard + receiver banner use, so all
+   three "this is the receive flow" surfaces visually cohere. NOT a
+   primary action color (blue) — that's reserved for Start Stream —
+   but distinct enough from the neutral Stop to be discoverable. */
+button.btn-receive {
+  background: linear-gradient(180deg, #2a9d5c 0%, #1f7544 100%);
+  border-color: #1f7544;
+  color: #f0fff5;
+  font-weight: 600;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  position: relative;
+}
+button.btn-receive:hover {
+  filter: brightness(1.08);
+  border-color: #50c878;
+}
+button.btn-receive:active { filter: brightness(0.92); }
+
+/* Preview button when the backend reports preview.active=true.
+   Yellow to read as "running but not committed" — distinct from the
+   blue primary Start CTA and the neutral Stop. */
+button.preview-active {
+  background: linear-gradient(180deg, #f3c44b 0%, #c08e1a 100%);
+  border-color: #c08e1a;
+  color: #1a1408;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.18);
+}
+button.preview-active:hover { filter: brightness(1.06); }
+
+/* ============= TELEMETRY ================================= */
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.tm-cell {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex; flex-direction: column;
+  min-height: 76px;
+  position: relative;
+}
+.tm-cell > span {
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.tm-cell > strong {
+  font-size: 18px;
+  font-family: "SF Mono", monospace;
+  margin-top: 4px;
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.1;
+}
+.tm-cell > .sub {
+  margin-top: auto;
+  font-size: 10px;
+  color: var(--muted-2);
+  font-style: normal;
+  letter-spacing: 0.04em;
+}
+.tm-cell.healthy > strong { color: var(--green); }
+.tm-cell.warn    > strong { color: var(--amber); }
+.tm-cell.bad     > strong { color: var(--red); }
+
+.bar-strip {
+  display: block;
+  height: 3px;
+  background: linear-gradient(90deg, var(--signal) 0%, var(--signal) var(--fill, 0%), transparent var(--fill, 0%));
+  border-radius: 2px;
+  margin-top: 6px;
+  opacity: 0.85;
+  font-style: normal;
+}
+
+.telemetry-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(78,167,255,0.05);
+  border-left: 2px solid var(--signal);
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.telemetry-note strong { color: var(--text); font-weight: 600; }
+
+/* ============= FORMS ===================================== */
+label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+label .hint {
+  color: var(--muted-2);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  margin-left: 4px;
+}
+label code { color: var(--accent); }
+
+input[type="text"], input[type="password"], input[type="number"], select, textarea {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  font-weight: 400;
+}
+textarea { resize: vertical; min-height: 80px; line-height: 1.4; font-family: "SF Mono", monospace; font-size: 12px; }
+select { appearance: none; cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6z' fill='%238a93a3'/></svg>");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 30px;
+}
+
+/* Explicit dark theme for dropdown options. Without this, Windows
+   WebView2 renders the OPEN dropdown popup using the OS native
+   colors (light-grey background, near-white text) which is barely
+   readable. Chromium honors background/color on <option> for the
+   popup itself, so setting them here gives the dropdown the same
+   dark surface as the rest of the UI. Reported in alpha.16 against
+   the Audio Mixer device picker on Windows. */
+option {
+  background-color: #0e0f12;
+  color: #e6e6ea;
+  padding: 4px 8px;
+}
+option:checked {
+  background-color: #1a1c22;
+  color: #ffffff;
+  font-weight: 500;
+}
+option:disabled {
+  color: #5a626f;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--signal);
+  box-shadow: 0 0 0 3px rgba(78,167,255,0.18);
+}
+input[readonly] { color: var(--muted); background: var(--panel-3); }
+
+label.check {
+  display: flex; align-items: center; gap: 9px;
+  cursor: pointer;
+  text-transform: none; letter-spacing: normal;
+  color: var(--text); font-size: 13px; font-weight: 400;
+}
+label.check input { width: auto; margin: 0; accent-color: var(--accent); }
+
+label.inline {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 0;
+}
+label.inline .lbl {
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600;
+  min-width: 56px;
+}
+label.inline select, label.inline input { margin-top: 0; flex: 1; }
+
+.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-bottom: 0; }
+.row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px 12px; }
+
+.hint {
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin: 8px 0 0;
+}
+.hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: var(--accent); }
+
+.hint.guide {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(255,120,51,0.06);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  color: var(--muted);
+}
+.hint.guide strong { color: var(--text); font-weight: 600; }
+
+.hint-panel {
+  background: rgba(78,167,255,0.06);
+  border: 1px solid rgba(78,167,255,0.25);
+  color: var(--text);
+}
+
+.button-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+button {
+  padding: 9px 16px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.05s ease, background 0.18s ease;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+}
+button:hover { filter: brightness(1.18); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary {
+  background: linear-gradient(180deg, var(--signal) 0%, var(--signal-dim) 100%);
+  border-color: var(--signal-dim);
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.25);
+}
+button.primary:hover { filter: brightness(1.08); }
+button.big { padding: 14px 18px; font-size: 14px; }
+
+.error {
+  background: rgba(255, 77, 77, 0.10);
+  border: 1px solid rgba(255, 77, 77, 0.45);
+  color: #ffb6a6;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
+.muted { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px; }
+
+/* ============= TILES ===================================== */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 10px 8px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.05s;
+  min-height: 86px;
+}
+.tile:hover { background: var(--panel-3); border-color: var(--muted-2); }
+.tile:active { transform: translateY(1px); }
+.tile.active {
+  border-color: var(--signal);
+  background: linear-gradient(180deg, rgba(78,167,255,0.10), rgba(78,167,255,0.03));
+  box-shadow: 0 0 0 2px rgba(78,167,255,0.18);
+}
+.tile-icon { width: 28px; height: 28px; color: var(--muted); margin-top: 4px; }
+.tile.active .tile-icon { color: var(--signal); }
+.tile-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tile-cat {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.tile.disabled { opacity: 0.55; cursor: default; }
+.tile.disabled:hover { background: var(--panel-2); border-color: var(--line); }
+.tile.discovered { border-style: dashed; }
+/* alpha.24: empty-state tile in a section whose discovery returned
+   zero results. Greyed out + non-interactive — communicates "the
+   feature exists but you don't have any senders yet" rather than
+   hiding the section entirely (which left OMT undiscoverable for
+   operators who didn't know about it). */
+.tile.placeholder {
+  opacity: 0.55;
+  cursor: default;
+  border-style: dashed;
+  background: transparent;
+}
+.tile.placeholder:hover {
+  background: transparent;
+  border-color: var(--line);
+}
+.tile.placeholder .tile-name { font-style: italic; }
+
+.tile-section {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  font-weight: 700;
+  margin: 6px 0 -2px;
+  padding-left: 2px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.tile-section .count { color: var(--muted-2); font-size: 9px; letter-spacing: 0.1em; }
+
+.audio-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 16px 18px;
+  margin-top: 16px;
+  background: var(--panel-2);
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(255, 138, 56, 0.2), 0 4px 14px rgba(0,0,0,0.18);
+}
+.audio-row .lbl {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+}
+.audio-row select,
+.audio-row input {
+  font-size: 14px;
+  padding: 10px 12px;
+  font-weight: 500;
+  /* Explicit font-family — WKWebView occasionally renders <select>
+     options in the macOS system font even when font-family: inherit
+     is in the global rule, which made this dropdown look out of
+     place vs every other input on the page. */
+  font-family: -apple-system, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+}
+
+/* Make the audio dropdown read as a CONTROL the user is meant to
+   touch, not a passive read-only field. Cyan accent that's distinct
+   from the orange .accent / blue --signal CTAs already on the page,
+   so the eye lands here when the user is sourcing audio for the
+   first time (especially Dante operators who have to pick an
+   unusual device). */
+.audio-row select#av-audio {
+  background: linear-gradient(180deg, rgba(64,200,210,0.16) 0%, rgba(40,150,170,0.10) 100%);
+  border-color: rgba(80,200,220,0.55);
+  box-shadow: 0 0 0 1px rgba(80,200,220,0.18), 0 2px 8px rgba(40,150,170,0.10);
+  color: var(--text);
+  font-weight: 600;
+}
+.audio-row select#av-audio:focus {
+  border-color: rgba(120,220,235,0.85);
+  box-shadow: 0 0 0 3px rgba(80,200,220,0.30), 0 2px 12px rgba(40,150,170,0.18);
+}
+
+/* Channel-pair pickers for multi-channel audio (Dante VSC, aggregate).
+   Inline-styled to read as a tightly-paired field, distinct from the
+   audio-row above it but visually related. */
+.audio-pan-row {
+  margin-top: 8px;
+  padding: 12px 16px;
+  background: var(--panel-2);
+  border: 1px dashed var(--accent);
+  border-radius: 10px;
+}
+.audio-pan-row .lbl {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+}
+.audio-pan-fields {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.audio-pan-fields input {
+  width: 64px;
+  text-align: center;
+  font-size: 14px;
+  padding: 8px 10px;
+  font-weight: 600;
+}
+.audio-pan-sep {
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 2px;
+}
+.audio-pan-row .hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.audio-pan-row code {
+  background: var(--panel-3, rgba(255,255,255,0.04));
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+
+/* Recovery card — sits in the left column under Overlays. Big
+   destructive action with a paragraph or two of explanation so the
+   user understands what they're doing before clicking. */
+.recovery-card {
+  /* Inherits .card padding + border. */
+}
+.recovery-lead {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.recovery-lead code {
+  background: var(--panel-3, rgba(255,255,255,0.04));
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+.recovery-btn {
+  /* Override .primary blue with a destructive red — this kills
+     processes, the visual weight should match. */
+  width: 100%;
+  margin: 6px 0 12px;
+  background: linear-gradient(180deg, #d44b3b 0%, #a8341f 100%);
+  border-color: #a8341f;
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.25);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+.recovery-btn:hover { filter: brightness(1.06); }
+.recovery-foot {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* Port-forwarding callout — sits right under the destination Address
+   field. Yellow because it's an info-level "you might miss this"
+   prompt, not an error. */
+.port-fwd-callout {
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  background: rgba(243, 196, 75, 0.10);
+  border-left: 3px solid #f3c44b;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Using Dante? help expandable — same shape as the port-fwd-help
+   details so the audio section reads consistently with the
+   destination section. */
+.dante-help {
+  margin-top: 10px;
+  padding: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dante-help > summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: none;
+  position: relative;
+}
+.dante-help > summary::-webkit-details-marker { display: none; }
+.dante-help > summary::after {
+  content: '＋';
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-weight: 400;
+}
+.dante-help[open] > summary::after { content: '−'; }
+.dante-help .help-body {
+  padding: 0 14px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.dante-help ol { padding-left: 20px; }
+.dante-help li { margin-bottom: 6px; }
+.dante-help a { color: var(--signal); text-decoration: underline; }
+
+/* SRT / RTMP SERVER: prefix on the receive-wizard summary. Reads as
+   a label tag rather than part of the prose. */
+.rw-prefix {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 7px;
+  background: rgba(78, 167, 255, 0.16);
+  color: var(--signal);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+
+/* Footer brand — Weird Machine wordmark, links to weirdmachine.org.
+   Falls back to a styled text wordmark when no logo PNG is dropped
+   at /static/weirdmachine-logo.png so end users never see a broken
+   image icon. */
+.footer-brand {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  opacity: 0.78;
+  transition: opacity 0.15s ease;
+  text-decoration: none;
+}
+.footer-brand:hover { opacity: 1; }
+.footer-logo {
+  height: 36px;
+  width: auto;
+  display: block;
+  /* Logo is a black-on-white drawing; invert for the dark UI. */
+  filter: invert(0.92);
+}
+.footer-logo-text {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.32em;
+  color: var(--text);
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border: 2px solid var(--text);
+  border-radius: 3px;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+.footer-credit {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 720px;
+  margin: 4px 0 8px;
+}
+.footer-credit a {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--muted);
+  text-underline-offset: 2px;
+}
+.footer-credit a:hover { text-decoration-color: var(--accent); }
+
+/* Audio Mixer card — split out from the old combined Source card
+   so the audio routing decisions read as a peer of Video Source
+   rather than as an afterthought tacked onto it. */
+.audio-mixer-card {
+  /* Inherits .card base; just need a bit of internal rhythm. */
+}
+
+/* alpha.31: VU meters above the disclaimer. Two rows (L/R) each
+   with a channel label, a canvas (drawn by app.js), and a numeric
+   dB readout. Sized to fit comfortably in the Audio Mixer card
+   without crowding the existing controls. */
+.audio-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.audio-meter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.audio-meter-label {
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+.audio-meter-canvas {
+  flex: 1;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 2px;
+}
+.audio-meter-db {
+  width: 46px;
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.audio-mixer-disclaimer {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: rgba(78, 167, 255, 0.08);
+  border-left: 3px solid var(--signal);
+  border-radius: 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.audio-mode-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.audio-mode-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.audio-mode-opt:hover { border-color: var(--accent); }
+.audio-mode-opt input[type="radio"] {
+  margin: 3px 0 0; flex: 0 0 auto; width: auto;
+}
+.audio-mode-opt:has(input:checked) {
+  border-color: var(--signal);
+  background: rgba(78, 167, 255, 0.10);
+}
+.audio-mode-label {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 13px;
+}
+.audio-mode-label strong { color: var(--text); font-weight: 700; }
+.audio-mode-sub {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.audio-custom {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.audio-mix-future {
+  margin: 14px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.audio-mix-future strong { color: var(--accent); }
+
+.audio-output-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.audio-output-row .lbl {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+  margin-right: 4px;
+}
+.audio-output-row .seg {
+  /* Reuse the destination card's seg-control look for visual
+     consistency, but as standalone labels (no parent .seg-control
+     wrapper since this is a flat 2-option choice). */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: border-color 0.15s ease;
+}
+.audio-output-row .seg:has(input:checked) {
+  border-color: var(--signal);
+  background: rgba(78, 167, 255, 0.10);
+  color: var(--text);
+}
+.audio-output-row .seg input[type="radio"] {
+  margin: 0; width: auto;
+}
+.hint-inline {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.pipe-only { margin-top: 12px; padding: 12px; border-top: 1px dashed var(--line); }
+.pipe-only .lbl {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.pipe-only input {
+  font-size: 13px;
+  padding: 9px 11px;
+}
+.pipe-examples {
+  list-style: none;
+  margin: 6px 0 12px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.pipe-examples li { padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.pipe-examples li:last-child { border-bottom: none; }
+.pipe-examples strong { color: var(--text); display: inline-block; min-width: 130px; }
+.pipe-examples code { color: var(--accent); }
+
+.relay-only {
+  margin-top: 12px;
+  padding: 14px;
+  border-top: 1px dashed var(--line);
+  background: var(--panel-2);
+  border-radius: 0 0 8px 8px;
+}
+.relay-url-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.relay-url-row input[readonly] {
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--accent);
+  cursor: text;
+}
+.relay-config-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.relay-config-row .inline { display: block; }
+.relay-config-row .lbl {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+}
+.relay-config-row input { width: 100%; }
+
+/* ============= DESTINATION WIZARD ====================== */
+.dest-wizard { display: flex; flex-direction: column; gap: 12px; }
+.dest-row { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+.dest-or {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; color: var(--muted-2);
+  letter-spacing: 0.08em; text-transform: uppercase;
+  margin: 4px 0;
+}
+.dest-or::before, .dest-or::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+.dropzone.compact {
+  padding: 14px;
+  text-align: center;
+}
+.xml-loaded-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 200, 110, 0.08);
+  border: 1px solid rgba(0, 200, 110, 0.3);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.xml-loaded-row .loaded-label {
+  color: var(--muted); text-transform: uppercase;
+  font-size: 10px; letter-spacing: 0.08em;
+}
+.xml-loaded-row strong { flex: 1; color: var(--text); }
+.btn-link {
+  background: transparent; border: none; padding: 4px 8px;
+  color: var(--accent); cursor: pointer; font-size: 11px;
+  text-decoration: underline;
+}
+.btn-link:hover { opacity: 0.8; }
+
+.dest-toggles {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  padding: 10px 0;
+}
+
+/* Session 12 — destination-type segmented control. The picker that
+   drives the bidirectional patchbay (Remote ATEM/Decoder vs Local
+   DeckLink) — promoted with accent-tinted styling because it
+   reframes how the operator thinks about the whole pipeline.
+   Alpha.23 made this more prominent after operator feedback: the
+   original styling was too quiet, and the destination type is
+   actually a top-level mode decision, not a minor toggle. */
+.dest-type-row {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 14px 16px;
+  margin: 4px 0 14px;
+  background: linear-gradient(180deg, rgba(255,138,56,0.10), rgba(255,138,56,0.04));
+  border: 1px solid rgba(255,138,56,0.35);
+  border-radius: 10px;
+}
+.dest-type-label {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.10em; text-transform: uppercase;
+  color: var(--accent);
+}
+.dest-type-row .seg-control.dest-type-seg-control {
+  flex: 0 0 auto;
+  padding: 3px;
+  background: var(--panel-2);
+  border-color: rgba(255,138,56,0.30);
+  font-size: 13px;
+}
+.dest-type-row .seg-control.dest-type-seg-control .seg span {
+  padding: 8px 14px;
+  font-weight: 500;
+}
+.dest-type-row .seg input:disabled + span {
+  opacity: 0.4; cursor: not-allowed;
+}
+.dest-type-help {
+  font-size: 12px; color: var(--warn, #d9a04b);
+  margin: -6px 0 12px;
+}
+.dest-decklink-body {
+  display: flex; flex-direction: column; gap: 12px;
+  padding-bottom: 4px;
+}
+.dest-decklink-body select {
+  /* match the look of other destination-card selects (audio, etc.) */
+  width: 100%; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text);
+}
+.dest-decklink-body select option {
+  /* dropdown popup contrast on Windows WebView2 — alpha.18 pattern */
+  background-color: #0e0f12; color: #e6e6ea;
+}
+.dest-decklink-body .seg-btn {
+  align-self: flex-start;
+  padding: 6px 14px; font-size: 12px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--text); cursor: pointer;
+}
+.dest-decklink-body .seg-btn:hover { background: var(--panel-3, #2a2c33); }
+.toggle-group {
+  display: flex; align-items: center; gap: 10px;
+}
+.toggle-label {
+  font-size: 10px; color: var(--muted);
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.seg-control {
+  display: inline-flex;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2px;
+}
+.seg-control .seg {
+  position: relative; margin: 0; cursor: pointer;
+}
+.seg-control .seg input {
+  position: absolute; opacity: 0; pointer-events: none;
+}
+.seg-control .seg span {
+  display: block;
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px; font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.seg-control .seg input:checked + span {
+  background: var(--accent);
+  color: var(--bg);
+}
+.seg-control .seg:hover input:not(:checked) + span {
+  color: var(--text);
+}
+
+/* Phase 8b: quality segmented control — wider segments with a small
+   bitrate sub-line under the High/Medium/Low label. */
+.seg-control-quality .seg.seg-quality span {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 12px;
+  line-height: 1.1;
+}
+.seg-control-quality .seg.seg-quality span strong {
+  font-size: 12px; font-weight: 600;
+}
+.seg-control-quality .seg.seg-quality span em {
+  font-size: 10px; font-style: normal;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.seg-control-quality .seg.seg-quality input:checked + span em {
+  color: var(--bg);
+  opacity: 0.8;
+}
+.seg-empty {
+  padding: 8px 12px;
+  font-size: 11px; color: var(--muted);
+  font-style: italic;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px; color: var(--muted);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.format-warning {
+  display: flex; gap: 14px;
+  padding: 14px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.45);
+  border-radius: 10px;
+}
+.warning-icon {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 196, 0, 0.25);
+  color: #ffd24d;
+  font-weight: 800; font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
+.warning-body { flex: 1; min-width: 0; }
+.format-label {
+  display: block;
+  font-size: 12px; color: var(--text);
+  letter-spacing: 0.03em;
+  margin-bottom: 8px; font-weight: 700;
+}
+.format-pick-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+.format-select {
+  /* Bigger, more prominent than other selects since matching this
+     is the difference between "stream works" and "ATEM shows black." */
+  font-size: 15px;
+  font-weight: 600;
+  padding: 10px 12px;
+  height: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.format-decoded {
+  display: flex; align-items: center; justify-content: center;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.format-explainer {
+  margin: 0 0 8px;
+  font-size: 12px; color: var(--muted);
+  line-height: 1.5;
+}
+.format-explainer strong { color: var(--text); }
+.format-warning .hint { margin: 4px 0 6px; }
+.format-help, .port-fwd-help, .dest-advanced { font-size: 12px; }
+.format-help summary, .port-fwd-help summary, .dest-advanced summary {
+  cursor: pointer; padding: 4px 0; color: var(--accent);
+}
+.format-help[open] summary, .port-fwd-help[open] summary, .dest-advanced[open] summary {
+  margin-bottom: 8px;
+}
+.help-body { padding: 4px 0 6px; line-height: 1.5; }
+.help-body p { margin: 8px 0; }
+.help-body ol { padding-left: 20px; }
+.help-body ol li { margin: 6px 0; }
+.help-body code {
+  background: var(--panel-2); padding: 1px 5px;
+  border-radius: 3px; font-size: 11px;
+}
+
+.dest-summary {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dest-summary input[readonly] {
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px; color: var(--accent);
+  background: var(--panel);
+}
+
+.advanced-body {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 8px 0;
+}
+.advanced-body textarea {
+  width: 100%; min-height: 60px;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 11px;
+}
+
+.audio-row.single { grid-template-columns: 1fr; }
+
+/* ============= NDI INLINE HINT ========================== */
+.hint-panel.ndi-hint {
+  margin-top: 12px;
+  padding: 14px;
+  background: rgba(91, 192, 222, 0.06);
+  border: 1px solid rgba(91, 192, 222, 0.35);
+  border-radius: 10px;
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ndi-hint-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.ndi-hint-steps {
+  margin: 6px 0 12px;
+  padding-left: 20px;
+}
+.ndi-hint-steps li { margin: 4px 0; }
+.ndi-hint button.primary {
+  margin-top: 4px;
+  width: 100%;
+}
+
+/* ============= TABS ====================================== */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--signal); }
+.tab-panel { animation: fadeIn 0.18s ease; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.paste-status {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(46, 204, 113, 0.08);
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  border-radius: 7px;
+  font-size: 12px;
+  color: #b5e8c8;
+}
+.paste-status.error { background: rgba(255, 77, 77, 0.10); border-color: rgba(255, 77, 77, 0.45); color: #ffb6a6; }
+
+/* Helper line below an input — used in the Destination wizard's Address
+   field to call out the port-matters gotcha and the expected URL shape.
+   Renders smaller and lower-contrast than the label so it doesn't fight
+   the input visually. */
+.field-help {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted, #9aa1ad);
+  font-weight: 400;
+}
+.field-help code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: #b6e1c1;
+}
+.field-help strong {
+  color: #e6e6ea;
+  font-weight: 600;
+}
+
+.dropzone {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px;
+  padding: 22px 16px;
+  background: var(--panel-2);
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: center;
+}
+.dropzone:hover, .dropzone.drag { border-color: var(--signal); background: rgba(78,167,255,0.06); }
+.dropzone strong { font-size: 13px; color: var(--text); }
+.dropzone .hint { margin: 0; }
+
+pre {
+  background: #050709;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #c8d2e0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+/* Log card with collapsible disclosure */
+.log-pane-card pre { margin-top: 4px; }
+
+/* ============= RECEIVE-STREAM MINI-WIZARD (Phase 8b) =====
+   Closed state: high-contrast green CTA button — "you can do
+   the OPPOSITE of pushing here" needs to read as a peer of the
+   primary Start Stream button, not a quiet text link. Open state:
+   sheds the bright background and behaves like a config panel. */
+.receive-wizard {
+  margin: 14px 0 0;
+  background: var(--panel-2, #1d2030);
+  /* Thicker green-accent left border + outline so the wizard reads
+     as a distinct, important alternate workflow without the whole
+     panel screaming for attention. */
+  border: 1px solid var(--line, #2a2d36);
+  border-left: 4px solid #50c878;
+  border-radius: 9px;
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.18) inset;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.receive-wizard:not([open]) {
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.12) 0%,
+    rgba(80, 200, 120, 0.04) 30%,
+    var(--panel-2, #1d2030) 100%);
+  border-color: rgba(80, 200, 120, 0.35);
+  border-left-color: #50c878;
+}
+.receive-wizard:not([open]):hover {
+  border-color: rgba(80, 200, 120, 0.6);
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.35) inset,
+              0 4px 18px rgba(80, 200, 120, 0.15);
+}
+/* Active state — when the receiver is actually running, the wizard
+   summary glows so the user has a second visual confirmation matching
+   the top-of-page banner. */
+.receive-wizard.is-running {
+  border-color: rgba(80, 200, 120, 0.7);
+  border-left-color: #50c878;
+  box-shadow: 0 0 0 1px rgba(80, 200, 120, 0.45) inset,
+              0 0 22px rgba(80, 200, 120, 0.25);
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.18) 0%,
+    rgba(80, 200, 120, 0.06) 60%,
+    var(--panel-2, #1d2030) 100%);
+}
+.receive-wizard.is-running summary::after {
+  content: "● LIVE";
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(80, 200, 120, 0.25);
+  color: #cdf2d8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  animation: receiver-banner-pulse 2.2s ease-in-out infinite;
+}
+.receive-wizard summary {
+  cursor: pointer;
+  padding: 14px 18px;
+  display: flex; align-items: center; gap: 12px;
+  font-size: 14px;
+  color: var(--text, #e6e6ea);
+  list-style: none;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.receive-wizard:not([open]) summary {
+  color: var(--text, #e6e6ea);
+}
+.receive-wizard summary::-webkit-details-marker { display: none; }
+.rw-icon {
+  display: inline-block;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
+  text-align: center; line-height: 24px;
+  font-size: 13px; font-weight: 700;
+  transition: transform 0.2s;
+}
+.receive-wizard:not([open]) .rw-icon {
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
+}
+.receive-wizard[open] .rw-icon { transform: rotate(180deg); }
+.rw-title { font-weight: inherit; }
+.rw-body {
+  padding: 4px 16px 16px;
+  display: flex; flex-direction: column; gap: 16px;
+  border-top: 1px solid var(--line, #2a2d36);
+}
+.rw-protocol, .rw-url, .rw-apps, .rw-start {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding-top: 12px;
+}
+.rw-step {
+  flex: 0 0 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--panel, #161821);
+  color: var(--accent, #5a8aff);
+  border: 1px solid var(--line, #2a2d36);
+  text-align: center; line-height: 22px;
+  font-size: 11px; font-weight: 700;
+}
+.rw-step-label {
+  display: block;
+  font-size: 11px; color: var(--muted, #9aa1ad);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.rw-step-content { flex: 1; min-width: 0; }
+.rw-protocol { align-items: center; }
+.rw-protocol .rw-step-label { margin: 0; }
+.rw-url-row {
+  display: flex; gap: 8px;
+}
+.rw-url-row input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  color: #b6e1c1;
+  font-family: monospace;
+  font-size: 12px;
+}
+.rw-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+  line-height: 1.5;
+}
+.rw-hint code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 10.5px; color: #b6e1c1;
+}
+.rw-app-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  color: var(--text, #e6e6ea);
+  font-size: 12px;
+}
+.rw-app-body {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted, #9aa1ad);
+}
+.rw-app-body strong { color: var(--text, #e6e6ea); }
+.rw-app-body code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.rw-app-body ol { margin: 0; padding-left: 20px; }
+.rw-app-body li { margin-bottom: 5px; }
+
+/* Step 2 sub-toggle: "On my network" vs "Different network". Reuses
+   the existing .seg-control look but is its own row so it sits above
+   either the LAN or public-URL block. */
+.rw-where {
+  display: inline-flex; gap: 6px;
+  margin: 0 0 10px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 8px;
+}
+.rw-where .seg {
+  display: inline-flex; align-items: center;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--muted, #9aa1ad);
+  transition: background 0.15s, color 0.15s;
+}
+.rw-where .seg input { display: none; }
+.rw-where .seg:has(input:checked) {
+  background: rgba(98, 184, 255, 0.18);
+  color: #e6f1ff;
+  border: 1px solid rgba(98, 184, 255, 0.45);
+  margin: -1px;
+}
+.rw-where .seg:hover:not(:has(input:checked)) {
+  color: var(--text, #e6e6ea);
+}
+
+/* Public-URL block (Different network sub-tab). Mostly inherits from
+   the LAN block — the IP row uses the same .rw-ip-row treatment — but
+   the Detect button needs a slight accent so it reads as the
+   primary action. */
+.rw-public-block { margin-top: 4px; }
+.rw-public-detect {
+  white-space: nowrap;
+}
+
+/* Port-forward checklist disclosed under the public URL. The
+   <details> shell is intentionally plain so the contained checklist
+   reads as a configuration document, not a UI panel. */
+.rw-portforward {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 200, 100, 0.05);
+  border: 1px solid rgba(255, 200, 100, 0.22);
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+.rw-portforward > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #ffd28a;
+  list-style: none;
+  user-select: none;
+}
+.rw-portforward > summary::-webkit-details-marker { display: none; }
+.rw-portforward > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.rw-portforward[open] > summary::before {
+  transform: rotate(90deg);
+}
+.rw-portforward-body {
+  margin-top: 10px;
+}
+.rw-portforward-checklist {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 11.5px;
+}
+.rw-portforward-checklist li {
+  display: contents;
+}
+.rw-portforward-checklist .rw-pf-key {
+  color: var(--muted, #9aa1ad);
+  font-weight: 600;
+  text-align: right;
+}
+.rw-portforward-checklist code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #b6e1c1;
+  font-size: 11px;
+  word-break: break-all;
+}
+.rw-pf-template-row {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 8px;
+}
+
+/* Advanced settings disclosure under step 2's LAN URL row. Holds the
+   port + key + passphrase inputs. Visually similar to .rw-portforward
+   so the two disclosures read as a pair. */
+.rw-advanced {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(98, 184, 255, 0.04);
+  border: 1px solid rgba(98, 184, 255, 0.18);
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+.rw-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #cfe3ff;
+  list-style: none;
+  user-select: none;
+}
+.rw-advanced > summary::-webkit-details-marker { display: none; }
+.rw-advanced > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.rw-advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+.rw-advanced-body {
+  margin-top: 10px;
+}
+.rw-advanced-row {
+  display: flex; gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rw-advanced-field {
+  display: flex; flex-direction: column;
+  gap: 3px;
+  min-width: 130px;
+}
+.rw-advanced-key {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted, #9aa1ad);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rw-advanced-opt {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-style: italic;
+  opacity: 0.7;
+}
+.rw-advanced-field input {
+  padding: 6px 9px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--text, #e6e6ea);
+  font-family: monospace;
+  font-size: 12px;
+}
+.rw-advanced-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rw-advanced-actions {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 6px;
+}
+.btn-tertiary {
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--muted, #9aa1ad);
+  font-size: 11px;
+  cursor: pointer;
+}
+.btn-tertiary:hover:not(:disabled) {
+  color: var(--text, #e6e6ea);
+  border-color: var(--muted, #9aa1ad);
+}
+.btn-tertiary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Protocol-mismatch alert at top of step 3 — fires when the user
+   picks an RTMP-only app (BMD Camera, DJI) while SRT is selected in
+   step 1. The button switches the wizard protocol so step 2's URL
+   matches the URL shown in the app instructions below. */
+.rw-app-mismatch {
+  display: flex; flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  background: rgba(255, 200, 100, 0.10);
+  border: 1px solid rgba(255, 200, 100, 0.45);
+  border-radius: 6px;
+  color: #ffd28a;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.rw-app-mismatch-msg {
+  flex: 1 1 280px;
+}
+.rw-app-mismatch-btn {
+  padding: 6px 14px;
+  background: #ffc452;
+  border: none;
+  border-radius: 5px;
+  color: #1a1814;
+  font-weight: 600;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rw-app-mismatch-btn:hover:not(:disabled) {
+  background: #ffd066;
+}
+.rw-app-mismatch-btn:disabled {
+  background: rgba(255, 200, 100, 0.35);
+  color: rgba(26, 24, 20, 0.55);
+  cursor: not-allowed;
+}
+.rw-app-mismatch-hint {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+
+/* Inline alert at the top of the per-app instruction body — surfaces
+   when the user is in "Different network" mode so they remember the
+   pasted URL goes via their public IP + needs port-forwarding done. */
+.rw-app-network-badge {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  background: rgba(255, 200, 100, 0.10);
+  border-left: 3px solid rgba(255, 200, 100, 0.55);
+  border-radius: 4px;
+  color: #ffd28a;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Top-of-monitor banner that announces an active RTMP/SRT receiver.
+   Sits between the preview frame and the main Start/Stop controls so
+   it's literally the first thing the user sees when looking at the
+   monitor area. Color and pulse mirror the wizard's "LIVE" badge to
+   reinforce that the two indicators are about the same thing. */
+.receiver-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+  padding: 11px 14px;
+  background: linear-gradient(90deg,
+    rgba(80, 200, 120, 0.22) 0%,
+    rgba(80, 200, 120, 0.08) 80%);
+  border: 1px solid rgba(80, 200, 120, 0.55);
+  border-left: 4px solid #50c878;
+  border-radius: 8px;
+  color: #e2f7e7;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.receiver-banner.is-waiting {
+  background: linear-gradient(90deg,
+    rgba(255, 200, 80, 0.22) 0%,
+    rgba(255, 200, 80, 0.06) 80%);
+  border-color: rgba(255, 200, 80, 0.55);
+  border-left-color: #ffc452;
+  color: #ffeac4;
+}
+.receiver-banner.is-error {
+  background: linear-gradient(90deg,
+    rgba(220, 80, 80, 0.22) 0%,
+    rgba(220, 80, 80, 0.05) 80%);
+  border-color: rgba(220, 80, 80, 0.55);
+  border-left-color: #dc5050;
+  color: #ffd7d7;
+}
+.receiver-banner-dot {
+  flex: 0 0 auto;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: #50c878;
+  box-shadow: 0 0 0 0 rgba(80, 200, 120, 0.55);
+  /* Default = solid-receiving = faster green pulse. Slowed down +
+     larger radius for the banner version vs the inline wizard pulse
+     so it reads as the "primary" indicator at the top of the page. */
+  animation: receiver-banner-pulse-live 1.1s ease-in-out infinite;
+}
+.receiver-banner.is-waiting .receiver-banner-dot {
+  background: #ffc452;
+  box-shadow: 0 0 0 0 rgba(255, 200, 80, 0.55);
+  /* Slower, smaller pulse to convey "ready, but idle" — distinct from
+     the active "frames flowing" rhythm. */
+  animation: receiver-banner-pulse-waiting 1.7s ease-in-out infinite;
+}
+.receiver-banner.is-error .receiver-banner-dot {
+  background: #dc5050;
+  animation: none;
+}
+@keyframes receiver-banner-pulse-live {
+  0%   { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0.65); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 14px rgba(80, 200, 120, 0);    transform: scale(1.12); }
+  100% { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0);    transform: scale(1); }
+}
+@keyframes receiver-banner-pulse-waiting {
+  0%   { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0.55); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 11px rgba(255, 200, 80, 0);    transform: scale(1.05); }
+  100% { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0);    transform: scale(1); }
+}
+/* Generic alias kept for the wizard summary's ::after "● LIVE" badge
+   so it can pulse with the same timing as the banner. */
+@keyframes receiver-banner-pulse {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 1; }
+}
+.receiver-banner-body {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.receiver-banner-body strong {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.receiver-banner-body span {
+  font-size: 11.5px;
+  opacity: 0.92;
+}
+.receiver-banner-body code {
+  margin-top: 2px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 2px 6px; border-radius: 3px;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: #b6e1c1;
+  align-self: flex-start;
+  word-break: break-all;
+  max-width: 100%;
+}
+.receiver-banner-stop {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.receiver-banner-stop:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.rw-start-row {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;
+}
+.rw-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  background: rgba(127, 200, 255, 0.08);
+  border: 1px solid rgba(127, 200, 255, 0.35);
+  color: #d6eaff;
+}
+.rw-status.is-listening {
+  background: rgba(80, 200, 120, 0.12);
+  border-color: rgba(80, 200, 120, 0.45);
+  color: #cdf2d8;
+}
+.rw-status.is-error {
+  background: rgba(220, 80, 80, 0.14);
+  border-color: rgba(220, 80, 80, 0.5);
+  color: #ffd7d7;
+}
+.rw-status.is-pending {
+  background: rgba(255, 200, 80, 0.10);
+  border-color: rgba(255, 200, 80, 0.4);
+  color: #ffeac4;
+}
+.rw-status code {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 1px 6px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.rw-status .rw-status-title {
+  font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* Animated dot inside rw-status. Two states:
+   - rw-pulse-waiting (yellow, slow pulse): listener bound, no encoder
+     pushing yet. Conveys "I'm here, just waiting for you to connect."
+   - rw-pulse-live (green, faster pulse): encoder connected, frames
+     are actively flowing. Conveys "everything is working, leave it
+     alone." */
+.rw-pulse {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.rw-pulse-waiting {
+  background: #ffc452;
+  box-shadow: 0 0 0 0 rgba(255, 200, 80, 0.55);
+  animation: rw-pulse-waiting 1.6s ease-in-out infinite;
+}
+.rw-pulse-live {
+  background: #50c878;
+  box-shadow: 0 0 0 0 rgba(80, 200, 120, 0.55);
+  animation: rw-pulse-live 1.1s ease-in-out infinite;
+}
+@keyframes rw-pulse-waiting {
+  0%   { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0.55); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 9px  rgba(255, 200, 80, 0);    transform: scale(1.04); }
+  100% { box-shadow: 0 0 0 0    rgba(255, 200, 80, 0);    transform: scale(1); }
+}
+@keyframes rw-pulse-live {
+  0%   { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0.65); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 11px rgba(80, 200, 120, 0);    transform: scale(1.10); }
+  100% { box-shadow: 0 0 0 0    rgba(80, 200, 120, 0);    transform: scale(1); }
+}
+.rw-ip-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rw-ip-label {
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+  white-space: nowrap;
+}
+.rw-ip-pick, .rw-ip-row input#rw-ip-manual {
+  padding: 6px 9px;
+  background: var(--bg, #0e0f12);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 5px;
+  color: var(--text, #e6e6ea);
+  font-family: monospace;
+  font-size: 12px;
+  min-width: 160px;
+}
+.rw-ip-row input#rw-ip-manual.needs-input {
+  border-color: rgba(255, 200, 80, 0.6);
+  background: rgba(255, 200, 80, 0.08);
+}
+.rw-ip-status {
+  font-size: 11px;
+  color: var(--muted, #9aa1ad);
+}
+.rw-ip-status.is-warning {
+  color: #ffc452;
+}
+
+/* ============= USER GUIDE (Phase 8b) ===================== */
+.user-guide {
+  max-width: 1080px;
+  margin: 32px auto 16px;
+  padding: 24px 28px;
+  background: var(--panel, #161821);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 12px;
+}
+.user-guide-title {
+  margin: 0 0 18px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text, #e6e6ea);
+  letter-spacing: 0.02em;
+}
+.guide-flow {
+  margin: 0 0 24px;
+  padding: 12px 8px;
+  background: var(--bg, #0e0f12);
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+}
+.guide-flow svg {
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+}
+.guide-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+@media (max-width: 720px) {
+  .guide-grid { grid-template-columns: 1fr; }
+}
+.guide-card {
+  background: var(--panel-2, #1d2030);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+.guide-card h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #e6e6ea);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.guide-facts {
+  margin: 0; padding-left: 18px;
+  color: var(--muted, #9aa1ad);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.guide-facts strong { color: var(--text, #e6e6ea); font-weight: 600; }
+.guide-facts code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.guide-facts li.warn { color: #ffb6a6; margin-top: 6px; }
+.faq-item {
+  border-top: 1px solid var(--line, #2a2d36);
+  padding: 8px 0;
+}
+.faq-item:first-of-type { border-top: 0; padding-top: 4px; }
+.faq-item summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text, #e6e6ea);
+  font-weight: 500;
+  padding: 4px 0;
+  list-style: none;
+  position: relative;
+  padding-left: 16px;
+}
+.faq-item summary::-webkit-details-marker { display: none; }
+.faq-item summary::before {
+  content: "▸";
+  position: absolute; left: 0; top: 4px;
+  color: var(--muted, #9aa1ad);
+  font-size: 10px;
+  transition: transform 0.15s;
+}
+.faq-item[open] summary::before { transform: rotate(90deg); }
+.faq-item p {
+  margin: 4px 0 8px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted, #9aa1ad);
+}
+.faq-item code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; color: #b6e1c1;
+}
+.guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line, #2a2d36);
+}
+.guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--panel-2, #1d2030);
+  border: 1px solid var(--line, #2a2d36);
+  border-radius: 7px;
+  color: var(--text, #e6e6ea);
+  font-size: 12px;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.guide-link:hover {
+  background: var(--accent, #5a8aff);
+  color: var(--bg, #0e0f12);
+  border-color: var(--accent, #5a8aff);
+}
+.guide-link span { font-size: 13px; }
+
+/* ============= FOOTER ==================================== */
+.footer {
+  text-align: center;
+  color: var(--muted);
+  padding: 18px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 4px;
+}
+
+@media (max-width: 1080px) {
+  .grid { grid-template-columns: 1fr; }
+  .topbar-inner { flex-direction: column; align-items: flex-start; }
+  .status-block { width: 100%; justify-content: space-between; }
+}
+@media (max-width: 880px) {
+  .topbar-inner { padding: 16px 20px; }
+  .brand-mark { width: 48px; height: 48px; }
+  .title-block h1 { font-size: 24px; }
+  .hero-cols { grid-template-columns: 1fr; gap: 18px; }
+  .hero-headline { font-size: 16px; }
+  .telemetry-grid { grid-template-columns: repeat(2, 1fr); }
+}

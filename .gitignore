@@ -1,0 +1,58 @@
+# Real-config files — live stream keys and ATEM hostnames live here.
+# config/example.xml is the placeholder users copy from. Anything else
+# under config/ stays out of source control.
+config/*.xml
+!config/example.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+
+# Build / dist (PyInstaller, etc.) — tracked spec files + build.py live
+# under build/, but downloaded ffmpeg, the build venv, and PyInstaller
+# work/output dirs are all generated artefacts.
+build/.cache/
+build/.venv/
+build/.work/
+build/dist/
+dist/
+*.spec.bak
+
+# Runtime artefacts
+/tmp/bmd/
+*.pcap
+*.pcapng
+*.log
+
+# Tauri (Rust shell) build artefacts — Phase 0+. The src-tauri/ source
+# tree is tracked, but Cargo build output and Tauri's generated schemas
+# are not.
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/Cargo.lock.bak
+# FFmpeg sidecar — downloaded by CI before `cargo tauri build` so the
+# bundled .app/.exe carries it. Local dev runs find FFmpeg via PATH.
+# The README.txt placeholder is committed (load-bearing for the
+# resources glob); only the actual ffmpeg{.exe} binaries are ignored.
+src-tauri/sidecar/ffmpeg
+src-tauri/sidecar/ffmpeg.exe
+
+# Stand-alone tools — each has its own Cargo build, but the build
+# artefacts and the per-tool Cargo.lock (no shared workspace lock)
+# stay out of source control.
+tools/*/target/
+tools/*/Cargo.lock
+.claude/

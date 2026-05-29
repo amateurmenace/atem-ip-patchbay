@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example streaming-service XML for ATEM IP Patchbay.
+
+  Copy this file to "<your-name>.xml" in the same directory and fill in
+  your real ATEM (or Streaming Bridge) host and stream key. Anything
+  matching "config/*.xml" is gitignored except this example, so your
+  real keys will not be committed.
+
+  The ATEM Mini built-in Streaming Bridge mode listens on UDP 1935 by
+  default. If you're targeting a Web Presenter or a third-party SRT
+  receiver, point the <url> at that instead.
+-->
+<streaming>
+	<service>
+		<name>Example ATEM Service</name>
+		<key>aaaa-bbbb-cccc-dddd</key>
+		<servers>
+			<server group="Default">
+				<name>RTMP</name>
+				<url>rtmp://your-atem-or-streaming-bridge.example.com:1935/app</url>
+			</server>
+			<server group="Default">
+				<name>SRT</name>
+				<url>srt://your-atem-or-streaming-bridge.example.com:1935</url>
+			</server>
+		</servers>
+		<profiles default="Streaming High">
+			<profile>
+				<name>Streaming High</name>
+				<low-latency/>
+				<config resolution="720p" fps="60" codec="H264">
+					<bitrate>6000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="720p" fps="30" codec="H264">
+					<bitrate>4000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="60" codec="H264">
+					<bitrate>9000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="30" codec="H264">
+					<bitrate>6000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+			</profile>
+			<profile>
+				<name>Streaming Medium</name>
+				<low-latency/>
+				<config resolution="720p" fps="60" codec="H264">
+					<bitrate>4500000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="720p" fps="30" codec="H264">
+					<bitrate>3000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="60" codec="H264">
+					<bitrate>7600000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="30" codec="H264">
+					<bitrate>4500000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+			</profile>
+			<profile>
+				<name>Streaming Low</name>
+				<low-latency/>
+				<config resolution="720p" fps="60" codec="H264">
+					<bitrate>2250000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="720p" fps="30" codec="H264">
+					<bitrate>1500000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="60" codec="H264">
+					<bitrate>4500000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+				<config resolution="1080p" fps="30" codec="H264">
+					<bitrate>3000000</bitrate>
+					<audio-bitrate>128000</audio-bitrate>
+					<keyframe-interval>2</keyframe-interval>
+				</config>
+			</profile>
+		</profiles>
+	</service>
+</streaming>

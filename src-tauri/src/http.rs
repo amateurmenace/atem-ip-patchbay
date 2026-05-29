@@ -1,0 +1,1204 @@
+use anyhow::{anyhow, Result};
+use axum::{
+    body::Body,
+    extract::{Query, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Response},
+    routing::{get, post},
+    Router,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
+
+use crate::fleet::EncoderFleet;
+use crate::preview::Preview;
+use crate::state::EncoderState;
+use crate::streamer::Streamer;
+
+/// Shared application state handed to every Axum route. Holds the
+/// EncoderFleet (the new multi-tile abstraction added in alpha.15)
+/// AND tile-0 aliases of its components for backward compatibility
+/// with the existing handler bodies — every handler today reads
+/// `state.encoder`, `state.streamer`, `state.preview` as if they
+/// were singletons, which they effectively still are when only
+/// tile 0 is active.
+///
+/// Future commits will progressively rewrite handlers to take a
+/// `Path(idx): Path<u8>` and use `state.fleet.tile(idx)` directly
+/// — at which point the legacy fields can be removed. For now the
+/// dual representation keeps the diff small and the existing UI
+/// flow unchanged.
+#[derive(Clone)]
+pub struct HttpAppState {
+    pub fleet: Arc<EncoderFleet>,
+    pub encoder: Arc<EncoderState>,
+    pub streamer: Arc<Streamer>,
+    pub preview: Arc<Preview>,
+}
+
+impl HttpAppState {
+    /// Construct from a freshly-built fleet — populates the legacy
+    /// tile-0-alias fields automatically. Panics if the fleet has
+    /// zero tiles (which the fleet constructor guarantees never
+    /// happens — TILE_COUNT is a compile-time const ≥ 1).
+    pub fn from_fleet(fleet: Arc<EncoderFleet>) -> Self {
+        Self::for_tile(&fleet, 0).expect("fleet must always have at least tile 0")
+    }
+
+    /// Construct a per-tile HttpAppState — the `encoder` / `streamer`
+    /// / `preview` fields point at THIS tile's components, not
+    /// tile 0's. Used by the router to mount a copy of the API sub-
+    /// router under `/api/i/N` for each tile, each mount carrying
+    /// its own State so handlers automatically dispatch to the
+    /// right tile without needing to read a path parameter.
+    /// Returns None if `idx` is out of range.
+    pub fn for_tile(fleet: &Arc<EncoderFleet>, idx: u8) -> Option<Self> {
+        let tile = fleet.tile(idx)?;
+        Some(HttpAppState {
+            encoder: tile.encoder.clone(),
+            streamer: tile.streamer.clone(),
+            preview: tile.preview.clone(),
+            fleet: fleet.clone(),
+        })
+    }
+}
+
+/// Bind a TCP listener on the requested port, walking forward up to nine
+/// adjacent ports if the first is taken — same fallback behavior as
+/// the v0.1.0 Python server (commit 607271d). Returns the bound port +
+/// listener.
+pub async fn bind_with_walk(start_port: u16) -> Result<(u16, TcpListener)> {
+    let mut last_err: Option<std::io::Error> = None;
+    for offset in 0..10 {
+        let port = start_port + offset;
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((port, listener)),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(anyhow!(
+        "could not bind HTTP API on TCP {start_port}-{}: {}",
+        start_port + 9,
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no error".into())
+    ))
+}
+
+/// Build the per-tile API sub-router. Routes register at paths
+/// WITHOUT the `/api/` prefix (e.g. `/state`, `/start`) so the
+/// outer router can mount this sub-tree under either `/api/i/N`
+/// (per-tile, with that tile's HttpAppState baked in via
+/// `.with_state(...)`) or `/api` (alias for tile 0).
+///
+/// Returns `Router<HttpAppState>` — state is unset; caller calls
+/// `.with_state(tile_state)` per mount.
+fn tile_api_routes() -> Router<HttpAppState> {
+    Router::new()
+        .route("/state", get(api_state))
+        .route("/audio-levels", get(api_audio_levels))
+        .route("/lan-ip", get(api_lan_ip))
+        .route("/lan-ips", get(api_lan_ips))
+        .route("/preview", get(api_preview))
+        .route("/preview/start", post(api_preview_start))
+        .route("/preview/stop", post(api_preview_stop))
+        .route("/log", get(api_log))
+        .route("/devices", get(api_devices))
+        .route("/decklink-outputs", get(api_decklink_outputs))
+        .route("/discover", get(api_discover))
+        .route("/ndi-senders", get(api_ndi_senders))
+        .route("/omt-senders", get(api_omt_senders))
+        .route("/omt-output", post(api_omt_output))
+        .route("/open-net-diag", post(api_open_net_diag))
+        .route("/start", post(api_start))
+        .route("/stop", post(api_stop))
+        .route("/kill-orphans", post(api_kill_orphans))
+        .route("/settings", post(api_settings))
+        .route("/load_xml", post(api_load_xml))
+        .route("/load_xml_text", post(api_load_xml_text))
+        .route("/services/clear", post(api_clear_services))
+        .route("/destination/paste", post(api_destination_paste_stub))
+}
+
+/// Build the Axum router that drives the existing JS UI. Takes the
+/// EncoderFleet directly so the API routes can be mounted once per
+/// tile under `/api/i/:idx/*`, each mount carrying its own
+/// HttpAppState whose encoder/streamer/preview point at that tile's
+/// components. The `/api/*` alias is mounted last and resolves to
+/// tile 0 for backward compatibility with the existing single-
+/// source UI.
+///
+/// `static_dir` is the on-disk path to `bmd_emulator/static/` (or
+/// its bundled equivalent inside the .app's Resources/).
+pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
+    // Static-file path mount — must come before nest_service('/') so the
+    // /static/* prefix routes win over the index fallback. Wrap with
+    // a no-cache layer because the WebView (and most browsers without
+    // an explicit Cache-Control) will heuristically cache JS/CSS for
+    // ~10% of (now - last-modified). After a few minutes that's long
+    // enough to make every dev-loop edit invisible until force-reload.
+    // Plain Cmd-R now picks up changes.
+    use tower_layer::Layer;
+    let static_service = SetResponseHeaderLayer::overriding(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    )
+    .layer(ServeDir::new(&static_dir));
+    // alpha.16: the 2x2 grid multiview experiment (alpha.15) was
+    // pulled — iframes were too cramped to be operationally useful.
+    // The new multi-source story is multi-instance (Phase A via
+    // spawn_instance) + a small monitor window per instance that
+    // shows preview + bitrate / status in a tile the operator
+    // positions manually like a video-switcher multiview. Root `/`
+    // serves the full single-source UI; the monitor window opens
+    // at /static/monitor.html via a Tauri command.
+    let root_path = static_dir.join("index.html");
+
+    // Build the tile-scoped API sub-router once; clone + mount per-
+    // tile below. The sub-router has no state baked in yet — each
+    // mount calls .with_state(tile_state) to finalize.
+    let tile_routes_template = tile_api_routes();
+
+    let mut router = Router::new()
+        // Re-read index.html on every request rather than caching a copy
+        // at boot. Caching at boot meant any edit to index.html was
+        // invisible until the dev process restarted, even though edits
+        // to JS/CSS (served by ServeDir) showed up immediately. The cost
+        // is one stat + read per page load, which is negligible at
+        // anything below high-traffic-server scale and the file is small
+        // enough that the OS will keep it in the page cache anyway.
+        .route("/", get(move || {
+            let path = root_path.clone();
+            async move {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(html) => axum::response::Html(html),
+                    Err(err) => {
+                        log::error!(
+                            "UI bundle missing — could not read index.html from {}: {}",
+                            path.display(),
+                            err
+                        );
+                        axum::response::Html(format!(
+                            "<!doctype html>\
+                             <html><head><meta charset=\"utf-8\"><title>ATEM IP Patchbay</title>\
+                             <style>body{{font-family:-apple-system,system-ui,sans-serif;\
+                             background:#0e0f12;color:#e6e6ea;margin:0;padding:48px;line-height:1.6;}}\
+                             code{{background:#0a0b0e;padding:2px 6px;border-radius:4px;font-size:13px;}}\
+                             a{{color:#7fc8ff;}}</style></head><body>\
+                             <h1>UI bundle missing</h1>\
+                             <p>The static UI was not bundled into this build. \
+                             Tried to read <code>{}</code>.</p>\
+                             <p>This is a packaging bug — please report it at \
+                             <a href=\"https://github.com/amateurmenace/atem-ip-patchbay/issues\">\
+                             github.com/amateurmenace/atem-ip-patchbay/issues</a> with the \
+                             release version you downloaded.</p>\
+                             </body></html>",
+                            path.display()
+                        ))
+                    }
+                }
+            }
+        }))
+        .nest_service("/static", static_service);
+
+    // Per-tile API mounts at /api/i/0, /api/i/1, ... — each gets a
+    // clone of the tile-routes sub-router with its own HttpAppState
+    // baked in so handlers automatically dispatch to the right tile
+    // without reading a path parameter. axum's longest-prefix-wins
+    // routing means /api/i/0/state matches THIS mount, not the
+    // /api/* alias mounted below.
+    for tile in fleet.tiles() {
+        let state = HttpAppState::for_tile(&fleet, tile.idx)
+            .expect("tile must exist for fleet.tiles() yield");
+        let prefix = format!("/api/i/{}", tile.idx);
+        router = router.nest(&prefix, tile_routes_template.clone().with_state(state));
+    }
+
+    // /api/* alias for tile 0 — keeps the existing single-source UI
+    // working without any URL changes. The iframe-based multiview
+    // shell (later commit) will explicitly hit /api/i/N/* via a
+    // tiny fetch-rewriting shim in app.js, so this alias is purely
+    // for backward compat / direct UI loads with no iframe context.
+    let tile_0_state =
+        HttpAppState::for_tile(&fleet, 0).expect("fleet must have tile 0");
+    router = router.nest("/api", tile_routes_template.with_state(tile_0_state));
+
+    router
+}
+
+// ---- handlers --------------------------------------------------------------
+
+async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
+    // Flatten the encoder snapshot with the current preview status so
+    // the JS poll loop sees both in one request — keeps the Preview
+    // button label in sync with backend state without a second poll.
+    // Session 12 adds `ffmpeg_decklink_available` so the UI can gate
+    // the DeckLink destination-type picker on FFmpeg build support:
+    // disabled with a "reinstall ATEM IP Patchbay" hint when the
+    // probed muxer is absent, enabled (but possibly empty device
+    // list) when present. Read from the same OnceLock probe lib.rs
+    // primed at setup() — single atomic load per request.
+    #[derive(Serialize)]
+    struct StateResponse {
+        #[serde(flatten)]
+        snapshot: crate::state::Snapshot,
+        preview: crate::preview::PreviewStatus,
+        ffmpeg_decklink_available: bool,
+        /// alpha.25: video-encoder list probed at boot from `ffmpeg
+        /// -encoders`. The UI's encoder picker filters its dropdown to
+        /// this set so we don't offer nvenc on a build without it.
+        available_encoders: Vec<String>,
+    }
+    Json(StateResponse {
+        snapshot: state.encoder.snapshot(),
+        preview: state.preview.status().await,
+        ffmpeg_decklink_available: crate::ffmpeg_path::ffmpeg_has_decklink(),
+        available_encoders: crate::ffmpeg_path::available_encoders().to_vec(),
+    })
+}
+
+/// alpha.31: audio level meters. Returns the latest per-channel
+/// RMS + peak dB values for the UI's canvas VU meters, plus a
+/// server-side timestamp so the UI can detect stalled streams
+/// (audio_levels_at - server_time > ~0.5s = stream stalled,
+/// fade meters to silence). Polled at 4Hz independently of
+/// /api/state so the meter responsiveness doesn't depend on
+/// the main state poll's 1Hz cadence.
+async fn api_audio_levels(State(state): State<HttpAppState>) -> impl IntoResponse {
+    #[derive(Serialize)]
+    struct AudioLevelsResponse {
+        rms_l: f32,
+        rms_r: f32,
+        peak_l: f32,
+        peak_r: f32,
+        /// Server-clock unix epoch seconds when the levels were
+        /// last updated by the FFmpeg stderr parser. 0.0 means
+        /// they haven't been updated yet this session.
+        updated_at: f64,
+        /// Server's current wall-clock for the UI's idle detection
+        /// (always reasonably close to client time — these are
+        /// the same machine in normal operation).
+        server_time: f64,
+        /// Whether the meters_enabled toggle is set. Lets the UI
+        /// gate its 4Hz polling so we don't burn CPU on /api/state
+        /// + /api/audio-levels both at high frequency when meters
+        /// are off.
+        meters_enabled: bool,
+    }
+    let snap = state.encoder.snapshot();
+    // Snapshot already exposes stats; pull the audio fields
+    // directly. read_stats() is a separate lock acquisition to
+    // avoid serializing the whole snapshot when we only need 5
+    // floats.
+    let (rms_l, rms_r, peak_l, peak_r, updated_at) = state.encoder.read_audio_levels();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Json(AudioLevelsResponse {
+        rms_l,
+        rms_r,
+        peak_l,
+        peak_r,
+        updated_at,
+        server_time: now,
+        meters_enabled: snap.meters_enabled,
+    })
+}
+
+#[derive(Serialize)]
+struct LanIp {
+    ip: String,
+}
+
+async fn api_lan_ip() -> impl IntoResponse {
+    // Legacy single-IP endpoint kept for back-compat with any UI code
+    // that hasn't migrated to /api/lan-ips. Prefers the result of the
+    // smarter multi-IP picker; falls back to local_ip_address's
+    // default-route guess; falls back to empty string so the UI can
+    // tell when no LAN IP could be determined and prompt the user
+    // instead of showing a misleading placeholder.
+    let candidates = candidate_lan_ips();
+    let ip = pick_best_lan_ip(&candidates).unwrap_or_default();
+    Json(LanIp { ip })
+}
+
+#[derive(Serialize)]
+struct LanInterface {
+    name: String,
+    ip: String,
+    /// True when this is our heuristic best-guess. The UI defaults the
+    /// publish-URL to this one but exposes a picker for users with
+    /// multiple interfaces (Wi-Fi + Ethernet, VPN, Internet Sharing,
+    /// etc.) so a wrong default can be corrected without manual typing.
+    preferred: bool,
+}
+
+#[derive(Serialize)]
+struct LanIpsResponse {
+    interfaces: Vec<LanInterface>,
+    /// Convenience: same as the `preferred=true` interface's IP. Empty
+    /// string when no usable interface is available — the UI uses an
+    /// empty value to show "we couldn't detect your LAN IP, type it
+    /// in" rather than ever displaying a wrong default.
+    preferred_ip: String,
+}
+
+async fn api_lan_ips() -> impl IntoResponse {
+    let candidates = candidate_lan_ips();
+    let preferred = pick_best_lan_ip(&candidates).unwrap_or_default();
+    let interfaces = candidates
+        .into_iter()
+        .map(|(name, ip)| {
+            let preferred_match = ip == preferred;
+            LanInterface {
+                name,
+                ip,
+                preferred: preferred_match,
+            }
+        })
+        .collect();
+    Json(LanIpsResponse {
+        interfaces,
+        preferred_ip: preferred,
+    })
+}
+
+/// Enumerate every IPv4 interface that's usable as a LAN listening
+/// address. Excludes loopback and link-local (169.254.x.x). Returns
+/// (interface-name, ip) pairs in the order the OS reports them — the
+/// frontend can show this list as a picker when local_ip_address's
+/// default-route guess picks the wrong interface (Internet Sharing
+/// at 192.168.2.1 is the canonical bad default).
+fn candidate_lan_ips() -> Vec<(String, String)> {
+    use std::net::IpAddr;
+    let raw = match local_ip_address::list_afinet_netifas() {
+        Ok(list) => list,
+        Err(err) => {
+            log::warn!("could not enumerate network interfaces: {err}");
+            return Vec::new();
+        }
+    };
+    raw.into_iter()
+        .filter_map(|(name, ip)| match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+                    None
+                } else {
+                    Some((name, v4.to_string()))
+                }
+            }
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+/// Pick the interface most likely to be the one a user wants to share
+/// with cameras / encoders on the LAN. Heuristic in priority order:
+///   1. The local_ip_address default-route guess, if it's RFC 1918
+///      AND not the Apple Internet Sharing range (192.168.2.0/24).
+///   2. The first RFC 1918 candidate that ISN'T Internet Sharing.
+///   3. Any RFC 1918 candidate (including Internet Sharing — better
+///      than nothing if that's literally what the user has).
+///   4. None — the UI will prompt for manual entry.
+///
+/// Apple's Internet Sharing always uses 192.168.2.0/24 with the host
+/// as 192.168.2.1; if that's the only thing local_ip_address sees,
+/// the user almost certainly has Wi-Fi/Ethernet on a different subnet
+/// and we want to show them THAT instead.
+fn pick_best_lan_ip(candidates: &[(String, String)]) -> Option<String> {
+    fn is_internet_sharing(ip: &str) -> bool {
+        ip.starts_with("192.168.2.")
+    }
+    fn is_rfc1918(ip: &str) -> bool {
+        ip.starts_with("10.")
+            || ip.starts_with("192.168.")
+            || (ip.starts_with("172.")
+                && ip
+                    .split('.')
+                    .nth(1)
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .map(|n| (16..=31).contains(&n))
+                    .unwrap_or(false))
+    }
+
+    // Default-route guess: usually correct on simple setups, but
+    // local_ip_address picks alphabetically/by routing-table order
+    // which can land on Internet Sharing or a virtual interface.
+    let route_guess = local_ip_address::local_ip()
+        .ok()
+        .map(|ip| ip.to_string());
+
+    if let Some(guess) = &route_guess {
+        if is_rfc1918(guess) && !is_internet_sharing(guess) {
+            return Some(guess.clone());
+        }
+    }
+
+    // First non-Internet-Sharing RFC 1918 candidate from the
+    // interface list. Wi-Fi (en0) and Ethernet (en1+) typically come
+    // before Internet Sharing's bridge100 in this list.
+    for (_, ip) in candidates {
+        if is_rfc1918(ip) && !is_internet_sharing(ip) {
+            return Some(ip.clone());
+        }
+    }
+
+    // Fallback: any RFC 1918, including Internet Sharing — better
+    // than nothing. The UI still surfaces the full list so the user
+    // can override.
+    for (_, ip) in candidates {
+        if is_rfc1918(ip) {
+            return Some(ip.clone());
+        }
+    }
+
+    // Last fallback: the route guess even if it's not RFC 1918
+    // (could be a public address, a CGNAT range, etc.).
+    if let Some(guess) = route_guess {
+        if !guess.is_empty() {
+            return Some(guess);
+        }
+    }
+
+    None
+}
+
+#[derive(Serialize)]
+struct LogResponse {
+    command: String,
+    lines: Vec<String>,
+}
+
+/// Latest preview JPEG. Reads from the streamer first (full-bandwidth
+/// receiver, more recent frames), falls back to the pre-stream
+/// preview backend's last JPEG. Returns 204 when neither has a frame
+/// available — the JS poll loop interprets that as "waiting" and
+/// shows the SMPTE bars / waiting hint.
+async fn api_preview(State(state): State<HttpAppState>) -> Response {
+    // Preview waterfall: streaming NDI capture > streaming OMT capture
+    // > pre-stream Preview backend. Whichever has fresh frames first
+    // wins. (OMT preview is no-op in alpha.9 — `OmtCapture::latest_preview`
+    // always returns None pending a libomt-rs API for stride accessors;
+    // the call is here so a future libomt-rs version slots in without
+    // touching this handler.)
+    let jpeg = match state.streamer.current_ndi_preview().await {
+        Some(j) => Some(j),
+        None => match state.streamer.current_omt_preview().await {
+            Some(j) => Some(j),
+            None => state.preview.latest_jpeg(),
+        },
+    };
+    match jpeg {
+        Some(jpeg) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+            .header(header::PRAGMA, "no-cache")
+            .header(header::EXPIRES, "0")
+            .body(Body::from(jpeg))
+            .unwrap(),
+        None => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .unwrap(),
+    }
+}
+
+/// Start a pre-stream preview for the source currently configured in
+/// EncoderState. NDI sources spin up a low-bandwidth Receiver; other
+/// source kinds return 400 until the FFmpeg snapshot backend lands.
+/// Idempotent — calling while a preview is already running stops the
+/// prior one and starts the new one (so a source-change + Preview
+/// click sequence works without an explicit Stop Preview).
+async fn api_preview_start(State(state): State<HttpAppState>) -> impl IntoResponse {
+    let snap = state.encoder.snapshot();
+    let result = match snap.source_id.as_str() {
+        "ndi" => {
+            if snap.ndi_source_name.is_empty() {
+                Err("No NDI sender selected. Pick one from the source gallery first.".to_string())
+            } else {
+                state
+                    .preview
+                    .start_ndi(&snap.ndi_source_name)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
+        other => Err(format!(
+            "Pre-stream preview is only implemented for NDI sources today. \
+             Selected source: {other:?}. (FFmpeg-snapshot backend for \
+             AVFoundation / pipe / test_pattern lands in a follow-up.)"
+        )),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!(state.preview.status().await)),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        ),
+    }
+}
+
+async fn api_preview_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
+    state.preview.stop().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(state.preview.status().await)),
+    )
+}
+
+async fn api_log(State(state): State<HttpAppState>) -> impl IntoResponse {
+    let command = state.streamer.last_command().await;
+    let lines = state.streamer.last_log_tail(50).await;
+    Json(LogResponse { command, lines })
+}
+
+/// AVFoundation (Mac) / DirectShow (Win) device scan, served from the
+/// 60-second-TTL cache in [`crate::device_scanner`]. `?force=1` bypasses
+/// the cache.
+async fn api_devices(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
+    let devs = crate::device_scanner::list_capture_devices(force);
+    Json(devs)
+}
+
+/// List DeckLink output devices visible to FFmpeg, with each device's
+/// supported output modes attached. Empty array is the operator's
+/// "missing prerequisite" signal — combined with the
+/// `ffmpeg_decklink_available` flag on `/api/state`, the UI can
+/// distinguish:
+///   - build-support absent (reinstall ATEM IP Patchbay)
+///   - build-support present, devices empty (install Blackmagic
+///     DeckLink Driver or connect a card)
+///   - devices populated (proceed)
+///
+/// `?force=1` bypasses both the device-list cache and the per-device
+/// mode cache (the device-list refresh path clears the mode cache
+/// because card add/remove invalidates everything).
+async fn api_decklink_outputs(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
+    let devices = crate::device_scanner::list_decklink_outputs(force);
+    #[derive(Serialize)]
+    struct DecklinkDeviceWithModes {
+        name: String,
+        modes: Vec<crate::device_scanner::DecklinkMode>,
+    }
+    let with_modes: Vec<DecklinkDeviceWithModes> = devices
+        .into_iter()
+        .map(|d| {
+            let modes = crate::device_scanner::probe_decklink_modes(&d.name);
+            DecklinkDeviceWithModes { name: d.name, modes }
+        })
+        .collect();
+    Json(with_modes)
+}
+
+/// NDI source list, fed by the grafton-ndi Finder. /api/discover and
+/// /api/ndi-senders return the same payload shape — the v0.1.0 UI
+/// hits both endpoints from different code paths.
+#[derive(Serialize)]
+struct NdiSendersResponse {
+    senders: Vec<crate::ndi_runtime::NdiSource>,
+}
+
+#[derive(Serialize)]
+struct DiscoverResponse {
+    devices: Vec<crate::ndi_runtime::NdiSource>,
+}
+
+async fn api_discover(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let devices = crate::ndi_runtime::discover(wait);
+    Json(DiscoverResponse { devices })
+}
+
+async fn api_ndi_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let senders = crate::ndi_runtime::discover(wait);
+    Json(NdiSendersResponse { senders })
+}
+
+/// OMT (Open Media Transport) sender list — same payload shape as
+/// /api/ndi-senders so the UI can render either with the same tile
+/// component. When the `omt` cargo feature is off (default for
+/// alpha.9), `omt_runtime::discover()` returns empty and the OMT
+/// section in the UI gallery is hidden.
+#[derive(Serialize)]
+struct OmtSendersResponse {
+    senders: Vec<crate::omt_runtime::OmtSource>,
+}
+
+async fn api_omt_senders(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let wait = if matches!(q.get("force").map(String::as_str), Some("1") | Some("true")) {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let senders = crate::omt_runtime::discover(wait);
+    Json(OmtSendersResponse { senders })
+}
+
+/// Toggle / configure OMT output. POST { enabled: bool, name?: String }.
+/// alpha.9 only takes effect when source_id == "ndi" — see streamer.rs
+/// frame-tee logic. The toggle is always settable; flipping it on with
+/// a non-NDI source surfaces a streamer error at Start Stream time.
+#[derive(Deserialize)]
+struct OmtOutputUpdate {
+    enabled: Option<bool>,
+    name: Option<String>,
+}
+
+async fn api_omt_output(
+    State(state): State<HttpAppState>,
+    Json(p): Json<OmtOutputUpdate>,
+) -> impl IntoResponse {
+    state.encoder.apply_settings(&crate::state::SettingsUpdate {
+        omt_output_enabled: p.enabled,
+        omt_output_name: p.name,
+        ..Default::default()
+    });
+    Json(serde_json::json!(state.encoder.snapshot()))
+}
+
+/// Open the atem-net-diag operator dashboard. Tries to launch the
+/// .app bundle (macOS) or the binary (other platforms) — if installed,
+/// it boots its own dashboard on port 8092. Then opens that URL in
+/// the user's default browser regardless, so the user lands on the
+/// dashboard whether the launch worked or atem-net-diag was already
+/// running. If neither happens, the browser shows a connection error
+/// and the user knows to download net-diag from the Releases page.
+///
+/// Why an HTTP endpoint and not a Tauri command: the existing UI is
+/// served via Axum (Phase 1's port-Python-then-progressively-port-
+/// modules path). Tauri-specific commands would require wiring
+/// invoke handlers from JS, which we've otherwise skipped because
+/// the static UI is just talking to /api/* over fetch. Keeping the
+/// pattern consistent here means the button works the same way as
+/// every other UI action.
+async fn api_open_net_diag(State(_state): State<HttpAppState>) -> impl IntoResponse {
+    let url = "http://localhost:8092";
+    let mut launched_app = false;
+    let mut opened_url = false;
+    let mut error: Option<String> = None;
+
+    // alpha.25: UDM credentials are now configured INSIDE atem-net-diag
+    // (via its dashboard's UDM form, POST /api/config). The main app no
+    // longer pre-plumbs env vars at spawn time. The spawn here inherits
+    // whatever UDM_API_KEY / UDM_HOST env the user set in their shell
+    // (if any) as a fallback; the dashboard form is the primary path.
+
+    #[cfg(target_os = "macos")]
+    {
+        // Try to launch the .app first. `open -a` matches against the
+        // CFBundleDisplayName ("ATEM Net Diag") OR CFBundleName
+        // ("atem-net-diag") — either resolves to the same bundle if
+        // it's installed at /Applications or ~/Applications. If
+        // it's not installed, this exits non-zero and we fall through
+        // to opening the URL anyway (in case net-diag is running via
+        // its tarball + start.command instead of the .app bundle).
+        match std::process::Command::new("open")
+            .args(["-a", "ATEM Net Diag"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => {
+                launched_app = true;
+                log::info!("net-diag .app launched via open -a");
+                // Brief pause so the .app's HTTP server is up before
+                // we open the URL — not strictly required (the URL
+                // open will retry on connection refused via the
+                // browser), but keeps the UX clean.
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            }
+            _ => {
+                log::info!("net-diag .app not installed (open -a non-zero); opening URL directly");
+            }
+        }
+        match std::process::Command::new("open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => {
+                opened_url = true;
+            }
+            Ok(s) => error = Some(format!("open <url> exited {s:?}")),
+            Err(e) => error = Some(format!("open <url> failed: {e}")),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // alpha.17: spawn the bundled atem-net-diag.exe (staged into
+        // resources\sidecar\ by the CI Windows build) so the Net Diag
+        // topbar button actually works on Windows. Detached + no
+        // console so the process survives our exit and doesn't pop
+        // a black terminal window next to the main UI.
+        //
+        // If a net-diag is already running (port 8092 taken), the
+        // spawn fails fast and the existing instance keeps serving;
+        // either way we still open the URL below so the browser
+        // lands on whichever dashboard is alive.
+        if let Some(diag_bin) = crate::ffmpeg_path::net_diag_path() {
+            log::info!("net-diag spawn: {diag_bin}");
+            let mut spawn = std::process::Command::new(&diag_bin);
+            spawn.args(["--ui", "8092"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // alpha.25: UDM credentials are configured inside the
+            // net-diag dashboard now (its UDM panel has a config form
+            // posting to /api/config). The spawn inherits whatever
+            // UDM_API_KEY / UDM_HOST env vars the user has in their
+            // shell — that path still works as a fallback for
+            // operators who prefer the env-var workflow.
+            // CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: same
+            // detachment pattern as spawn_instance, so closing the
+            // main app doesn't kill net-diag (and ditto in reverse).
+            // The hide-console helper isn't strictly needed with
+            // DETACHED_PROCESS but layered defenses keep stray
+            // consoles from flashing on edge-case launch paths.
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                spawn.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+            }
+            match spawn.spawn() {
+                Ok(child) => {
+                    log::info!("net-diag spawned pid={}", child.id());
+                    launched_app = true;
+                    // Brief settle so the embedded HTTP server is
+                    // listening on 8092 before the browser tries to
+                    // connect — saves one retry round-trip.
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                }
+                Err(e) => {
+                    log::warn!("net-diag spawn failed: {e} (will still open URL — existing instance may serve)");
+                }
+            }
+        } else {
+            log::warn!(
+                "atem-net-diag.exe not found in sidecar/ — Net Diag button will open the URL only. \
+                 If you're running a dev build, set ATEM_NET_DIAG_PATH to your local atem-net-diag.exe."
+            );
+        }
+        // Open the dashboard URL via `rundll32 url.dll,FileProtocolHandler`
+        // rather than `cmd /c start "" URL`. The cmd.exe `start` builtin
+        // exits 0 under CREATE_NO_WINDOW but silently fails to actually
+        // launch the browser — its console-allocation path needs a
+        // visible cmd window to hand off to ShellExecute correctly. We
+        // can't drop CREATE_NO_WINDOW (alpha.13 added it specifically to
+        // suppress the cmd.exe flash on every Net Diag click) and we
+        // don't want to add a new crate just for URL-opening. rundll32
+        // url.dll,FileProtocolHandler is the documented Win32 entry
+        // point for protocol-handler launches, hits ShellExecuteW
+        // directly, and works fine with no attached console.
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::ffmpeg_path::hide_console_std(&mut cmd);
+        match cmd.status() {
+            Ok(s) if s.success() => opened_url = true,
+            Ok(s) => error = Some(format!("rundll32 url.dll exited {s:?}")),
+            Err(e) => error = Some(format!("rundll32 url.dll failed: {e}")),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => opened_url = true,
+            Ok(s) => error = Some(format!("xdg-open exited {s:?}")),
+            Err(e) => error = Some(format!("xdg-open failed: {e}")),
+        }
+    }
+
+    let body = serde_json::json!({
+        "ok": opened_url,
+        "launched_app": launched_app,
+        "opened_url": opened_url,
+        "url": url,
+        "error": error,
+    });
+    Json(body)
+}
+
+async fn api_start(State(state): State<HttpAppState>) -> impl IntoResponse {
+    match state.streamer.start().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn api_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
+    match state.streamer.stop().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!(state.encoder.snapshot()))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+/// Kill any FFmpeg subprocess pushing a BMD-flavored SRT URL — i.e.
+/// any leftover from a prior run of this app whose parent died
+/// without taking the FFmpeg child with it. Matches on streamid=
+/// in the cmdline so unrelated FFmpeg jobs (transcodes, captures
+/// for other apps) don't get hit.
+///
+/// The dev-rebuild path under `cargo tauri dev` is the most common
+/// trigger for these orphans: cargo-tauri SIGKILLs the binary on
+/// rebuild, so the Drop on Streamer never runs and the FFmpeg
+/// process group survives.
+async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
+    #[cfg(target_os = "macos")]
+    let result = run_pkill("ffmpeg.*streamid=");
+    #[cfg(target_os = "linux")]
+    let result = run_pkill("ffmpeg.*streamid=");
+    #[cfg(target_os = "windows")]
+    let result: Result<usize, String> = Err(
+        "Orphan-kill not yet implemented on Windows. Use Task Manager to end \
+         any 'ffmpeg.exe' processes if a prior run left one streaming."
+            .into(),
+    );
+    match result {
+        Ok(killed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "killed": killed,
+                "message": if killed == 0 {
+                    "No orphan FFmpeg streams found.".to_string()
+                } else {
+                    format!("Killed {killed} orphan FFmpeg stream(s).")
+                }
+            })),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        ),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_pkill(pattern: &str) -> Result<usize, String> {
+    use std::process::Command;
+    // First a -SIGTERM pass for graceful shutdown (FFmpeg flushes
+    // its SRT/RTMP buffers and closes the connection cleanly), then
+    // a SIGKILL fallback after a brief settle for anything that
+    // ignored the TERM. pkill exits 0 when matches were found and
+    // signaled, 1 when none, >=2 on error.
+    let term = Command::new("pkill")
+        .args(["-TERM", "-f", pattern])
+        .status()
+        .map_err(|e| format!("pkill failed to launch: {e}"))?;
+    let killed_term = matches!(term.code(), Some(0));
+    if killed_term {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-f", pattern])
+            .status();
+    }
+    // Re-check via pgrep to count what actually went away. pgrep -c
+    // prints the matching count to stdout.
+    let probe = Command::new("pgrep")
+        .args(["-c", "-f", pattern])
+        .output();
+    let still_alive = probe
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    // Best-effort count: if pkill said it found something, assume it
+    // killed at least one; subtract any that survived (which would
+    // mean SIGKILL also failed — extremely rare).
+    let killed = if killed_term {
+        if still_alive == 0 { 1 } else { 0 }
+    } else {
+        0
+    };
+    Ok(killed)
+}
+
+/// Settings mutation — accepts a JSON object with any subset of the
+/// snapshot fields and applies them. Phase 1 supports the core string
+/// / int fields; Phase 2+ extends to source/device fields.
+#[derive(Deserialize)]
+struct SettingsPayload {
+    video_mode: Option<String>,
+    quality_level: Option<String>,
+    source_id: Option<String>,
+    custom_url: Option<String>,
+    stream_key: Option<String>,
+    passphrase: Option<String>,
+    srt_mode: Option<String>,
+    srt_latency_us: Option<u32>,
+    srt_listen_port: Option<u16>,
+    streamid_override: Option<String>,
+    streamid_legacy: Option<bool>,
+    video_codec: Option<String>,
+    current_service_name: Option<String>,
+    current_server_name: Option<String>,
+    ndi_source_name: Option<String>,
+    omt_source_name: Option<String>,
+    av_video_index: Option<i32>,
+    av_video_name: Option<String>,
+    av_audio_index: Option<i32>,
+    av_audio_name: Option<String>,
+    audio_mode: Option<String>,
+    audio_output_mono: Option<bool>,
+    audio_pan_l: Option<u8>,
+    audio_pan_r: Option<u8>,
+    pipe_path: Option<String>,
+    label: Option<String>,
+    relay: Option<RelayPayload>,
+    overlay: Option<OverlayPayload>,
+    // Session 12 destination shape — flat siblings of the ATEM-side
+    // fields above. JS posts these alongside the existing keys via the
+    // same /api/settings endpoint; the apply_settings handler validates
+    // destination_type.
+    destination_type: Option<String>,
+    decklink_device_name: Option<String>,
+    decklink_output_mode: Option<String>,
+    decklink_format_code: Option<String>,
+    decklink_pixel_format: Option<String>,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    // UDM credentials removed from this payload — net-diag manages its
+    // own UDM config via its dashboard's /api/config endpoint now.
+    video_encoder: Option<String>,
+    encoder_extra_flags: Option<String>,
+    audio_codec: Option<String>,
+    audio_bitrate_kbps: Option<u32>,
+    audio_sample_rate: Option<u32>,
+    audio_channels: Option<u8>,
+    auto_reconnect: Option<bool>,
+    auto_reconnect_max_attempts: Option<u32>,
+    meters_enabled: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RelayPayload {
+    bind_host: Option<String>,
+    srt_port: Option<u16>,
+    srt_latency_us: Option<u32>,
+    srt_passphrase: Option<String>,
+    rtmp_port: Option<u16>,
+    rtmp_app: Option<String>,
+    rtmp_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OverlayPayload {
+    title: Option<String>,
+    subtitle: Option<String>,
+    logo_path: Option<String>,
+    clock: Option<bool>,
+}
+
+async fn api_settings(
+    State(state): State<HttpAppState>,
+    Json(payload): Json<SettingsPayload>,
+) -> impl IntoResponse {
+    state.encoder.apply_settings(&payload.into());
+    Json(state.encoder.snapshot())
+}
+
+#[derive(Deserialize)]
+struct LoadXmlPayload {
+    path: String,
+    make_active: Option<bool>,
+    /// When true (default for UI loads), wipe the existing service
+    /// registry before loading. The boot loader passes false so all
+    /// config/*.xml files accumulate at startup.
+    replace: Option<bool>,
+}
+
+async fn api_load_xml(
+    State(state): State<HttpAppState>,
+    Json(payload): Json<LoadXmlPayload>,
+) -> impl IntoResponse {
+    if payload.replace.unwrap_or(true) {
+        state.encoder.clear_services();
+    }
+    match state
+        .encoder
+        .add_service_from_xml(std::path::Path::new(&payload.path), payload.make_active)
+    {
+        Ok(()) => xml_load_response(&state),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct LoadXmlTextPayload {
+    text: String,
+    make_active: Option<bool>,
+    replace: Option<bool>,
+}
+
+async fn api_load_xml_text(
+    State(state): State<HttpAppState>,
+    Json(payload): Json<LoadXmlTextPayload>,
+) -> impl IntoResponse {
+    if payload.replace.unwrap_or(true) {
+        state.encoder.clear_services();
+    }
+    match state
+        .encoder
+        .add_service_from_xml_text(&payload.text, payload.make_active.unwrap_or(true))
+    {
+        Ok(()) => xml_load_response(&state),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+/// Wraps the snapshot in `{service, snapshot}` shape so the UI can
+/// show the just-loaded service's name in the status chip without
+/// having to re-derive it from current_service_name.
+fn xml_load_response(state: &HttpAppState) -> (StatusCode, Json<serde_json::Value>) {
+    let snap = state.encoder.snapshot();
+    let service = snap.current_service_name.clone();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "service": service,
+            "snapshot": snap,
+        })),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct ClearServicesPayload {
+    /// When true (default), also clear `custom_url`. Pass false to
+    /// retain a manual destination across the clear.
+    clear_custom_url: Option<bool>,
+}
+
+async fn api_clear_services(
+    State(state): State<HttpAppState>,
+    Json(payload): Json<ClearServicesPayload>,
+) -> impl IntoResponse {
+    state.encoder.clear_services();
+    if payload.clear_custom_url.unwrap_or(true) {
+        // Wipe the custom URL too so the UI is back to a fully blank
+        // destination state. The Clear XML button calls this with no
+        // body so the default takes effect.
+        state.encoder.apply_settings(&crate::state::SettingsUpdate {
+            custom_url: Some(String::new()),
+            ..Default::default()
+        });
+    }
+    Json(state.encoder.snapshot())
+}
+
+async fn api_destination_paste_stub() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "paste parser not yet ported (Phase 2)"})),
+    )
+}
+
+// ---- settings adapter ------------------------------------------------------
+//
+// Bridges the HTTP DTO to the EncoderState's apply_settings() method.
+
+impl From<SettingsPayload> for crate::state::SettingsUpdate {
+    fn from(p: SettingsPayload) -> Self {
+        Self {
+            video_mode: p.video_mode,
+            quality_level: p.quality_level,
+            source_id: p.source_id,
+            custom_url: p.custom_url,
+            stream_key: p.stream_key,
+            passphrase: p.passphrase,
+            srt_mode: p.srt_mode,
+            srt_latency_us: p.srt_latency_us,
+            srt_listen_port: p.srt_listen_port,
+            streamid_override: p.streamid_override,
+            streamid_legacy: p.streamid_legacy,
+            video_codec: p.video_codec,
+            current_service_name: p.current_service_name,
+            current_server_name: p.current_server_name,
+            ndi_source_name: p.ndi_source_name,
+            omt_source_name: p.omt_source_name,
+            omt_output_enabled: None,
+            omt_output_name: None,
+            av_video_index: p.av_video_index,
+            av_video_name: p.av_video_name,
+            av_audio_index: p.av_audio_index,
+            av_audio_name: p.av_audio_name,
+            audio_mode: p.audio_mode,
+            audio_output_mono: p.audio_output_mono,
+            audio_pan_l: p.audio_pan_l,
+            audio_pan_r: p.audio_pan_r,
+            pipe_path: p.pipe_path,
+            label: p.label,
+            relay: p.relay.map(|r| crate::state::RelaySettingsUpdate {
+                bind_host: r.bind_host,
+                srt_port: r.srt_port,
+                srt_latency_us: r.srt_latency_us,
+                srt_passphrase: r.srt_passphrase,
+                rtmp_port: r.rtmp_port,
+                rtmp_app: r.rtmp_app,
+                rtmp_key: r.rtmp_key,
+            }),
+            overlay: p.overlay.map(|o| crate::state::OverlaySettingsUpdate {
+                title: o.title,
+                subtitle: o.subtitle,
+                logo_path: o.logo_path,
+                clock: o.clock,
+            }),
+            destination_type: p.destination_type,
+            decklink_device_name: p.decklink_device_name,
+            decklink_output_mode: p.decklink_output_mode,
+            decklink_format_code: p.decklink_format_code,
+            decklink_pixel_format: p.decklink_pixel_format,
+            video_encoder: p.video_encoder,
+            encoder_extra_flags: p.encoder_extra_flags,
+            audio_codec: p.audio_codec,
+            audio_bitrate_kbps: p.audio_bitrate_kbps,
+            audio_sample_rate: p.audio_sample_rate,
+            audio_channels: p.audio_channels,
+            auto_reconnect: p.auto_reconnect,
+            auto_reconnect_max_attempts: p.auto_reconnect_max_attempts,
+            meters_enabled: p.meters_enabled,
+        }
+    }
+}

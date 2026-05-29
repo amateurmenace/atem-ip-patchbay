@@ -1,0 +1,24 @@
+[package]
+name = "decklink-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Session 16 Phase A spike — verifies whether 8 concurrent decklink_enc FFmpeg instances coexist on a real DeckLink rig. Outcome drives the Option A (single Tauri process, N pipelines) vs Option B (N processes) decision for the broadcast-multiview rework."
+license = "MIT"
+
+[[bin]]
+name = "decklink-spike"
+path = "src/main.rs"
+
+[dependencies]
+# Device-list parsing mirrors src-tauri/src/device_scanner.rs's
+# DECKLINK_DEVICE_LINE pattern. regex is the cheapest robust path
+# given FFmpeg's log-prefix format has already shifted once in the
+# project's lifetime (alpha.36 fixed the n8.1.1 prefix change).
+regex = "1"
+
+[profile.release]
+# Strip symbols. The spike is a one-off diagnostic; tiny binary is
+# friendlier for shipping the .exe to the test rig.
+strip = true
+lto = "thin"
+opt-level = "z"
