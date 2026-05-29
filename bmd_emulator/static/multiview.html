@@ -1485,6 +1485,7 @@ function statusToClass(status) {
     case 'reconnecting': return 'reconnecting';
     case 'interrupted': return 'interrupted';
     case 'preview': return 'connecting';
+    case 'switching': return 'connecting'; // alpha.59 hot-swap: yellow in-progress
     default: return 'idle';
   }
 }
