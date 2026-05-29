@@ -90,11 +90,25 @@ impl SystemMonitor {
     /// Start the background polling task. Returns an Arc<Self> that
     /// HTTP handlers + Tauri commands can clone to read the latest
     /// snapshot via `.snapshot()`.
+    ///
+    /// alpha.47 fix: the original alpha.41 implementation called
+    /// `tokio::spawn` directly, which panics when invoked from outside
+    /// a running Tokio runtime — exactly the situation in Tauri's
+    /// synchronous setup() hook on Windows. On macOS the same code
+    /// happened to be invoked after the runtime was already pinned to
+    /// the main thread so the panic didn't surface (which is why
+    /// alpha.41-.46 shipped clean on Mac but every Windows install
+    /// crashed at startup with
+    ///   thread 'main' panicked at src\system_monitor.rs:97:9:
+    ///   there is no reactor running, must be called from the
+    ///   context of a Tokio 1.x runtime
+    /// Switch to `tauri::async_runtime::spawn` which goes through
+    /// Tauri's managed runtime regardless of the caller's context.
     pub fn start() -> Arc<Self> {
         let health = Arc::new(Mutex::new(SystemHealth::default()));
         let health_for_task = health.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             // sysinfo needs an initial sample before CPU usage is
             // meaningful (it computes deltas). Take one, sleep
             // briefly, then enter the steady loop.
