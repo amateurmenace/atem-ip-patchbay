@@ -291,8 +291,15 @@
   .preview {
     position: relative;
     background: var(--bg-preview);
-    aspect-ratio: 16/9;
-    flex-shrink: 0;
+    /* alpha.45 fix: removed aspect-ratio: 16/9 — it was forcing
+       the preview to ~450px tall in tiles that only had ~430px
+       available, pushing the .tile-controls strip off-screen and
+       making the operator believe there were no source/dest
+       pickers. The img inside still letterboxes via object-fit
+       contain, so the preview fills whatever grid 1fr gives it
+       without claiming more space than the tile has. */
+    min-height: 0;
+    min-width: 0;
     overflow: hidden;
   }
   .preview img {
@@ -401,17 +408,19 @@
     text-transform: uppercase;
   }
 
-  /* Compact 2-row controls strip below the preview. No scrollbars —
-     everything is inline. Grid gives us a fixed-width label column +
-     a flexible content area. */
+  /* alpha.45: brighter, taller controls strip so the operator can't
+     miss it. Previous version blended into the tile background; the
+     accent-tinted top border + slightly heavier padding makes this
+     section unambiguously "this is where you configure the tile". */
   .tile-controls {
-    background: rgba(0,0,0,0.25);
-    border-top: 1px solid var(--border);
-    padding: 6px 8px;
+    background: rgba(8,12,20,0.55);
+    border-top: 2px solid var(--accent);
+    padding: 10px 10px;
     display: grid;
     grid-template-rows: auto auto;
-    gap: 4px;
+    gap: 8px;
     min-height: 0;
+    flex-shrink: 0;
   }
   .control-row {
     display: grid;
