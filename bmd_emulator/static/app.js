@@ -18,9 +18,10 @@ const els = {
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
   openNetDiag: $('#open-net-diag'),
-  openMonitor: $('#open-monitor'),
   // alpha.42: openMultiview button removed; the view-mode toggle in
   // the topbar (.view-toggle) handles Single ↔ Multi navigation now.
+  // alpha.52: openMonitor button removed too — multiview supersedes
+  // the alpha.16 single-tile companion window pattern.
   heroHideBtn: $('#hero-hide-btn'),
   showIntroBtn: $('#show-intro-btn'),
   omtOutputEnabled: $('#omt-output-enabled'),
@@ -2065,31 +2066,13 @@ function bind() {
     });
   }
 
-  // Open Monitor Window — spawns a small companion window per
-  // instance that the operator positions on screen like a video-
-  // switcher multiview output. Tauri-only: window.__TAURI__.core.
-  // invoke calls the open_monitor_window command which opens (or
-  // focuses, if already open) the secondary WebviewWindow.
-  if (els.openMonitor) {
-    els.openMonitor.addEventListener('click', async () => {
-      const invoke = window.__TAURI__?.core?.invoke;
-      if (!invoke) {
-        alert('Monitor window requires the Tauri runtime — try the bundled .app/.exe build rather than a plain browser.');
-        return;
-      }
-      const orig = els.openMonitor.textContent;
-      els.openMonitor.disabled = true;
-      els.openMonitor.textContent = 'Opening…';
-      try {
-        await invoke('open_monitor_window');
-      } catch (err) {
-        alert('Could not open monitor window: ' + (err && err.message || err));
-      } finally {
-        els.openMonitor.textContent = orig;
-        els.openMonitor.disabled = false;
-      }
-    });
-  }
+  // alpha.52: openMonitor button + click handler removed. The
+  // alpha.16 single-tile companion window pattern is superseded by
+  // the alpha.40+ multiview UI which monitors all 4 tiles in one
+  // view with richer per-tile controls + the alpha.50 expandable
+  // stats panel. The Tauri open_monitor_window command stays
+  // registered (low cost, no surface) so existing operator scripts
+  // that invoke it directly still work.
 
   // alpha.42 — view-toggle was previously a separate "Open Multiview"
   // button; now it's the .view-toggle in the topbar (.view-toggle-btn
