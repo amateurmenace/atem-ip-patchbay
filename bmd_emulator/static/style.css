@@ -2504,3 +2504,135 @@ pre {
   .hero-headline { font-size: 16px; }
   .telemetry-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* =====================================================================
+   alpha.42 — UI overhaul: view-mode toggle, hide-intro, Net Utility
+   prominence. The view-mode toggle is the primary nav affordance, sized
+   to be impossible to miss. It replaces the old "Open Multiview" button
+   in the topbar and gives the operator a clear sense of "where am I"
+   between Single and Multi views.
+   ===================================================================== */
+
+.view-toggle {
+  display: inline-flex;
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,138,56,0.25);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+  margin-right: 4px;
+}
+.view-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s ease, background 0.15s ease;
+  font-family: inherit;
+}
+.view-toggle-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.view-toggle-btn:hover {
+  color: var(--text);
+}
+.view-toggle-btn.active {
+  background: var(--accent);
+  color: #0e0f12;
+  box-shadow: 0 0 12px rgba(255,138,56,0.35);
+}
+.view-toggle-btn.active:hover {
+  color: #0e0f12;
+}
+
+/* Net Utility button — make it a meaningful affordance. Same accent
+   color but solid background so it reads as "important external tool"
+   alongside the view toggle's prominence. Operators reach for this
+   during a show; it should be impossible to miss. */
+.net-diag-btn.prominent {
+  margin-left: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: rgba(255,138,56,0.12);
+  border: 1px solid rgba(255,138,56,0.55);
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  text-transform: uppercase;
+}
+.net-diag-btn.prominent:hover {
+  color: #0e0f12;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.net-diag-btn.prominent svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Hide-intro affordance — top-right of the hero section. Small,
+   unobtrusive, makes the hero collapsible for operators who have
+   read it once. The corresponding "show again" button surfaces in
+   the topbar when the hero is hidden. */
+.hero-hide-btn {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  background: rgba(255,255,255,0.06);
+  color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  z-index: 2;
+}
+.hero-hide-btn:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.20);
+}
+.hero { position: relative; }
+.hero.collapsed {
+  display: none;
+}
+.show-intro-btn {
+  background: rgba(255,255,255,0.04);
+  color: var(--muted);
+  border: 1px dashed rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 6px 11px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  margin-left: 8px;
+  display: none;
+}
+.show-intro-btn:hover {
+  color: var(--text);
+  border-style: solid;
+  border-color: rgba(255,255,255,0.30);
+}
+html[data-hero-hidden="true"] .show-intro-btn { display: inline-flex; align-items: center; gap: 4px; }
+html[data-hero-hidden="true"] .hero { display: none; }
+

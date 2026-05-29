@@ -5,6 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ATEM IP Patchbay</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <!-- alpha.42: apply persisted hero-hidden state BEFORE the page
+       paints so the operator who hid the hero doesn't see it flash
+       on every reload. localStorage read is sync + fast (~0.1ms). -->
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('atemPatchbay_heroHidden') === '1') {
+          document.documentElement.dataset.heroHidden = 'true';
+        }
+      } catch (e) { /* private mode etc — ignore */ }
+    })();
+  </script>
 </head>
 <body>
 
@@ -31,9 +43,38 @@
         <div class="kicker">Proof of concept · free forever</div>
       </div>
     </button>
+    <!-- alpha.42: view-mode toggle. Most prominent affordance in the
+         topbar — replaces the previous standalone Multiview button.
+         Clicking Multi navigates the current WebView; the same toggle
+         appears in multiview.html so the operator can come back via the
+         Single side. -->
+    <div class="view-toggle" role="tablist" aria-label="View mode">
+      <button id="view-toggle-single" type="button" class="view-toggle-btn active"
+              role="tab" aria-selected="true"
+              title="Single source view — configure one source → one destination">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="8" r="2.4" fill="currentColor"/>
+        </svg>
+        Single
+      </button>
+      <a id="view-toggle-multi" href="/static/multiview.html" class="view-toggle-btn"
+         role="tab" aria-selected="false"
+         title="Multiview — 4 channels in one window, route multiple sources to multiple destinations">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        Multi
+      </a>
+    </div>
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
+      <button id="show-intro-btn" type="button" class="show-intro-btn"
+              title="Show the intro / About text again">↓ About</button>
       <button id="open-monitor" type="button" class="monitor-btn"
               title="Open a small companion window showing live preview + stream stats — position one per running instance like a video-switcher multiview"
               aria-label="Open Monitor Window">
@@ -43,21 +84,10 @@
         </svg>
         Monitor
       </button>
-      <button id="open-multiview" type="button" class="multiview-btn"
-              title="Open the broadcast multiview — route up to 8 network sources (NDI / OMT) to 8 DeckLink SDI/HDMI outputs in one window"
-              aria-label="Open Multiview">
-        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
-          <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
-          <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
-          <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
-          <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
-        </svg>
-        Multiview
-      </button>
-      <button id="open-net-diag" type="button" class="net-diag-btn"
+      <button id="open-net-diag" type="button" class="net-diag-btn prominent"
               title="Open the ATEM Net Utility operator dashboard (UDM polling, ATEM reachability, WAN headroom, per-flow stats, pre-show checks)"
               aria-label="Open ATEM Net Utility">
-        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
+        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11">
           <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
           <path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/>
         </svg>
@@ -77,6 +107,13 @@
   <!-- HERO                                                        -->
   <!-- ========================================================== -->
   <section class="hero">
+    <!-- alpha.42: Hide the intro card. Persists via localStorage; the
+         "↓ About" button in the topbar surfaces when collapsed so the
+         operator can bring the intro back if needed. -->
+    <button id="hero-hide-btn" type="button" class="hero-hide-btn"
+            title="Hide the intro / About text — gives you a cleaner workspace once you've read it.">
+      Hide intro ×
+    </button>
     <div class="hero-headline">
       Turn multiple worldwide video sources, from iPhones to Drones to
       <strong>NDI</strong> sources to computer screens, into remote inputs that

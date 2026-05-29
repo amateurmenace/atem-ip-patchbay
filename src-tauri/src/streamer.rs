@@ -307,10 +307,45 @@ impl Streamer {
         // (alpha.9 OMT output is a frame-tee, so the sender's format
         // is whatever the source produces — no transcode, no resize).
         //
-        // ndi_audio_rx is the audio channel from NDI capture; only
-        // populated when OMT output is enabled (so we don't waste
-        // SDK queue space draining audio nobody's listening for).
-        let omt_output_enabled = self.state.snapshot().omt_output_enabled;
+        // alpha.42: when source is NDI and the operator picked Auto
+        // (not Custom-AVF/dshow and not Silent), allocate a TCP audio
+        // bridge that FFmpeg will connect to as its audio input. The
+        // NDI capture loop drains audio chunks and the writer task
+        // (spawned below) converts NDI's planar f32 → s16le
+        // interleaved and writes to the bridge socket. This replaces
+        // the lavfi-anullsrc-as-fallback path that made NDI → DeckLink
+        // (and NDI → ATEM with no Custom device) silently lose all
+        // audio. See audio_bridge.rs for why TCP loopback is the
+        // chosen cross-platform plumbing.
+        let snap_for_audio = self.state.snapshot();
+        let want_ndi_audio_to_ffmpeg = plan.source.id == "ndi"
+            && snap_for_audio.audio_mode != "silent"
+            && snap_for_audio.audio_mode != "custom";
+        let audio_bridge: Option<crate::audio_bridge::AudioBridge> = if want_ndi_audio_to_ffmpeg {
+            match crate::audio_bridge::AudioBridge::start().await {
+                Ok(b) => {
+                    log::info!(
+                        "audio_bridge :{} ready — FFmpeg will receive NDI audio via TCP",
+                        b.port()
+                    );
+                    Some(b)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "audio_bridge start failed: {e} — falling back to silent audio"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // ndi_audio_rx is the audio channel from NDI capture. Populated
+        // when ANY audio consumer is interested — OMT-out (alpha.13) or
+        // the TCP audio bridge to FFmpeg (alpha.42).
+        let omt_output_enabled = snap_for_audio.omt_output_enabled;
+        let audio_wanted = omt_output_enabled || audio_bridge.is_some();
         let (cmd, ndi_capture, omt_capture, frame_rx, raw_format, ndi_audio_rx) =
             match plan.source.id.as_str() {
                 "ndi" => {
@@ -324,9 +359,10 @@ impl Streamer {
                     let (format, capture, rx, audio_rx) = NdiCapture::start_and_probe_format(
                         ndi_source,
                         Duration::from_secs(5),
-                        omt_output_enabled,
+                        audio_wanted,
                     )?;
-                    let cmd = self.build_ffmpeg_cmd_for_ndi(&plan, &format);
+                    let cmd =
+                        self.build_ffmpeg_cmd_for_ndi(&plan, &format, audio_bridge.as_ref());
                     let rf = Some((format.width, format.height, format.ffmpeg_pix_fmt));
                     (cmd, Some(capture), None, Some(rx), rf, audio_rx)
                 }
@@ -627,8 +663,12 @@ impl Streamer {
         // capture thread already gates audio drain on the same boolean
         // (omt_output_enabled was passed in at start_and_probe_format)
         // so the channel only exists in the case we want to consume.
-        if let (Some(audio_rx), Some(sender)) = (ndi_audio_rx, omt_sender.clone()) {
-            tokio::spawn(ndi_audio_writer_task(audio_rx, sender));
+        if let Some(audio_rx) = ndi_audio_rx {
+            let task_sender = omt_sender.clone();
+            let task_bridge = audio_bridge.clone();
+            if task_sender.is_some() || task_bridge.is_some() {
+                tokio::spawn(ndi_audio_writer_task(audio_rx, task_sender, task_bridge));
+            }
         }
 
         // Reset stats for the new session.
@@ -945,7 +985,12 @@ impl Streamer {
     /// every other case uses lavfi anullsrc (silent — gets muted to
     /// match user intent for the silent path, passes through as
     /// silence-where-audio-would-be for auto).
-    fn build_ffmpeg_cmd_for_ndi(&self, plan: &StreamPlan, fmt: &NdiVideoFormat) -> Vec<String> {
+    fn build_ffmpeg_cmd_for_ndi(
+        &self,
+        plan: &StreamPlan,
+        fmt: &NdiVideoFormat,
+        audio_bridge: Option<&crate::audio_bridge::AudioBridge>,
+    ) -> Vec<String> {
         let size = format!("{}x{}", fmt.width, fmt.height);
         let fps = fmt.fps().to_string();
         let mut input_args: Vec<String> = vec![
@@ -963,8 +1008,19 @@ impl Streamer {
             None
         };
 
-        if cfg!(target_os = "macos") {
-            if let Some(audio_name) = custom_audio_name.as_deref() {
+        // alpha.42 audio-input priority order:
+        //   1. Custom AVF/dshow device (Dante VSC / USB mic / etc.)
+        //      — operator explicitly picked an external device, route
+        //      its raw audio in.
+        //   2. NDI audio via TCP bridge — the operator's Auto mode
+        //      gets the NDI source's own audio passed through to
+        //      FFmpeg. NEW in alpha.42; before this commit, Auto mode
+        //      with NDI source produced silence.
+        //   3. lavfi anullsrc — operator picked Silent, OR audio
+        //      bridge allocation failed, OR we're on a platform
+        //      without proper audio device support yet.
+        if let Some(audio_name) = custom_audio_name.as_deref() {
+            if cfg!(target_os = "macos") {
                 // AVFoundation audio-only input. The leading colon in
                 // ":<name>" tells avfoundation there's no video for
                 // this input, just the named audio device. This is
@@ -975,44 +1031,37 @@ impl Streamer {
                     "-f".into(), "avfoundation".into(),
                     "-i".into(), format!(":{audio_name}"),
                 ]);
-            } else {
-                input_args.extend([
-                    "-f".into(), "lavfi".into(),
-                    "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
-                ]);
-            }
-        } else if cfg!(target_os = "windows") {
-            // DirectShow audio-only input. FFmpeg's dshow demuxer
-            // accepts an `audio=<DeviceName>` URI for an audio-only
-            // device; same role as the AVF `:<name>` form on macOS.
-            // Dante Virtual Soundcard for Windows exposes via WDM/
-            // Core Audio and shows up in `-f dshow -list_devices` —
-            // its name typically includes parens (e.g.
-            // "Dante Virtual Soundcard (Dante Virtual Soundcard
-            // 64ch x64)"), passed verbatim through the Command
-            // argument so FFmpeg's parser sees the whole string.
-            //
-            // The pan filter in build_audio_filter() is platform-
-            // agnostic — it fires off the device NAME, so picking a
-            // device whose name contains "dante" or "aggregate" gets
-            // the same L/R channel-pair routing as macOS Dante.
-            if let Some(audio_name) = custom_audio_name.as_deref() {
+            } else if cfg!(target_os = "windows") {
+                // DirectShow audio-only input. FFmpeg's dshow demuxer
+                // accepts an `audio=<DeviceName>` URI for an audio-only
+                // device; same role as the AVF `:<name>` form on macOS.
+                // Dante Virtual Soundcard for Windows exposes via WDM/
+                // Core Audio and shows up in `-f dshow -list_devices`.
+                // The pan filter in build_audio_filter() is platform-
+                // agnostic — it fires off the device NAME so picking a
+                // device whose name contains "dante" or "aggregate" gets
+                // the same L/R channel-pair routing as macOS Dante.
                 log::info!("NDI + custom dshow audio: routing through {audio_name:?}");
                 input_args.extend([
                     "-f".into(), "dshow".into(),
                     "-i".into(), format!("audio={audio_name}"),
                 ]);
             } else {
+                // Linux — PulseAudio / ALSA wiring lands as a follow-up
+                // when there's a real Linux production use case to test
+                // against. Silent fallback so the stream still works.
                 input_args.extend([
                     "-f".into(), "lavfi".into(),
                     "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
                 ]);
             }
+        } else if let Some(bridge) = audio_bridge {
+            log::info!(
+                "NDI audio -> FFmpeg via TCP bridge on port {}",
+                bridge.port()
+            );
+            input_args.extend(bridge.ffmpeg_input_args());
         } else {
-            // Linux — PulseAudio / ALSA wiring lands as a follow-up
-            // when there's a real Linux production use case to test
-            // against. Stay on lavfi for now so the stream still
-            // works (silent audio).
             input_args.extend([
                 "-f".into(), "lavfi".into(),
                 "-i".into(), "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
@@ -1071,7 +1120,14 @@ impl Streamer {
              {}x{}@{}/{} pix_fmt={}",
             fmt.width, fmt.height, fmt.fps_num, fmt.fps_den, fmt.ffmpeg_pix_fmt,
         );
-        self.build_ffmpeg_cmd_for_ndi(plan, &as_ndi)
+        // OMT pass-through path doesn't currently wire its own audio
+        // bridge — alpha.13's OMT audio capture was for OmtSender feed,
+        // not FFmpeg input. So None here; OMT source falls through to
+        // the lavfi anullsrc fallback unless the operator picks Custom
+        // audio (AVF/dshow). Wiring OMT-source-audio → FFmpeg-input is
+        // a follow-up (audio_bridge.rs is source-agnostic; just needs
+        // OMT capture to expose its audio rx like NDI does).
+        self.build_ffmpeg_cmd_for_ndi(plan, &as_ndi, None)
     }
 
     /// Build the FFmpeg command for a DeckLink output destination.
@@ -2548,36 +2604,51 @@ async fn omt_video_tee_stderr_task(mut stderr: tokio::process::ChildStderr) {
     }
 }
 
-/// Drains NDI audio chunks from the mpsc channel into the OmtSender.
-/// One chunk per call to OMT_Send_SendAudio. Exits when the channel
-/// closes (NDI capture stopped) or after enough consecutive send
-/// errors that something is clearly broken. Unlike the video path,
-/// audio drop-on-error is non-fatal — the OMT consumer can recover
-/// from a missing audio chunk via its own resync logic.
+/// Drains NDI audio chunks from the mpsc channel and fans them out
+/// to up to two consumers:
+///   - `sender` — alpha.13 OmtSender feed (OMT-out audio publishing).
+///   - `bridge` — alpha.42 TCP bridge to FFmpeg (so the encoder gets
+///     real source audio instead of lavfi anullsrc silence).
+/// Exits when the channel closes (NDI capture stopped). Both
+/// consumers are best-effort: send errors are throttle-logged and
+/// the chunk is dropped, never propagated, because audio drops are
+/// recoverable downstream and we don't want to take the video path
+/// down with us.
 async fn ndi_audio_writer_task(
     mut rx: mpsc::Receiver<NdiAudioChunk>,
-    sender: Arc<crate::omt_sender::OmtSender>,
+    sender: Option<Arc<crate::omt_sender::OmtSender>>,
+    bridge: Option<crate::audio_bridge::AudioBridge>,
 ) {
     let mut chunk_count: u64 = 0;
-    let mut error_log_throttle: u64 = 0;
+    let mut omt_error_log_throttle: u64 = 0;
     while let Some(chunk) = rx.recv().await {
-        match sender.feed_audio_frame(
-            &chunk.samples,
-            chunk.num_channels,
-            chunk.sample_rate,
-        ) {
-            Ok(_rc) => {
-                chunk_count = chunk_count.wrapping_add(1);
-            }
-            Err(err) => {
-                if error_log_throttle.is_multiple_of(60) {
-                    log::warn!("OMT-out feed_audio_frame failed (logged 1/60): {err}");
+        if let Some(s) = sender.as_ref() {
+            match s.feed_audio_frame(
+                &chunk.samples,
+                chunk.num_channels,
+                chunk.sample_rate,
+            ) {
+                Ok(_rc) => {}
+                Err(err) => {
+                    if omt_error_log_throttle.is_multiple_of(60) {
+                        log::warn!("OMT-out feed_audio_frame failed (logged 1/60): {err}");
+                    }
+                    omt_error_log_throttle = omt_error_log_throttle.wrapping_add(1);
                 }
-                error_log_throttle = error_log_throttle.wrapping_add(1);
             }
         }
+        if let Some(b) = bridge.as_ref() {
+            let bytes = crate::audio_bridge::ndi_planar_f32_to_s16le_interleaved(
+                &chunk.samples,
+                chunk.num_channels,
+            );
+            if !bytes.is_empty() {
+                b.send(bytes).await;
+            }
+        }
+        chunk_count = chunk_count.wrapping_add(1);
     }
-    log::info!("OMT audio writer task exiting (sent {chunk_count} chunks)");
+    log::info!("NDI audio writer task exiting (drained {chunk_count} chunks)");
 }
 
 #[allow(dead_code)]
