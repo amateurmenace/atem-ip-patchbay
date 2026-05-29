@@ -3681,15 +3681,17 @@ workaround while alpha.60 builds: Audio Mixer = Silent.**
 
 ### Open issues from Session 18
 
-- **alpha.59 NOT yet operator-verified end-to-end (Session 19 #1).** The
-  decisive test is pending: quiet all → power-cycle the ATEM → ONE clean
-  NDI→ATEM connection → does REMOTEENGINEERING show? Then: does
-  hot-swapping between NDI cameras switch cleanly without re-locking the
-  ATEM? (At session end the ATEM slot may still have been locked;
-  Windows was force-stopped/quiet, the Mac still needed quieting.)
-- **Mac needs updating to alpha.59** (Releases v0.2.0-alpha.59 macOS
-  arm64 .dmg) — that's where the operator tests; the graceful-stop fix
-  matters there too.
+- **alpha.60 installed + verified on Windows; end-to-end NOT yet
+  operator-confirmed (Session 19 #1).** alpha.60 added the NDI-audio-
+  bridge fix (the actual "NDI black" cause). Decisive test pending: NDI
+  source + Audio Mixer = **Auto** (not Silent) → ATEM shows video AND
+  plays audio. Operator already confirmed the **Silent** workaround gives
+  video; alpha.60 should restore audio without it. Also to confirm on
+  real hardware: alpha.59 hot-swap between NDI cameras (clean switch,
+  status "Switching", no re-lock) + graceful stop not wedging the ATEM.
+- **Mac needs updating to alpha.60** (Releases v0.2.0-alpha.60 macOS
+  arm64 .dmg) — that's where the operator tests; both the graceful-stop
+  (alpha.59) and audio-bridge (alpha.60) fixes matter there.
 - **Intermittent NDI-start wedge on Windows.** Several times,
   `NdiCapture::start_and_probe_format` → `receiver.capture_video(500ms)`
   blocked PAST its 5s deadline when the NDI SDK/source was in a bad state
@@ -3717,12 +3719,14 @@ workaround while alpha.60 builds: Audio Mixer = Silent.**
 
 ### Session 19 priorities
 
-1. **Verify alpha.59 end-to-end (#1).** Update the Mac to alpha.59. Then
-   quiet every machine → power-cycle the ATEM → ONE clean NDI→ATEM stream
-   → confirm REMOTEENGINEERING shows. Then confirm hot-swapping between
-   NDI cameras switches cleanly (source change auto-restarts, status
-   briefly "Switching", ATEM re-acquires without locking). Closes the
-   Session-18 arc.
+1. **Verify alpha.60 end-to-end (#1) — closes the Session-18 arc.**
+   Update the Mac to alpha.60. Key test: NDI source + Audio Mixer =
+   **Auto** → ATEM shows video AND plays audio (the alpha.60 audio-bridge
+   fix; the operator already has video via the Silent workaround). Then
+   confirm alpha.59's hot-swap (change NDI source while live → clean
+   auto-restart, status "Switching", no ATEM re-lock) and that graceful
+   stop no longer wedges the ATEM. Reminders: only ONE machine per ATEM
+   key; quiet all machines before a clean start.
 2. **Harden the NDI-start wedge.** Hard wall-clock timeout/watchdog
    around `NdiCapture::start_and_probe_format` so a hung `capture_video`
    can't freeze the instance. The remaining reliability hole.
