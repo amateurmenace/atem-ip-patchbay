@@ -185,15 +185,20 @@ impl SystemMonitor {
                     .processes()
                     .iter()
                     .filter(|(_, p)| {
-                        p.name().to_string_lossy().to_lowercase().contains("ffmpeg")
+                        // alpha.56: sysinfo 0.30's Process::name returns
+                        // &str directly (not &OsStr) — drop the
+                        // to_string_lossy that compiled clean on my Mac
+                        // because of a different sysinfo feature
+                        // resolution but blew up Windows CI:
+                        //   error[E0599]: no method named `to_string_lossy`
+                        //   found for reference `&str` in the current scope
+                        p.name().to_lowercase().contains("ffmpeg")
                     })
                     .map(|(pid, p)| {
-                        let cmd_vec = p.cmd();
-                        let cmd_str: String = cmd_vec
-                            .iter()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        // p.cmd() returns &[String] in sysinfo 0.30, so
+                        // each element is already a String — join
+                        // directly without per-element conversion.
+                        let cmd_str: String = p.cmd().join(" ");
                         // Trim to first 80 chars and try to find a
                         // human-meaningful sub-arg (-format_code,
                         // destination url, etc.) for the excerpt.
