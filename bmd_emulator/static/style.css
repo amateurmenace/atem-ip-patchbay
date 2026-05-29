@@ -47,17 +47,24 @@ code, pre { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-siz
 .topbar-inner {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 22px 28px;
-  max-width: 1080px;
+  gap: 18px;
+  padding: 18px 24px;
+  /* alpha.50 hotfix — view-toggle + sys-pill expanded the topbar
+     content beyond the previous 1080px max-width, causing .brand
+     to collapse into a single-character column with the SVG mark
+     barely visible. Drop the cap so we use the full viewport;
+     justify-content removed so brand sticks left, status-block
+     pushes right via margin-left:auto on .view-toggle. */
   margin: 0 auto;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 20px;
-  min-width: 0;
+  gap: 18px;
+  /* flex-shrink: 0 so the logo + title can't be squeezed when
+     the row fills up. min-width is intentionally NOT 0 so the
+     title block stays readable. */
+  flex-shrink: 0;
   background: transparent;
   border: 0;
   padding: 6px 8px;
@@ -73,7 +80,7 @@ code, pre { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-siz
 .brand:active { transform: translateY(0); }
 .brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 
-.brand-mark { width: 64px; height: 64px; flex-shrink: 0; color: var(--text); transition: filter 0.25s ease; }
+.brand-mark { width: 48px; height: 48px; flex-shrink: 0; color: var(--text); transition: filter 0.25s ease; }
 .brand:hover .brand-mark { filter: drop-shadow(0 0 12px rgba(255,120,51,0.45)); }
 
 .bm-bar { opacity: 0.55; transition: opacity 0.4s ease; transform-origin: center; }
@@ -136,7 +143,11 @@ body.is-streaming .title-block h1 {
   font-weight: 600;
 }
 
-.status-block { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+/* alpha.50 hotfix — push status block (pill / duration / monitor / sys-pill /
+   net-utility / refresh) to the right edge so the view-toggle sits next to
+   the brand on the left. Reduced gap to 10px so the right cluster doesn't
+   overflow the row on narrower windows. */
+.status-block { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; flex-wrap: nowrap; }
 .status-pill {
   background: var(--panel-2);
   border: 1px solid var(--line);

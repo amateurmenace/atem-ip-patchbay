@@ -1308,8 +1308,29 @@ fn apply_config_update(
     creds_holder: &unifi::CredentialsHolder,
     body: &str,
 ) -> Result<(), String> {
+    // alpha.51 — instrumentation. Operator reports persistent
+    // "Timed out after 12s" on the UDM key form despite alpha.43's
+    // spawn-per-request multithreading. Log each phase + timing so
+    // /api/log surfaces where the latency is (JSON parse, lock
+    // acquisition, individual field updates). The bytes() len bound
+    // keeps us from printing a huge body if somebody sends one.
+    let started = std::time::Instant::now();
+    let body_summary = if body.len() > 200 {
+        format!("{}…(+{} bytes)", &body[..200], body.len() - 200)
+    } else {
+        body.to_string()
+    };
+    eprintln!(
+        "[/api/config] received {} bytes: {}",
+        body.len(),
+        body_summary.replace('\n', " ")
+    );
     let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("invalid JSON: {e}"))?;
+    eprintln!(
+        "[/api/config] JSON parse OK after {:?}",
+        started.elapsed()
+    );
 
     let url_field = parsed
         .get("url")
