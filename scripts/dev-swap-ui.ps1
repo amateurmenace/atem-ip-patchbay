@@ -53,7 +53,11 @@ function Resolve-InstallDir {
         "C:\Program Files (x86)\ATEM IP Patchbay"
     )
     foreach ($c in $candidates) {
-        if (Test-Path (Join-Path $c "resources\static\index.html")) {
+        # Tauri NSIS lays out static/ + sidecar/ at the install root,
+        # NOT under a resources/ subdir (despite tauri.conf.json's
+        # bundle.resources mapping — NSIS strips the "resources/"
+        # prefix and lands files directly at $INSTDIR).
+        if (Test-Path (Join-Path $c "static\index.html")) {
             return $c
         }
     }
@@ -71,9 +75,8 @@ if (-not (Test-Path (Join-Path $staticSrc "index.html"))) {
 }
 
 $installDir = Resolve-InstallDir -Override $InstallDir
-$resourceDir = Join-Path $installDir "resources"
-$staticDest = Join-Path $resourceDir "static"
-$sidecarDest = Join-Path $resourceDir "sidecar"
+$staticDest = Join-Path $installDir "static"
+$sidecarDest = Join-Path $installDir "sidecar"
 
 if (-not (Test-Path $staticDest)) {
     Write-Host "ERROR: could not find an installed ATEM IP Patchbay at:" -ForegroundColor Red
