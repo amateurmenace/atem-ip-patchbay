@@ -142,10 +142,23 @@ impl AudioBridge {
     /// dropping audio chunks, then go silent entirely. Wallclock
     /// stamping combined with aresample=async in build_audio_filter
     /// lets FFmpeg's resampler absorb the drift continuously.
-    pub fn ffmpeg_input_args(&self) -> Vec<String> {
-        vec![
-            "-use_wallclock_as_timestamps".into(),
-            "1".into(),
+    ///
+    /// alpha.60: `use_wallclock` is now caller-controlled. Wallclock
+    /// stamping is right for the DeckLink path (the drift remedy above),
+    /// but on the SRT/MPEG-TS path it puts the audio on a real-time
+    /// timeline while the video (rawvideo pipe) is 0-based frame time —
+    /// the mismatched PTS breaks the program PCR so the ATEM can't
+    /// present the video (operator-confirmed: NDI→ATEM was black with the
+    /// bridge; video appeared the instant audio was set to Silent). So
+    /// callers pass `false` for SRT/RTMP (audio PTS from sample count,
+    /// 0-based, aligned with the video) and `true` only for DeckLink.
+    pub fn ffmpeg_input_args(&self, use_wallclock: bool) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        if use_wallclock {
+            args.push("-use_wallclock_as_timestamps".into());
+            args.push("1".into());
+        }
+        args.extend([
             "-f".into(),
             "s16le".into(),
             "-ar".into(),
@@ -156,7 +169,8 @@ impl AudioBridge {
             "stereo".into(),
             "-i".into(),
             format!("tcp://127.0.0.1:{}?listen=0", self.inner.port),
-        ]
+        ]);
+        args
     }
 }
 

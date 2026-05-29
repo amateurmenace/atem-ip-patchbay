@@ -1088,7 +1088,13 @@ impl Streamer {
                 "NDI audio -> FFmpeg via TCP bridge on port {}",
                 bridge.port()
             );
-            input_args.extend(bridge.ffmpeg_input_args());
+            // alpha.60: wallclock audio timestamps only for DeckLink (its
+            // clock-drift remedy). On SRT/MPEG-TS, wallclock puts audio on
+            // a real-time timeline vs the 0-based video and breaks the
+            // program PCR → the ATEM shows black. Sample-count PTS keeps
+            // the bridge audio aligned with the video for the ATEM path.
+            let use_wallclock = plan.protocol == "decklink";
+            input_args.extend(bridge.ffmpeg_input_args(use_wallclock));
         } else {
             input_args.extend([
                 "-f".into(), "lavfi".into(),
