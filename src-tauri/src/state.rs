@@ -362,8 +362,13 @@ impl EncoderState {
                 video_codec: "h265".into(),
                 destination_type: "atem".into(),
                 decklink_device_name: String::new(),
-                decklink_output_mode: String::new(),
-                decklink_format_code: String::new(),
+                // alpha.43 — default DeckLink output mode to 1080p29.97
+                // (Hp29) as the broadcast-NTSC standard. Matches the
+                // app's default video_mode and is supported by every
+                // SDI DeckLink card in our test rig. Operators can
+                // override per-tile via the mode dropdown.
+                decklink_output_mode: "1080p29.97".into(),
+                decklink_format_code: "Hp29".into(),
                 decklink_pixel_format: "uyvy422".into(),
                 video_encoder: "auto".into(),
                 encoder_extra_flags: String::new(),

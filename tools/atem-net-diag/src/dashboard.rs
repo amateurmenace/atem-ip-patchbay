@@ -720,47 +720,82 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .stderr(Stdio::null())
         .spawn();
 
-    for mut request in server.incoming_requests() {
-        let url = request.url().to_string();
-        let method = request.method().clone();
-        let is_post = matches!(method, tiny_http::Method::Post);
-        let response = match (is_post, url.as_str()) {
-            (false, "/") | (false, "/index.html") => {
-                let mut r = Response::from_string(INDEX_HTML);
-                r.add_header(html_header());
-                r
-            }
-            (false, "/api/state") => {
-                let body = build_state_json(&state);
-                let mut r = Response::from_string(body);
-                r.add_header(json_header());
-                r.add_header(no_cache_header());
-                r
-            }
-            (true, "/api/config") => {
-                let mut body = String::new();
-                if request.as_reader().read_to_string(&mut body).is_err() {
-                    Response::from_string(r#"{"error":"failed to read body"}"#)
-                        .with_status_code(400)
-                } else {
-                    let result = apply_config_update(&state, &creds_holder, &body);
-                    let mut r = Response::from_string(match &result {
-                        Ok(()) => r#"{"ok":true}"#.to_string(),
-                        Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
-                    });
-                    r.add_header(json_header());
-                    r.add_header(no_cache_header());
-                    if result.is_err() {
-                        r = r.with_status_code(400);
-                    }
-                    r
-                }
-            }
-            _ => Response::from_string("404").with_status_code(404),
-        };
-        let _ = request.respond(response);
+    // alpha.43: spawn-per-request multithreading. tiny_http's
+    // incoming_requests() is a single-threaded iterator — without
+    // this, /api/config can block for many seconds queued behind a
+    // slow /api/state poll (build_state_json iterates flows + probes
+    // under state.lock; on a busy production network with hundreds
+    // of UDM clients + many SRT flows + a heavy probe history that's
+    // hundreds of ms per call, polled at 1Hz). The result the
+    // operator saw was "Saving for a long time but nothing seems to
+    // happen" — the POST was queued behind the polls and never
+    // actually processed until something cleared the queue.
+    //
+    // Each request gets its own short-lived OS thread. State + creds
+    // Arcs are cloned in (cheap). Per-request thread overhead is
+    // ~tens of microseconds — negligible compared to the worst-case
+    // serial queueing that motivated this change. A real thread-pool
+    // would be tidier but spawn-per-request is enough for a tool
+    // that handles maybe 2-3 req/sec at peak (1Hz state poll + the
+    // occasional config POST + asset fetches).
+    let state_for_loop = state;
+    let creds_for_loop = creds_holder;
+    for request in server.incoming_requests() {
+        let state = state_for_loop.clone();
+        let creds = creds_for_loop.clone();
+        std::thread::spawn(move || {
+            handle_request(request, state, creds);
+        });
     }
     unreachable!("incoming_requests is an infinite iterator");
+}
+
+/// Handle one HTTP request. Runs in a dedicated thread spawned by
+/// the accept loop so a slow /api/state response doesn't block
+/// /api/config (or vice versa).
+fn handle_request(
+    mut request: tiny_http::Request,
+    state: Arc<Mutex<DashboardState>>,
+    creds_holder: unifi::CredentialsHolder,
+) {
+    let url = request.url().to_string();
+    let method = request.method().clone();
+    let is_post = matches!(method, tiny_http::Method::Post);
+    let response = match (is_post, url.as_str()) {
+        (false, "/") | (false, "/index.html") => {
+            let mut r = Response::from_string(INDEX_HTML);
+            r.add_header(html_header());
+            r
+        }
+        (false, "/api/state") => {
+            let body = build_state_json(&state);
+            let mut r = Response::from_string(body);
+            r.add_header(json_header());
+            r.add_header(no_cache_header());
+            r
+        }
+        (true, "/api/config") => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                Response::from_string(r#"{"error":"failed to read body"}"#)
+                    .with_status_code(400)
+            } else {
+                let result = apply_config_update(&state, &creds_holder, &body);
+                let mut r = Response::from_string(match &result {
+                    Ok(()) => r#"{"ok":true}"#.to_string(),
+                    Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
+                });
+                r.add_header(json_header());
+                r.add_header(no_cache_header());
+                if result.is_err() {
+                    r = r.with_status_code(400);
+                }
+                r
+            }
+        }
+        _ => Response::from_string("404").with_status_code(404),
+    };
+    let _ = request.respond(response);
 }
 
 fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {

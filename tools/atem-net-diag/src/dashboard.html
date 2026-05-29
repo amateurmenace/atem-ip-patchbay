@@ -1596,13 +1596,36 @@
       const submit = async () => {
         if (!fb) return;
         const key = input.value.trim();
+        // alpha.43 UX fixes for "saving for a long time" complaint:
+        //   - Disable the Save button so the operator knows the click
+        //     registered + can't double-submit.
+        //   - 12s hard timeout via AbortController so a hung server
+        //     surfaces as a real error instead of the indefinite
+        //     "Saving…" the operator saw before.
+        //   - Visible "Saving (Ns)…" countdown so the UI proves it's
+        //     still working even when the response is slow.
+        //   - On success, kick an immediate tick() so the next
+        //     /api/state poll happens NOW rather than waiting up to
+        //     1s for the regular setInterval — the operator sees the
+        //     status transition without thinking nothing happened.
+        button.disabled = true;
+        const origButtonText = button.textContent;
         fb.style.color = 'var(--muted)';
         fb.textContent = 'Saving…';
+        const ctrl = new AbortController();
+        const TIMEOUT_MS = 12000;
+        const startedAt = Date.now();
+        const tickInterval = setInterval(() => {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          if (elapsed >= 1) fb.textContent = `Saving (${elapsed}s)…`;
+        }, 1000);
+        const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
         try {
           const resp = await fetch('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ unifi_api_key: key }),
+            signal: ctrl.signal,
           });
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data.ok) {
@@ -1610,13 +1633,27 @@
             fb.textContent = key ? 'Saved — connecting…' : 'Cleared.';
             input.value = '';
             document.body.dataset.udmOpen = '';
+            // Immediate poll so the operator sees the UDM panel
+            // transition Connecting → Connected without waiting for
+            // the next 1Hz tick. If tick is in flight it'll just
+            // race + the latest result wins; harmless either way.
+            if (typeof tick === 'function') tick();
           } else {
             fb.style.color = '#e85a5a';
             fb.textContent = (data && data.error) || `Save failed (HTTP ${resp.status})`;
           }
         } catch (e) {
           fb.style.color = '#e85a5a';
-          fb.textContent = 'Network error: ' + (e && e.message ? e.message : String(e));
+          if (e && e.name === 'AbortError') {
+            fb.textContent = 'Timed out after 12s — the dashboard server may be overloaded. Try closing + reopening Net Utility.';
+          } else {
+            fb.textContent = 'Network error: ' + (e && e.message ? e.message : String(e));
+          }
+        } finally {
+          clearInterval(tickInterval);
+          clearTimeout(timer);
+          button.disabled = false;
+          button.textContent = origButtonText;
         }
       };
 
