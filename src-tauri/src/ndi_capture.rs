@@ -61,6 +61,25 @@ const PREVIEW_FRAME_STRIDE: u64 = 15;
 /// keeps payload around 50-150 KB per frame at 1080p.
 const PREVIEW_JPEG_QUALITY: u8 = 60;
 
+/// Hard watchdog margin added on top of `format_timeout` for the
+/// first-frame probe. The probe loop is *supposed* to self-terminate
+/// at `format_timeout` with a clean "source isn't sending" error — but
+/// that only works when `capture_video` honors its 500ms timeout and
+/// returns control. A wedged NDI SDK can leave a single `capture_video`
+/// call blocked indefinitely, past the soft deadline, which used to
+/// hang the caller — and because `start()` runs on the async runtime,
+/// the whole instance went unresponsive (Responding=false, every
+/// /api/* timing out, no recovery short of a reboot; the reconnect
+/// supervisor's retries made it worse, blocking a fresh worker each
+/// attempt until the pool drained). We run the blocking probe on a
+/// throwaway thread and give up after `format_timeout +
+/// PROBE_WATCHDOG_MARGIN`, returning an error rather than hanging. The
+/// abandoned thread is detached: if its `capture_video` ever unblocks
+/// it self-cleans (its result drops, stopping any capture thread it
+/// spawned); if it never does we leak one stuck thread instead of
+/// freezing the app.
+const PROBE_WATCHDOG_MARGIN: Duration = Duration::from_secs(3);
+
 /// What the streamer needs to build a matching FFmpeg input args.
 #[derive(Debug, Clone, Copy)]
 pub struct NdiVideoFormat {
@@ -143,7 +162,9 @@ impl NdiCapture {
         // Each capture session gets its own NDI handle. (The
         // discovery Finder lives on its own NDI handle in
         // [`crate::ndi_runtime`]; receivers and finders are
-        // independent.)
+        // independent.) NDI::new + Receiver::new are local allocations
+        // with no network wait, so they run on the caller's thread;
+        // only the blocking first-frame probe needs the watchdog.
         let ndi = NDI::new()?;
         let receiver = Receiver::new(
             &ndi,
@@ -153,94 +174,35 @@ impl NdiCapture {
                 .build(),
         )?;
 
-        // Probe — capture frames until we get one with non-empty data.
-        // NDI sometimes sends empty status frames before the real
-        // video starts, so we loop within the timeout.
-        let deadline = std::time::Instant::now() + format_timeout;
-        let frame = loop {
-            if std::time::Instant::now() > deadline {
-                return Err(anyhow!(
-                    "no video frame received within {:?} — is the NDI source actually sending?",
-                    format_timeout
-                ));
-            }
-            match receiver.capture_video(Duration::from_millis(500)) {
-                Ok(f) if !f.data.is_empty() && f.width > 0 && f.height > 0 => break f,
-                Ok(_) => continue,
-                Err(_) => continue,
-            }
-        };
-
-        let format = NdiVideoFormat {
-            width: frame.width as u32,
-            height: frame.height as u32,
-            fps_num: frame.frame_rate_n.max(1) as u32,
-            fps_den: frame.frame_rate_d.max(1) as u32,
-            ffmpeg_pix_fmt: pix_fmt_for_ffmpeg(frame.pixel_format),
-        };
-        let bpp = bytes_per_pixel(frame.pixel_format);
-        let expected_packed = (format.width as usize) * (format.height as usize) * bpp;
-        log::info!(
-            "NDI capture probed: {}x{}@{}/{} pix_fmt={:?}->{} bpp={} \
-             stride={:?} data_len={} expected_packed={}",
-            format.width,
-            format.height,
-            format.fps_num,
-            format.fps_den,
-            frame.pixel_format,
-            format.ffmpeg_pix_fmt,
-            bpp,
-            frame.line_stride_or_size,
-            frame.data.len(),
-            expected_packed,
-        );
-
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(FRAME_CHANNEL_CAPACITY);
-        // Send the buffered first frame so the encoder gets a clean
-        // start without a 1-frame stutter. Pack first to strip any
-        // line-stride padding (NDI senders are allowed to align rows
-        // to >width*bpp; FFmpeg's rawvideo demuxer expects tightly
-        // packed frames).
-        let first_packed = pack_frame(&frame, bpp);
-        log::info!(
-            "NDI first frame packed: {} bytes (expected {})",
-            first_packed.len(),
-            expected_packed
-        );
-        let _ = tx.try_send(first_packed);
-
-        // Audio channel — only allocated when the caller plans to
-        // consume audio (OMT-out enabled). When `audio_wanted` is
-        // false, the capture loop receives `None` for its audio tx
-        // and skips audio drain entirely.
-        let (audio_tx, audio_rx) = if audio_wanted {
-            let (atx, arx) = mpsc::channel::<NdiAudioChunk>(AUDIO_CHANNEL_CAPACITY);
-            (Some(atx), Some(arx))
-        } else {
-            (None, None)
-        };
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let preview = Arc::new(std::sync::Mutex::new(None));
-        let stop_w = stop.clone();
-        let preview_w = preview.clone();
-        let handle = thread::Builder::new()
-            .name("ndi-capture".into())
+        // Run the blocking probe (first-frame wait) + capture-thread
+        // spin-up on a throwaway thread, bounded by a hard wall-clock
+        // watchdog. A wedged NDI SDK can leave `capture_video` blocked
+        // past the soft `format_timeout`; without this the caller — and,
+        // since start() is on the async runtime, the whole instance —
+        // hangs until reboot. See PROBE_WATCHDOG_MARGIN. The probe
+        // thread sends its Result back; if it never does, recv_timeout
+        // gives up and we return an error, abandoning the thread.
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let hard_deadline = format_timeout + PROBE_WATCHDOG_MARGIN;
+        thread::Builder::new()
+            .name("ndi-probe".into())
             .spawn(move || {
-                let _ndi = ndi; // keep handle alive for the receiver's lifetime
-                run_capture_loop(receiver, stop_w, tx, audio_tx, preview_w);
+                // If the watchdog already gave up, result_rx is gone and
+                // this send returns Err — the built result (and any
+                // capture thread it spawned) drops here, self-cleaning.
+                let _ =
+                    result_tx.send(probe_and_spawn(ndi, receiver, format_timeout, audio_wanted));
             })?;
 
-        Ok((
-            format,
-            NdiCapture {
-                stop,
-                handle: Some(handle),
-                preview,
-            },
-            rx,
-            audio_rx,
-        ))
+        match result_rx.recv_timeout(hard_deadline) {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "NDI probe watchdog fired after {:?}: the source or NDI SDK appears wedged \
+                 (capture_video never returned). Abandoned the probe to keep the app \
+                 responsive — retry, or restart the NDI source if this repeats.",
+                hard_deadline
+            )),
+        }
     }
 
     /// Signal the capture thread to exit and wait for it to drain.
@@ -326,6 +288,115 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str, timeout: Duration) {
              (reclaimed at process exit)"
         );
     }
+}
+
+/// The blocking half of [`NdiCapture::start_and_probe_format`], run on
+/// a watchdog-guarded throwaway thread: wait for the first real video
+/// frame (so the caller can build a matching FFmpeg command), then spin
+/// up the capture thread and return the format + channels. Split out so
+/// the caller can abandon it via `recv_timeout` when the NDI SDK wedges.
+/// Takes ownership of `ndi` + `receiver` (both built on the caller's
+/// thread) and moves `ndi` into the capture thread to keep the SDK
+/// handle alive for the receiver's lifetime.
+fn probe_and_spawn(
+    ndi: NDI,
+    receiver: Receiver,
+    format_timeout: Duration,
+    audio_wanted: bool,
+) -> Result<(
+    NdiVideoFormat,
+    NdiCapture,
+    mpsc::Receiver<Vec<u8>>,
+    Option<mpsc::Receiver<NdiAudioChunk>>,
+)> {
+    // Probe — capture frames until we get one with non-empty data.
+    // NDI sometimes sends empty status frames before the real video
+    // starts, so we loop within the timeout. The enclosing watchdog
+    // bounds the worst case if a single capture_video never returns.
+    let deadline = Instant::now() + format_timeout;
+    let frame = loop {
+        if Instant::now() > deadline {
+            return Err(anyhow!(
+                "no video frame received within {:?} — is the NDI source actually sending?",
+                format_timeout
+            ));
+        }
+        match receiver.capture_video(Duration::from_millis(500)) {
+            Ok(f) if !f.data.is_empty() && f.width > 0 && f.height > 0 => break f,
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    };
+
+    let format = NdiVideoFormat {
+        width: frame.width as u32,
+        height: frame.height as u32,
+        fps_num: frame.frame_rate_n.max(1) as u32,
+        fps_den: frame.frame_rate_d.max(1) as u32,
+        ffmpeg_pix_fmt: pix_fmt_for_ffmpeg(frame.pixel_format),
+    };
+    let bpp = bytes_per_pixel(frame.pixel_format);
+    let expected_packed = (format.width as usize) * (format.height as usize) * bpp;
+    log::info!(
+        "NDI capture probed: {}x{}@{}/{} pix_fmt={:?}->{} bpp={} \
+         stride={:?} data_len={} expected_packed={}",
+        format.width,
+        format.height,
+        format.fps_num,
+        format.fps_den,
+        frame.pixel_format,
+        format.ffmpeg_pix_fmt,
+        bpp,
+        frame.line_stride_or_size,
+        frame.data.len(),
+        expected_packed,
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(FRAME_CHANNEL_CAPACITY);
+    // Send the buffered first frame so the encoder gets a clean start
+    // without a 1-frame stutter. Pack first to strip any line-stride
+    // padding (NDI senders are allowed to align rows to >width*bpp;
+    // FFmpeg's rawvideo demuxer expects tightly packed frames).
+    let first_packed = pack_frame(&frame, bpp);
+    log::info!(
+        "NDI first frame packed: {} bytes (expected {})",
+        first_packed.len(),
+        expected_packed
+    );
+    let _ = tx.try_send(first_packed);
+
+    // Audio channel — only allocated when the caller plans to consume
+    // audio (OMT-out enabled). When `audio_wanted` is false, the
+    // capture loop receives `None` for its audio tx and skips audio
+    // drain entirely.
+    let (audio_tx, audio_rx) = if audio_wanted {
+        let (atx, arx) = mpsc::channel::<NdiAudioChunk>(AUDIO_CHANNEL_CAPACITY);
+        (Some(atx), Some(arx))
+    } else {
+        (None, None)
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let preview = Arc::new(std::sync::Mutex::new(None));
+    let stop_w = stop.clone();
+    let preview_w = preview.clone();
+    let handle = thread::Builder::new()
+        .name("ndi-capture".into())
+        .spawn(move || {
+            let _ndi = ndi; // keep handle alive for the receiver's lifetime
+            run_capture_loop(receiver, stop_w, tx, audio_tx, preview_w);
+        })?;
+
+    Ok((
+        format,
+        NdiCapture {
+            stop,
+            handle: Some(handle),
+            preview,
+        },
+        rx,
+        audio_rx,
+    ))
 }
 
 fn run_capture_loop(
