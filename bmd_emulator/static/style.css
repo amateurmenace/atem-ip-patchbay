@@ -2636,6 +2636,44 @@ pre {
 html[data-hero-hidden="true"] .show-intro-btn { display: inline-flex; align-items: center; gap: 4px; }
 html[data-hero-hidden="true"] .hero { display: none; }
 
+/* alpha.50 — system health pill in single-view topbar. Same visual
+   shape as multiview's embedded pill so the operator's mental model
+   carries between views. Click opens the system-drawer (right-side
+   slide-out from /static/system-drawer.js). */
+.sys-pill-topbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(0,0,0,0.35);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sys-pill-topbar:hover {
+  border-color: rgba(255,255,255,0.25);
+}
+.sys-pill-topbar .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.sys-pill-topbar.green { border-color: rgba(95,208,107,0.5); color: #5fd06b; }
+.sys-pill-topbar.green .dot { background: #5fd06b; box-shadow: 0 0 6px rgba(95,208,107,0.6); }
+.sys-pill-topbar.yellow { border-color: rgba(240,184,79,0.55); color: #f0b84f; }
+.sys-pill-topbar.yellow .dot { background: #f0b84f; box-shadow: 0 0 6px rgba(240,184,79,0.6); }
+.sys-pill-topbar.red { border-color: rgba(232,92,92,0.7); color: #e85c5c; background: rgba(232,92,92,0.06); }
+.sys-pill-topbar.red .dot { background: #e85c5c; box-shadow: 0 0 8px rgba(232,92,92,0.8); }
+.sys-pill-topbar.unknown { color: var(--muted); }
+
 /* alpha.48 — VU meter overlay on the single-view preview frame.
    Mirrors the multiview tile pattern: thin vertical canvases top-right
    with a dB readout below. pollAudioLevels in app.js renders to the
