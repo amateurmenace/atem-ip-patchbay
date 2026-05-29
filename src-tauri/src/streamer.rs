@@ -1266,6 +1266,76 @@ impl Streamer {
         self: Arc<Self>,
         stderr: tokio::process::ChildStderr,
     ) -> AttemptOutcome {
+        // alpha.41 stall detector: FFmpeg can be in a "Streaming but
+        // no frames out" state where the process is still alive but
+        // the encoder is stuck (input source went away mid-stream,
+        // DeckLink driver hung, NDI receiver buffer drained etc.).
+        // alpha.30's supervisor catches CLEAN exits via wait()'s
+        // return value but a hung FFmpeg never exits — so without
+        // explicit liveness checking the tile would show "Streaming"
+        // forever with a black SDI output and the operator wouldn't
+        // know until somebody downstream notices.
+        //
+        // Detection: poll the encoder's snapshot every second. After
+        // 5 consecutive ticks where status="Streaming" but fps is
+        // ~0, force-kill the child. The kill causes FFmpeg's stderr
+        // pipe to close, the stderr-read loop below sees EOF,
+        // run_one_attempt finishes normally and returns
+        // UnexpectedExit — the supervisor then triggers an
+        // alpha.30 backoff-and-reconnect like any other unexpected
+        // exit. So the operator sees "Reconnecting in 2s · 1/12"
+        // instead of a stuck-Streaming-forever tile.
+        //
+        // We only detect during Streaming because Connecting can
+        // legitimately take a few seconds (NDI source discovery,
+        // SRT handshake). Frozen-during-Connecting is alpha.30's
+        // existing handle_unexpected_exit territory (FFmpeg exits
+        // with an error → backoff already kicks in).
+        let stall_self = self.clone();
+        let stall_task = tokio::spawn(async move {
+            let mut consec_stalls: u32 = 0;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // First tick fires immediately — skip it so we get a
+            // ~1s warm-up before evaluating.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let snap = stall_self.state.snapshot();
+                let status_low = snap.stats.status.to_lowercase();
+                if status_low != "streaming" {
+                    consec_stalls = 0;
+                    continue;
+                }
+                if snap.stats.fps < 0.5 {
+                    consec_stalls += 1;
+                    if consec_stalls >= 5 {
+                        log::warn!(
+                            "Stall detector: FFmpeg in Streaming with fps={:.2} for 5s — \
+                             killing the child so the supervisor triggers reconnect",
+                            snap.stats.fps
+                        );
+                        stall_self.state.stats_in_place(|s| {
+                            s.error = Some(
+                                "Stream froze (no frames for 5s) — restarting".into(),
+                            );
+                        });
+                        let mut inner = stall_self.inner.lock().await;
+                        if let Some(child) = inner.child.as_mut() {
+                            // start_kill sends SIGKILL/TerminateProcess
+                            // without waiting; the stderr-loop below
+                            // observes EOF on the next read and
+                            // exits naturally.
+                            let _ = child.start_kill();
+                        }
+                        return;
+                    }
+                } else {
+                    consec_stalls = 0;
+                }
+            }
+        });
+
         // FFmpeg's progress (`frame=… fps=… bitrate=…`) terminates each
         // update with a CARRIAGE RETURN, not a newline — a terminal
         // overwrites the prior line in place. `read_until(b'\n')`
@@ -1310,6 +1380,13 @@ impl Streamer {
             let line = String::from_utf8_lossy(&acc).to_string();
             self.handle_log_line(&line).await;
         }
+
+        // alpha.41: stall detector outlived its purpose now that
+        // FFmpeg has exited (either naturally or via the detector
+        // itself force-killing the child). Abort the task so it
+        // doesn't tick uselessly while the supervisor decides
+        // whether to reconnect.
+        stall_task.abort();
 
         // Stderr EOF — child is exiting. Wait for the exit code and
         // clean up per-attempt resources (NDI/OMT capture so the

@@ -13,8 +13,10 @@ mod preview;
 mod protocol;
 mod sources;
 mod state;
+mod state_persist;
 mod streamer;
 mod streamid;
+mod system_monitor;
 mod xml;
 
 use std::path::PathBuf;
@@ -292,6 +294,32 @@ pub fn run() {
             load_default_xml_files(app.handle(), &encoder);
             apply_default_devices_at_boot(&encoder);
 
+            // alpha.41: restore each tile's persisted settings from
+            // disk. Runs AFTER apply_default_devices_at_boot for tile
+            // 0 so the persisted state overrides the defaults (the
+            // operator's last-saved picks take priority). Tiles 1+
+            // didn't have defaults applied; they only get whatever
+            // load_and_apply restores or stay empty.
+            //
+            // Wrapped in an Arc<PathBuf> so the per-tile HttpAppState
+            // mounts inside router() can each carry a cheap clone.
+            // The path itself doesn't change across the process
+            // lifetime — Arc is for sharing, not interior mutability.
+            let state_dir = Arc::new(instance_dir.clone());
+            for tile in fleet.tiles() {
+                let _ = state_persist::load_and_apply(&state_dir, tile.idx, &tile.encoder);
+            }
+
+            // alpha.41: start the system health monitor. Polls CPU%
+            // + memory every 1.5s in a background tokio task. Surfaces
+            // via /api/system-health for the multiview header to
+            // render as a traffic-light pill. The monitor task self-
+            // manages its lifetime against the tokio runtime; no
+            // shutdown hook needed because it dies when the runtime
+            // drops at process exit.
+            let system_monitor = system_monitor::SystemMonitor::start();
+            log::info!("system health monitor started (polls every 1.5s)");
+
             // Initialize the NDI runtime (loads libndi.dylib via
             // dlopen). If NDI Tools isn't installed this fails with
             // a clear runtime error and the rest of the app still
@@ -324,7 +352,12 @@ pub fn run() {
                 .expect("could not bind HTTP API port");
             log::info!("HTTP API listening on http://127.0.0.1:{port}/");
 
-            let router = crate::http::router(fleet.clone(), static_dir);
+            let router = crate::http::router(
+                fleet.clone(),
+                static_dir,
+                state_dir.clone(),
+                system_monitor.clone(),
+            );
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = axum::serve(listener, router).await {
                     log::error!("Axum server stopped: {err}");

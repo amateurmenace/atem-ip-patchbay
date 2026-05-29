@@ -40,6 +40,16 @@ pub struct HttpAppState {
     pub encoder: Arc<EncoderState>,
     pub streamer: Arc<Streamer>,
     pub preview: Arc<Preview>,
+    /// Index of the tile this State is scoped to. alpha.41 added
+    /// for state_persist::save_tile — apply_settings needs to know
+    /// which file to write after a successful update.
+    pub tile_idx: u8,
+    /// Per-instance state directory, shared across all tiles in
+    /// this Tauri process. Tile-N state files live at
+    /// <state_dir>/multiview-tile-N.json. Wrapped in Arc so the
+    /// per-mount clone is cheap; the underlying path never changes
+    /// during process lifetime.
+    pub state_dir: Arc<std::path::PathBuf>,
 }
 
 impl HttpAppState {
@@ -47,8 +57,11 @@ impl HttpAppState {
     /// tile-0-alias fields automatically. Panics if the fleet has
     /// zero tiles (which the fleet constructor guarantees never
     /// happens — TILE_COUNT is a compile-time const ≥ 1).
-    pub fn from_fleet(fleet: Arc<EncoderFleet>) -> Self {
-        Self::for_tile(&fleet, 0).expect("fleet must always have at least tile 0")
+    pub fn from_fleet(
+        fleet: Arc<EncoderFleet>,
+        state_dir: Arc<std::path::PathBuf>,
+    ) -> Self {
+        Self::for_tile(&fleet, 0, state_dir).expect("fleet must always have at least tile 0")
     }
 
     /// Construct a per-tile HttpAppState — the `encoder` / `streamer`
@@ -58,13 +71,19 @@ impl HttpAppState {
     /// its own State so handlers automatically dispatch to the
     /// right tile without needing to read a path parameter.
     /// Returns None if `idx` is out of range.
-    pub fn for_tile(fleet: &Arc<EncoderFleet>, idx: u8) -> Option<Self> {
+    pub fn for_tile(
+        fleet: &Arc<EncoderFleet>,
+        idx: u8,
+        state_dir: Arc<std::path::PathBuf>,
+    ) -> Option<Self> {
         let tile = fleet.tile(idx)?;
         Some(HttpAppState {
             encoder: tile.encoder.clone(),
             streamer: tile.streamer.clone(),
             preview: tile.preview.clone(),
             fleet: fleet.clone(),
+            tile_idx: idx,
+            state_dir,
         })
     }
 }
@@ -137,7 +156,19 @@ fn tile_api_routes() -> Router<HttpAppState> {
 ///
 /// `static_dir` is the on-disk path to `bmd_emulator/static/` (or
 /// its bundled equivalent inside the .app's Resources/).
-pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
+///
+/// alpha.41: `state_dir` is the per-instance state directory used
+/// by state_persist to read/write per-tile JSON files. Passed via
+/// HttpAppState so apply_settings can call save_tile after every
+/// successful update. `system_monitor` powers the global
+/// /api/system-health endpoint (mounted alongside the per-tile
+/// routes; not per-tile state because system health is global).
+pub fn router(
+    fleet: Arc<EncoderFleet>,
+    static_dir: PathBuf,
+    state_dir: Arc<PathBuf>,
+    system_monitor: Arc<crate::system_monitor::SystemMonitor>,
+) -> Router {
     // Static-file path mount — must come before nest_service('/') so the
     // /static/* prefix routes win over the index fallback. Wrap with
     // a no-cache layer because the WebView (and most browsers without
@@ -208,6 +239,23 @@ pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
         }))
         .nest_service("/static", static_service);
 
+    // alpha.41 global system-health endpoint. Mounted at the top
+    // level rather than inside the per-tile sub-router because
+    // health is global, not tile-scoped. Uses a closure capture
+    // over the SystemMonitor Arc rather than Axum's State<T> so we
+    // don't have to expose SystemMonitor in HttpAppState (which is
+    // cloned per-tile and would carry a redundant ref everywhere).
+    {
+        let monitor = system_monitor.clone();
+        router = router.route(
+            "/api/system-health",
+            get(move || {
+                let monitor = monitor.clone();
+                async move { Json(monitor.snapshot()) }
+            }),
+        );
+    }
+
     // Per-tile API mounts at /api/i/0, /api/i/1, ... — each gets a
     // clone of the tile-routes sub-router with its own HttpAppState
     // baked in so handlers automatically dispatch to the right tile
@@ -215,7 +263,7 @@ pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
     // routing means /api/i/0/state matches THIS mount, not the
     // /api/* alias mounted below.
     for tile in fleet.tiles() {
-        let state = HttpAppState::for_tile(&fleet, tile.idx)
+        let state = HttpAppState::for_tile(&fleet, tile.idx, state_dir.clone())
             .expect("tile must exist for fleet.tiles() yield");
         let prefix = format!("/api/i/{}", tile.idx);
         router = router.nest(&prefix, tile_routes_template.clone().with_state(state));
@@ -226,8 +274,8 @@ pub fn router(fleet: Arc<EncoderFleet>, static_dir: PathBuf) -> Router {
     // shell (later commit) will explicitly hit /api/i/N/* via a
     // tiny fetch-rewriting shim in app.js, so this alias is purely
     // for backward compat / direct UI loads with no iframe context.
-    let tile_0_state =
-        HttpAppState::for_tile(&fleet, 0).expect("fleet must have tile 0");
+    let tile_0_state = HttpAppState::for_tile(&fleet, 0, state_dir.clone())
+        .expect("fleet must have tile 0");
     router = router.nest("/api", tile_routes_template.with_state(tile_0_state));
 
     router
@@ -1031,6 +1079,15 @@ async fn api_settings(
     Json(payload): Json<SettingsPayload>,
 ) -> impl IntoResponse {
     state.encoder.apply_settings(&payload.into());
+    // alpha.41: persist the new settings to disk so a Cmd-Q / crash /
+    // reinstall doesn't wipe the operator's per-tile configuration.
+    // Best-effort — save_tile logs and swallows errors; persistence
+    // failure shouldn't break the runtime apply that already succeeded.
+    // Done synchronously on the request thread because the JSON
+    // payload is small (~1 KB) and the rename-from-tmp pattern keeps
+    // disk I/O bounded. The settings response sees the updated
+    // snapshot regardless of save outcome.
+    crate::state_persist::save_tile(&state.state_dir, state.tile_idx, &state.encoder);
     Json(state.encoder.snapshot())
 }
 
