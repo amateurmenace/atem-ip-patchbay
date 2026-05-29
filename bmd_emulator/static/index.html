@@ -6,16 +6,20 @@
   <title>ATEM IP Patchbay</title>
   <link rel="stylesheet" href="/static/style.css" />
   <script src="/static/system-drawer.js" defer></script>
-  <!-- alpha.42: apply persisted hero-hidden state BEFORE the page
-       paints so the operator who hid the hero doesn't see it flash
-       on every reload. localStorage read is sync + fast (~0.1ms). -->
+  <!-- alpha.55: about section always appears on app launch. The
+       previous alpha.42 logic persisted hidden state to localStorage,
+       which meant operators who hid it once never saw it again unless
+       they explicitly clicked Show — unfriendly default. Now hide is
+       session-only; reload / relaunch resets to visible. -->
   <script>
     (function () {
-      try {
-        if (localStorage.getItem('atemPatchbay_heroHidden') === '1') {
-          document.documentElement.dataset.heroHidden = 'true';
-        }
-      } catch (e) { /* private mode etc — ignore */ }
+      // Always start with hero visible. Operator can hide during the
+      // session via the topbar toggle or the in-hero × button; the
+      // hidden state does NOT persist.
+      document.documentElement.dataset.heroHidden = 'false';
+      // Clean up the old persisted flag from any prior alpha so the
+      // operator isn't surprised by leftover state.
+      try { localStorage.removeItem('atemPatchbay_heroHidden'); } catch (e) {}
     })();
   </script>
 </head>
@@ -74,15 +78,12 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
-      <!-- alpha.53: always-visible intro toggle. Replaces the previous
-           "↓ About" that only surfaced after the hero was hidden — the
-           operator couldn't find a way to re-show the intro because
-           the button was display:none until then. Now the toggle is
-           always present in the topbar; text + title flip based on
-           state. The Hide-intro × button in the hero stays as a
-           contextual escape hatch when the operator is reading it. -->
+      <!-- alpha.55: renamed "intro" → "about" per operator request.
+           Always-visible topbar toggle that flips text/title between
+           Hide/Show based on the current data-hero-hidden value. The
+           hero × button stays as a contextual dismiss when reading. -->
       <button id="intro-toggle-btn" type="button" class="intro-toggle-btn"
-              title="Hide the intro section">▼ Hide intro</button>
+              title="Hide the About section">▼ Hide about</button>
       <!-- alpha.52: Monitor button removed. The single-tile companion
            window pattern from alpha.16 is superseded by the alpha.40
            multiview UI + alpha.50 per-tile stats panel — the operator
@@ -117,12 +118,12 @@
   <!-- HERO                                                        -->
   <!-- ========================================================== -->
   <section class="hero">
-    <!-- alpha.42: Hide the intro card. Persists via localStorage; the
-         "↓ About" button in the topbar surfaces when collapsed so the
-         operator can bring the intro back if needed. -->
+    <!-- alpha.55: Hide About contextual button. Session-only (does
+         not persist to localStorage); the topbar toggle restores it
+         for this session, next launch starts visible again. -->
     <button id="hero-hide-btn" type="button" class="hero-hide-btn"
-            title="Hide the intro / About text — gives you a cleaner workspace once you've read it.">
-      Hide intro ×
+            title="Hide the About text for this session. Resets on next app launch.">
+      Hide about ×
     </button>
     <div class="hero-headline">
       Turn multiple worldwide video sources, from iPhones to Drones to
