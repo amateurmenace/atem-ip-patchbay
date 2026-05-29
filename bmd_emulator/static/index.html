@@ -74,8 +74,15 @@
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
-      <button id="show-intro-btn" type="button" class="show-intro-btn"
-              title="Show the intro / About text again">↓ About</button>
+      <!-- alpha.53: always-visible intro toggle. Replaces the previous
+           "↓ About" that only surfaced after the hero was hidden — the
+           operator couldn't find a way to re-show the intro because
+           the button was display:none until then. Now the toggle is
+           always present in the topbar; text + title flip based on
+           state. The Hide-intro × button in the hero stays as a
+           contextual escape hatch when the operator is reading it. -->
+      <button id="intro-toggle-btn" type="button" class="intro-toggle-btn"
+              title="Hide the intro section">▼ Hide intro</button>
       <!-- alpha.52: Monitor button removed. The single-tile companion
            window pattern from alpha.16 is superseded by the alpha.40
            multiview UI + alpha.50 per-tile stats panel — the operator

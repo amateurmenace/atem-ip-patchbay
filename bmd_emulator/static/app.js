@@ -23,7 +23,7 @@ const els = {
   // alpha.52: openMonitor button removed too — multiview supersedes
   // the alpha.16 single-tile companion window pattern.
   heroHideBtn: $('#hero-hide-btn'),
-  showIntroBtn: $('#show-intro-btn'),
+  introToggleBtn: $('#intro-toggle-btn'),
   omtOutputEnabled: $('#omt-output-enabled'),
   omtOutputName:    $('#omt-output-name'),
   omtOutputStatus:  $('#omt-output-status'),
@@ -2114,23 +2114,40 @@ function bind() {
     setInterval(pollSystemHealth, 2000);
   }
 
-  // alpha.42 — Hide intro persistence. localStorage key
+  // alpha.42/53 — Hide intro persistence. localStorage key
   // 'atemPatchbay_heroHidden' (also read by the inline <script> in
   // index.html's <head> to apply the data attribute before paint and
-  // avoid a flash). The "↓ About" topbar button surfaces when hidden
-  // and restores the hero.
+  // avoid a flash). The topbar #intro-toggle-btn is always visible
+  // and flips its own text + title between Hide/Show based on the
+  // current state. The in-hero × button stays as a quick dismiss
+  // when the operator is reading the hero.
   function setHeroHidden(hidden) {
     document.documentElement.dataset.heroHidden = hidden ? 'true' : 'false';
     try {
       if (hidden) localStorage.setItem('atemPatchbay_heroHidden', '1');
       else localStorage.removeItem('atemPatchbay_heroHidden');
     } catch (e) { /* private mode etc */ }
+    // Re-sync the toggle button's label so the operator sees the
+    // action that will happen on next click.
+    syncIntroToggleLabel();
+  }
+  function syncIntroToggleLabel() {
+    if (!els.introToggleBtn) return;
+    const hidden = document.documentElement.dataset.heroHidden === 'true';
+    els.introToggleBtn.textContent = hidden ? '▴ Show intro' : '▼ Hide intro';
+    els.introToggleBtn.title = hidden ? 'Show the intro / About text' : 'Hide the intro section';
   }
   if (els.heroHideBtn) {
     els.heroHideBtn.addEventListener('click', () => setHeroHidden(true));
   }
-  if (els.showIntroBtn) {
-    els.showIntroBtn.addEventListener('click', () => setHeroHidden(false));
+  if (els.introToggleBtn) {
+    els.introToggleBtn.addEventListener('click', () => {
+      const currentlyHidden = document.documentElement.dataset.heroHidden === 'true';
+      setHeroHidden(!currentlyHidden);
+    });
+    // Initial label sync (data attribute was set by the inline <head>
+    // script before the page paint).
+    syncIntroToggleLabel();
   }
 
   els.audioPanL.addEventListener('change', () => {
