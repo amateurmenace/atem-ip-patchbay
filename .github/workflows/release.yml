@@ -135,10 +135,25 @@ jobs:
           echo "Downloading $ARTIFACT from sidecar release $RELEASE_TAG"
           gh release download "$RELEASE_TAG" --pattern "$ARTIFACT" --dir /tmp
           mkdir -p src-tauri/sidecar
-          tar -xzf "/tmp/$ARTIFACT" -C /tmp
-          cp /tmp/ffmpeg src-tauri/sidecar/ffmpeg
+          # alpha.35: tarball is now flat (ffmpeg + bundled
+          # /opt/homebrew dylibs at the root, no top-level dir).
+          # Extract directly into src-tauri/sidecar/ so the dylibs
+          # land alongside ffmpeg where its embedded @executable_path
+          # load commands expect them. Pre-alpha.35 the tarball
+          # contained only ffmpeg and `cp /tmp/ffmpeg sidecar/`
+          # worked, but the released binary then failed at dyld load
+          # on any machine without Homebrew's libsrt etc. installed.
+          tar -xzf "/tmp/$ARTIFACT" -C src-tauri/sidecar
           chmod +x src-tauri/sidecar/ffmpeg
           ls -lh src-tauri/sidecar/
+          # Quick audit — fails the build loud if /opt/homebrew refs
+          # somehow survived the build-ffmpeg.yml bundle pass (e.g.
+          # if a sidecar tarball from before alpha.35 got pulled).
+          if otool -L src-tauri/sidecar/ffmpeg 2>/dev/null | grep -qE '^\s+/(opt/homebrew|usr/local)/'; then
+            echo "::error::sidecar/ffmpeg still references non-system dylibs — did the sidecar build skip the bundling step?"
+            otool -L src-tauri/sidecar/ffmpeg | grep -E '^\s+/(opt/homebrew|usr/local)/'
+            exit 1
+          fi
           src-tauri/sidecar/ffmpeg -version | head -3
           # Muxer-assertion sanity check. Fails the build loud if
           # the bundled FFmpeg is missing the muxers/encoders/

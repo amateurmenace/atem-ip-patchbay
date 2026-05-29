@@ -255,18 +255,136 @@ jobs:
           strip ./ffmpeg
           ls -lh ./ffmpeg
 
+      - name: Bundle Homebrew dylibs for portability
+        run: |
+          set -e
+          # alpha.35: the freshly-built ffmpeg links dynamically
+          # against Homebrew's libsrt + libx264 + libx265 (and their
+          # transitive deps like libssl / libcrypto / libz). On this
+          # runner those live under /opt/homebrew/...; on end-user
+          # machines they don't exist at that path, so dyld fails to
+          # load ffmpeg with "Library not loaded: /opt/homebrew/opt/
+          # srt/lib/libsrt.1.5.dylib" before main() even runs.
+          #
+          # alpha.34 shipped without this step. release.yml's Mac
+          # `ffmpeg -version` sanity check on its release runner
+          # (which doesn't brew install the build deps) failed at
+          # dyld, and the publish-release gate blocked the whole
+          # alpha.34 release. The artifact tarball was correct, the
+          # binary itself was correct, but neither could run anywhere
+          # except this build-ffmpeg.yml runner.
+          #
+          # Fix: copy each /opt/homebrew (or /usr/local) dylib
+          # referenced by ffmpeg — or by any transitively loaded dylib
+          # — next to ffmpeg, and rewrite the load-command references
+          # to @executable_path/<basename> so dyld resolves them
+          # relative to ffmpeg's own directory.
+          #
+          # This is the standard "portable Mach-O bundle" pattern that
+          # tools like dylibbundler, macdylibbundler, and Python's
+          # delocate-wheel use. We hand-roll it because the dep surface
+          # is small + we want the audit log.
+          OUT=/tmp/ffmpeg-out
+          mkdir -p "$OUT"
+          cp /tmp/ffmpeg-src/ffmpeg "$OUT/ffmpeg"
+          chmod u+w "$OUT/ffmpeg"
+
+          # Iteratively walk the dependency graph until no
+          # /opt/homebrew (or /usr/local) references remain in any
+          # Mach-O in $OUT. Each pass processes every binary currently
+          # in $OUT; newly-bundled dylibs are picked up next outer
+          # iteration. Hard-cap at 10 passes as a safety net in case
+          # the graph somehow doesn't converge.
+          pass=0
+          while true; do
+            pass=$((pass+1))
+            added=0
+            echo "===== Pass $pass ====="
+            for bin in "$OUT"/*; do
+              file "$bin" 2>/dev/null | grep -qE 'Mach-O' || continue
+              # otool -L emits "<path> (compatibility version ...)"
+              # lines; line 1 is the binary's own name (executables)
+              # or path (dylibs), so skip with NR>1. Filter to
+              # non-system absolute paths only — system libraries
+              # under /usr/lib/system and /System/ are macOS-
+              # guaranteed-present, leave alone.
+              deps=$(otool -L "$bin" 2>/dev/null | \
+                awk 'NR>1 && ($1 ~ /^\/opt\/homebrew/ || $1 ~ /^\/usr\/local\//) {print $1}')
+              for dep in $deps; do
+                depname=$(basename "$dep")
+                target="$OUT/$depname"
+                if [ ! -f "$target" ]; then
+                  echo "  bundling $dep -> $target"
+                  # BSD cp follows symlinks by default so $target
+                  # gets the actual dylib bytes, not a symlink chain.
+                  cp "$dep" "$target"
+                  chmod u+w "$target"
+                  # Set the bundled dylib's own LC_ID_DYLIB to its
+                  # @executable_path-relative form. Cosmetic for
+                  # runtime (dyld consults LC_LOAD_DYLIB in the
+                  # loader, not LC_ID_DYLIB on the loadee) but
+                  # matches what dylibbundler does and makes
+                  # otool output consistent.
+                  install_name_tool -id "@executable_path/$depname" "$target"
+                  added=1
+                fi
+                # Rewrite the reference. Idempotent on later passes
+                # — install_name_tool -change is a no-op if the
+                # current value already matches.
+                install_name_tool -change "$dep" "@executable_path/$depname" "$bin"
+              done
+            done
+            [ $added -eq 0 ] && break
+            if [ $pass -gt 10 ]; then
+              echo "::error::dylib graph did not converge after 10 passes"
+              exit 1
+            fi
+          done
+
+          echo "===== Final non-system reference audit ====="
+          fail=0
+          for bin in "$OUT"/*; do
+            file "$bin" 2>/dev/null | grep -qE 'Mach-O' || continue
+            if otool -L "$bin" 2>/dev/null | grep -qE '^\s+/(opt/homebrew|usr/local)/'; then
+              echo "::error::$bin still references non-system paths after bundling:"
+              otool -L "$bin" | grep -E '^\s+/(opt/homebrew|usr/local)/'
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || exit 1
+
+          echo "===== Bundled output ====="
+          ls -lh "$OUT/"
+
+          # Smoke-test: invoke the bundled ffmpeg with a stripped env
+          # so dyld can ONLY find dylibs via the embedded load
+          # commands (no DYLD_FALLBACK_LIBRARY_PATH leakage from the
+          # runner). If @executable_path resolution is wrong, this
+          # fails loud.
+          echo "===== Bundled ffmpeg launch test (clean env) ====="
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -version | head -3
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -hide_banner -protocols 2>/dev/null | grep -qE '^\s*srt\s*$' \
+            || { echo "::error::bundled ffmpeg lost srt protocol"; exit 1; }
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -hide_banner -muxers 2>/dev/null | grep -qE '\sdecklink\s' \
+            || { echo "::error::bundled ffmpeg lost decklink muxer"; exit 1; }
+          echo "✓ Bundled ffmpeg launches cleanly with @executable_path-resolved dylibs"
+
       - name: Tarball + checksum the artifact
         run: |
           set -e
-          cd /tmp/ffmpeg-src
+          OUT=/tmp/ffmpeg-out
           mkdir -p /tmp/out
-          # Bundle the single ffmpeg binary — Tauri's sidecar
-          # bundling just needs the executable; everything else
-          # ride-alongs through the existing libndi.dylib /
-          # libomt.dylib / libvmx.dylib paths.
-          tar -czf "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" -C . ffmpeg
+          # alpha.35: tar -C $OUT . produces a flat archive (./ffmpeg
+          # + ./*.dylib at the root, no top-level directory). release
+          # .yml extracts directly into src-tauri/sidecar/ so the
+          # bundled dylibs end up alongside ffmpeg where the embedded
+          # @executable_path load commands expect them. Pre-alpha.35
+          # this step tarballed just ./ffmpeg with no dylibs.
+          tar -czf "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" -C "$OUT" .
           (cd /tmp/out && shasum -a 256 "ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" > "ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz.sha256")
           ls -lh /tmp/out/
+          echo "===== Tarball contents ====="
+          tar -tzf "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz"
 
       - name: Publish to private sidecar release
         env:
