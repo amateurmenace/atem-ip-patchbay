@@ -2627,24 +2627,31 @@ pre {
 .hero.collapsed {
   display: none;
 }
-.show-intro-btn {
+/* alpha.53 — always-visible intro toggle button in the topbar.
+   Replaces the alpha.42 show-intro-btn that only surfaced when the
+   hero was already hidden (operator couldn't discover the unhide
+   path because the button was display:none). Now visible at all
+   times; the text + title flip based on the current data-hero-hidden
+   value via attr-selector rules below. */
+.intro-toggle-btn {
   background: rgba(255,255,255,0.04);
   color: var(--muted);
-  border: 1px dashed rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.15);
   border-radius: 6px;
-  padding: 6px 11px;
+  padding: 5px 10px;
   font-size: 11px;
   cursor: pointer;
   font-family: inherit;
-  margin-left: 8px;
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
-.show-intro-btn:hover {
+.intro-toggle-btn:hover {
   color: var(--text);
-  border-style: solid;
   border-color: rgba(255,255,255,0.30);
+  background: rgba(255,255,255,0.06);
 }
-html[data-hero-hidden="true"] .show-intro-btn { display: inline-flex; align-items: center; gap: 4px; }
 html[data-hero-hidden="true"] .hero { display: none; }
 
 /* alpha.50 — system health pill in single-view topbar. Same visual
