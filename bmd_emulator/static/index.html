@@ -191,6 +191,17 @@
           <div class="bar bar-blue"></div>
         </div>
         <div class="preview-message" id="preview-message" hidden></div>
+        <!-- alpha.48: VU meter overlay on the preview, mirroring the
+             multiview tile pattern. Operators want audio levels right
+             where they're watching the picture, not buried in the
+             Audio Mixer card. The pair below shares pollAudioLevels'
+             render output with the Audio Mixer card's canvas — no
+             duplicate poll, just an additional render target. -->
+        <div class="preview-meters" id="preview-meters" aria-hidden="true">
+          <canvas id="preview-meter-l" width="9" height="78" title="Left channel level"></canvas>
+          <canvas id="preview-meter-r" width="9" height="78" title="Right channel level"></canvas>
+          <span class="preview-meter-readout" id="preview-meter-readout">—</span>
+        </div>
         <div class="live-badge" id="live-badge" hidden>● LIVE</div>
         <div class="preview-overlay">
           <div class="ovl-row"><span>SOURCE</span> <strong id="ovl-source">—</strong></div>

@@ -3304,6 +3304,22 @@ async function tickAudioMeters() {
     if (canL) renderMeter(canL, rmsL, peakL, audioMeterState.peakHold.l.value);
     if (canR) renderMeter(canR, rmsR, peakR, audioMeterState.peakHold.r.value);
 
+    // alpha.48: also render to the preview-overlay meters that sit on
+    // top of the Monitor card's preview frame. Operators want levels
+    // right next to the picture, not just buried in the Audio Mixer
+    // card. Same data, same peak-hold state, additional render
+    // targets — no extra poll cost.
+    const pCanL = document.getElementById('preview-meter-l');
+    const pCanR = document.getElementById('preview-meter-r');
+    if (pCanL) renderMeter(pCanL, rmsL, peakL, audioMeterState.peakHold.l.value);
+    if (pCanR) renderMeter(pCanR, rmsR, peakR, audioMeterState.peakHold.r.value);
+    const previewReadout = document.getElementById('preview-meter-readout');
+    if (previewReadout) {
+      previewReadout.textContent = fresh
+        ? `${Math.max(rmsL, rmsR).toFixed(0)} dB`
+        : '—';
+    }
+
     const dbLEl = document.getElementById('audio-meter-l-db');
     const dbREl = document.getElementById('audio-meter-r-db');
     if (dbLEl) dbLEl.textContent = fresh ? `${rmsL.toFixed(1)} dB` : '—';
