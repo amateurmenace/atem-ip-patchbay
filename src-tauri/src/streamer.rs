@@ -1084,13 +1084,45 @@ impl Streamer {
         // mismatches are absorbed by the encoder's `-r` setting later
         // — no fps filter needed unless we ever see source/target rate
         // ratios that aren't clean integer multiples in practice.
+        //
+        // alpha.44 fix: when destination is DeckLink, build_plan_decklink
+        // ALREADY set video_filter to "scale=W:H,format=uyvy422" because
+        // the decklink_enc muxer only accepts UYVY422 frames via
+        // wrapped_avframe. If we blindly overwrite the filter here with
+        // just "scale=W:H:flags=lanczos", the format=uyvy422 conversion
+        // step is LOST and the output is BGRA (NDI default) → header
+        // write fails with "Could not write header (incorrect codec
+        // parameters ?): I/O error". Compose the filters instead:
+        // append the lanczos scale BEFORE the format=uyvy422 step (the
+        // order matters — format must run after scale so the
+        // intermediate buffer is the target size, not source size). For
+        // the ATEM/SRT path the existing filter would be None here, so
+        // the plain replacement still wins.
         if fmt.width != plan.width || fmt.height != plan.height {
-            let filter = format!("scale={}:{}:flags=lanczos", plan.width, plan.height);
+            let scale = format!("scale={}:{}:flags=lanczos", plan.width, plan.height);
+            let new_filter = match adjusted.video_filter.as_deref() {
+                Some(existing) if existing.starts_with("scale=") => {
+                    // build_plan_decklink's filter has the form
+                    // "scale=W:H,format=uyvy422". Replace the leading
+                    // scale clause with our lanczos scale, keeping any
+                    // suffix (the format=uyvy422 + anything else).
+                    if let Some(comma_idx) = existing.find(',') {
+                        format!("{}{}", scale, &existing[comma_idx..])
+                    } else {
+                        scale
+                    }
+                }
+                Some(existing) => format!("{},{}", scale, existing),
+                None => scale,
+            };
             log::info!(
-                "NDI scale required: {}x{} -> {}x{} via filter {filter:?}",
-                fmt.width, fmt.height, plan.width, plan.height,
+                "NDI scale required: {}x{} -> {}x{} via filter {new_filter:?}",
+                fmt.width,
+                fmt.height,
+                plan.width,
+                plan.height,
             );
-            adjusted.video_filter = Some(filter);
+            adjusted.video_filter = Some(new_filter);
         }
 
         self.build_ffmpeg_cmd(&adjusted)
