@@ -2037,6 +2037,28 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
         chain.push("volume=0".into());
     }
 
+    // alpha.49: clock-drift compensation for the DeckLink output
+    // path. NDI's source clock (whatever device generated the audio
+    // — iPhone, vMix, etc.) and the DeckLink card's hardware clock
+    // are different crystals; even 50 ppm of drift accumulates to
+    // visible/audible problems over 5-10 minutes (audio falls behind
+    // or runs ahead, FFmpeg's a/v sync logic eventually compensates
+    // by dropping audio frames entirely → operator sees audio "work
+    // for a couple minutes then die"). aresample=async=1000 inserts
+    // up to 1000 samples/sec of correction continuously, absorbing
+    // the drift without audible artifacts. Paired with the
+    // `-use_wallclock_as_timestamps 1` added to the bridge input
+    // args (see audio_bridge.rs::ffmpeg_input_args) which gives the
+    // resampler the timing signal it needs.
+    //
+    // Only applied for DeckLink because ATEM/SRT destinations have
+    // an encoder + container that handles a/v sync via the encoder's
+    // PTS allocator — the resampler is unnecessary and can introduce
+    // tiny offsets on those paths.
+    if snap.is_decklink() {
+        chain.push("aresample=async=1000:first_pts=0".into());
+    }
+
     // alpha.31: audio level meters. astats computes per-channel RMS
     // + peak every `length` seconds; ametadata=mode=print emits
     // those metrics as log lines that our stderr reader parses in
@@ -2663,6 +2685,8 @@ async fn ndi_audio_writer_task(
 ) {
     let mut chunk_count: u64 = 0;
     let mut omt_error_log_throttle: u64 = 0;
+    let mut bridge_error_log_throttle: u64 = 0;
+    let mut bridge_dead_logged_once = false;
     while let Some(chunk) = rx.recv().await {
         if let Some(s) = sender.as_ref() {
             match s.feed_audio_frame(
@@ -2685,7 +2709,30 @@ async fn ndi_audio_writer_task(
                 chunk.num_channels,
             );
             if !bytes.is_empty() {
-                b.send(bytes).await;
+                // alpha.49: surface bridge send failures. Pre-49 this
+                // was `let _ = b.send(bytes).await` and a dead bridge
+                // silently swallowed audio forever — exactly the
+                // "audio died after a couple minutes" report. Now we
+                // log once-loud when the bridge first dies + throttle
+                // subsequent failures so the operator sees the cause
+                // in /api/log without filling the buffer.
+                if !b.send(bytes).await {
+                    if !bridge_dead_logged_once {
+                        bridge_dead_logged_once = true;
+                        log::error!(
+                            "audio_bridge writer task gone — FFmpeg disconnected its TCP \
+                             audio input. Audio will stay silent until the next reconnect \
+                             attempt brings up a fresh bridge."
+                        );
+                    } else if bridge_error_log_throttle.is_multiple_of(240) {
+                        log::warn!(
+                            "audio_bridge still gone after {} dropped chunks",
+                            bridge_error_log_throttle
+                        );
+                    }
+                    bridge_error_log_throttle =
+                        bridge_error_log_throttle.wrapping_add(1);
+                }
             }
         }
         chunk_count = chunk_count.wrapping_add(1);

@@ -115,21 +115,37 @@ impl AudioBridge {
         self.inner.port
     }
 
-    /// Send a chunk of s16le-interleaved bytes to FFmpeg. Best-effort
-    /// async send — if the socket is gone, the chunk is silently
-    /// dropped. We deliberately don't surface send errors because the
-    /// caller is the NDI capture loop and we don't want a transient
-    /// network blip on loopback (basically impossible but cheap to
-    /// guard against) to take down the video path.
-    pub async fn send(&self, bytes: Vec<u8>) {
-        let _ = self.inner.tx.send(bytes).await;
+    /// Send a chunk of s16le-interleaved bytes to FFmpeg. Returns
+    /// `true` if the chunk was queued for the bridge writer, `false`
+    /// if the writer's receiver is gone (FFmpeg disconnected, bridge
+    /// task exited). The caller logs failures so a dead bridge
+    /// surfaces in the operator log instead of silently dropping
+    /// audio forever (the alpha.48 "audio died after a few minutes"
+    /// bug surfaced exactly because send failures were swallowed).
+    pub async fn send(&self, bytes: Vec<u8>) -> bool {
+        self.inner.tx.send(bytes).await.is_ok()
     }
 
     /// FFmpeg input args to splice into the command. Pair with the
     /// matching map: `-map 0:v -map 1:a` (when this is the second
     /// input alongside the raw video stdin on input 0).
+    ///
+    /// alpha.49: `-use_wallclock_as_timestamps 1` makes FFmpeg stamp
+    /// the audio frames with the receiver's wallclock instead of
+    /// inferring time from the byte count alone. Without this,
+    /// FFmpeg derives audio timestamps purely from sample count *
+    /// (1/48000 Hz), which assumes our send rate matches the
+    /// nominal sample rate EXACTLY. If NDI's source clock is even
+    /// 50 ppm off the DeckLink card's clock (which is normal —
+    /// they're different crystals), the cumulative drift over 5-10
+    /// minutes is enough for FFmpeg's a/v sync logic to start
+    /// dropping audio chunks, then go silent entirely. Wallclock
+    /// stamping combined with aresample=async in build_audio_filter
+    /// lets FFmpeg's resampler absorb the drift continuously.
     pub fn ffmpeg_input_args(&self) -> Vec<String> {
         vec![
+            "-use_wallclock_as_timestamps".into(),
+            "1".into(),
             "-f".into(),
             "s16le".into(),
             "-ar".into(),
