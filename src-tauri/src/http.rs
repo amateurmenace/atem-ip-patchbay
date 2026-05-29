@@ -1188,21 +1188,84 @@ struct OverlayPayload {
     clock: Option<bool>,
 }
 
+/// The fields that determine which physical source FFmpeg ingests. A
+/// change here while a stream is live means we must restart FFmpeg to
+/// actually switch sources — its input is fixed at launch, so updating
+/// `source_id` alone doesn't hot-swap a running encoder. Used by the
+/// alpha.59 hot-swap path in `api_settings`.
+fn source_identity(s: &crate::state::Snapshot) -> (String, String, String, i32) {
+    (
+        s.source_id.clone(),
+        s.ndi_source_name.clone(),
+        s.omt_source_name.clone(),
+        s.av_video_index,
+    )
+}
+
 async fn api_settings(
     State(state): State<HttpAppState>,
     Json(payload): Json<SettingsPayload>,
 ) -> impl IntoResponse {
+    // alpha.59 hot-swap: capture the source identity + whether a stream is
+    // live BEFORE applying. If applying changes the physical source while
+    // streaming, restart the stream so the live FFmpeg actually ingests the
+    // new source. (Changing source_id alone leaves the OLD source streaming
+    // — FFmpeg's input is fixed at launch — which is the confusing
+    // "switched to NDI but it kept sending the test pattern" behavior.)
+    let was_live = state.streamer.is_running().await;
+    let before = source_identity(&state.encoder.snapshot());
+
     state.encoder.apply_settings(&payload.into());
     // alpha.41: persist the new settings to disk so a Cmd-Q / crash /
     // reinstall doesn't wipe the operator's per-tile configuration.
-    // Best-effort — save_tile logs and swallows errors; persistence
-    // failure shouldn't break the runtime apply that already succeeded.
-    // Done synchronously on the request thread because the JSON
-    // payload is small (~1 KB) and the rename-from-tmp pattern keeps
-    // disk I/O bounded. The settings response sees the updated
-    // snapshot regardless of save outcome.
+    // Best-effort — save_tile logs and swallows errors.
     crate::state_persist::save_tile(&state.state_dir, state.tile_idx, &state.encoder);
-    Json(state.encoder.snapshot())
+
+    let after_snap = state.encoder.snapshot();
+    let after = source_identity(&after_snap);
+
+    if was_live && before != after {
+        log::info!("source changed while live ({before:?} -> {after:?}) — hot-swapping stream");
+        let streamer = state.streamer.clone();
+        let encoder = state.encoder.clone();
+        // Restart in a detached task so this request returns immediately
+        // (the graceful stop() can take up to ~2.5s). The UI stays
+        // responsive and sees status="Switching" on its next poll.
+        tokio::spawn(async move {
+            encoder.stats_in_place(|s| {
+                s.status = "Switching".into();
+                s.error = None;
+            });
+            // Graceful stop (closes SRT cleanly so the ATEM doesn't wedge),
+            // then start with the new source. stop() also sets
+            // stop_requested + notifies the supervisor, so the old source's
+            // supervisor winds down to UserStopped instead of reconnecting.
+            if let Err(e) = streamer.stop().await {
+                log::warn!("hot-swap stop failed: {e}");
+            }
+            // Ensure the child slot is clear before start() — the graceful
+            // fallback path can return a beat before run_one_attempt clears
+            // inner.child. Bounded ~1s; usually a zero-iteration no-op.
+            let clear_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while streamer.is_running().await
+                && std::time::Instant::now() < clear_deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            match streamer.start().await {
+                Ok(()) => log::info!("hot-swap restart complete"),
+                Err(e) => {
+                    log::warn!("hot-swap restart failed: {e}");
+                    encoder.stats_in_place(|s| {
+                        s.status = "Interrupted".into();
+                        s.error = Some(format!("Source switch failed: {e}"));
+                    });
+                }
+            }
+        });
+    }
+
+    Json(after_snap)
 }
 
 #[derive(Deserialize)]

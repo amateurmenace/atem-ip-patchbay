@@ -18,6 +18,7 @@ const els = {
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
   forceStopAll: $('#force-stop-all'),
+  openAdvanced: $('#open-advanced-btn'),
   openNetDiag: $('#open-net-diag'),
   // alpha.42: openMultiview button removed; the view-mode toggle in
   // the topbar (.view-toggle) handles Single ↔ Multi navigation now.
@@ -1428,6 +1429,7 @@ function render(snap) {
   els.statusPill.classList.remove('streaming', 'connecting', 'interrupted', 'reconnecting');
   if (stats.status === 'Streaming') els.statusPill.classList.add('streaming');
   else if (stats.status === 'Connecting') els.statusPill.classList.add('connecting');
+  else if (stats.status === 'Switching') els.statusPill.classList.add('connecting'); // alpha.59 hot-swap: yellow in-progress
   else if (stats.status === 'Interrupted') els.statusPill.classList.add('interrupted');
   else if (stats.status === 'Reconnecting') els.statusPill.classList.add('reconnecting');
 
@@ -2057,6 +2059,19 @@ function bind() {
         alert('Force stop failed: ' + e.message);
       } finally {
         els.forceStopAll.disabled = false;
+      }
+    });
+  }
+
+  // Discoverable jump to the Advanced (encoder / audio quality / video
+  // mode / streamid / label) panel — a button next to the Quality
+  // picker that opens the collapsed <details> and scrolls to it.
+  if (els.openAdvanced) {
+    els.openAdvanced.addEventListener('click', () => {
+      const adv = document.querySelector('.dest-advanced');
+      if (adv) {
+        adv.open = true;
+        adv.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     });
   }

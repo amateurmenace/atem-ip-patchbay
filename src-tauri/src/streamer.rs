@@ -703,29 +703,36 @@ impl Streamer {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // Take the captures OUT of `inner` under the lock, then join them
-        // OFF the lock. capture.stop() joins the receiver thread; if we
-        // joined while holding `inner` (as this used to), a back-pressured
-        // or wedged capture thread would freeze every future stop()/
-        // recovery call — they all contend the same lock. The Dante-on-NDI
-        // hang lived here. Everything else below (start_kill, sender drop)
-        // is non-blocking, so it stays under the lock.
+        // alpha.59 graceful shutdown: we deliberately do NOT force-kill the
+        // primary FFmpeg up front. For pipe sources (NDI/OMT), stopping the
+        // capture below drops the frame sender → ndi_writer_task closes
+        // FFmpeg's stdin (stdin.shutdown()) → FFmpeg sees input EOF →
+        // flushes, writes the MPEG-TS trailer, and closes the SRT
+        // connection CLEANLY before exiting on its own. That clean close is
+        // what lets the ATEM release its receiver slot immediately instead
+        // of holding a stale session that wedges the input (the Windows
+        // abrupt-kill problem — TerminateProcess gives FFmpeg no chance to
+        // close SRT). We only force-kill as a bounded fallback at the end.
+        //
+        // Captures are taken out under the lock but joined OFF the lock:
+        // capture.stop() joins the receiver thread, and joining while
+        // holding `inner` would freeze every future stop()/recovery call if
+        // a capture thread were back-pressured (the Dante-on-NDI hang).
         let (ndi_cap, omt_cap) = {
             let mut inner = self.inner.lock().await;
             inner.stop_requested = true;
             // Wake the auto-reconnect supervisor's backoff sleep so a
-            // mid-backoff Stop click takes effect within ~milliseconds
-            // rather than waiting up to 60s for the current tick to
-            // elapse. notify_waiters is edge-triggered but the
-            // supervisor's stop_requested check on the next tick covers
-            // any wake-miss race.
+            // mid-backoff Stop click takes effect within ~milliseconds and
+            // so the supervisor winds down to UserStopped rather than
+            // reconnecting. notify_waiters is edge-triggered but the
+            // supervisor's stop_requested check on the next tick covers any
+            // wake-miss race.
             inner.supervisor_cancel.notify_waiters();
 
-            // Kill the OMT video tee FFmpeg (if running). Done BEFORE
-            // dropping the OmtSender so the tee child's reader task sees
-            // its source go away cleanly (stdout EOF → channel close →
-            // task exit) rather than panicking on a dropped sender.
-            // start_kill() is non-blocking.
+            // Kill the OMT video tee FFmpeg (a separate process with no
+            // SRT-to-ATEM connection, so a hard kill is fine). Done BEFORE
+            // dropping the OmtSender so the tee's reader task sees its
+            // source go away cleanly. start_kill() is non-blocking.
             if let Some(mut tee_child) = inner.omt_video_tee_child.take() {
                 log::info!("Stopping OMT video tee FFmpeg");
                 let _ = tee_child.start_kill();
@@ -738,35 +745,54 @@ impl Streamer {
                     sender.connection_count()
                 );
             }
-            // Force-kill the primary FFmpeg child (non-blocking). On unix,
-            // SIGTERM the whole process group first so FFmpeg flushes +
-            // closes the SRT/RTMP connection cleanly; start_kill() is the
-            // SIGKILL fallback for a stuck FFmpeg. run_one_attempt reaps
-            // the child via inner.child.take()+wait() once stderr hits EOF.
-            if let Some(child) = inner.child.as_mut() {
-                #[cfg(unix)]
-                if let Some(pid) = child.id() {
-                    unsafe {
-                        // Negative pid = process group; -pid means group
-                        // led by `pid`. Best-effort; no-op if already gone.
-                        libc::killpg(pid as i32, libc::SIGTERM);
-                    }
-                }
-                let _ = child.start_kill();
-            }
 
             (inner.ndi_capture.take(), inner.omt_capture.take())
         };
 
-        // --- `inner` is released; the bounded-timeout joins below can
-        // never freeze the lock even if an SDK call wedges. Killing
-        // FFmpeg above also closes its stdin, giving the capture threads
-        // a second (faster) path to exit on top of their stop flag. ---
+        // --- `inner` released. Stop the captures: dropping their senders
+        // closes FFmpeg's stdin, triggering the graceful exit described
+        // above for pipe sources. Joins are bounded (see
+        // ndi_capture::join_with_timeout) so they can't hang. ---
         if let Some(mut capture) = ndi_cap {
             capture.stop();
         }
         if let Some(mut capture) = omt_cap {
             capture.stop();
+        }
+
+        // alpha.59: let FFmpeg exit gracefully after its stdin hit EOF —
+        // give it up to ~2.5s to flush + write the trailer + close SRT.
+        // run_one_attempt reaps inner.child on exit, flipping is_running()
+        // to false — that's our signal the graceful close completed. If the
+        // budget elapses (a non-pipe source like lavfi/AVF has no stdin to
+        // EOF, or FFmpeg is genuinely stuck), force-kill as a fallback. We
+        // only ever start_kill() here (non-blocking); run_one_attempt stays
+        // the sole owner/reaper of inner.child (same pattern the stall
+        // detector uses), so there's no wait()/take() race. 2.5s stays
+        // under force_stop_all's 4s per-tile timeout.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+        loop {
+            if !self.is_running().await {
+                break; // FFmpeg exited + was reaped → graceful close done
+            }
+            if std::time::Instant::now() >= deadline {
+                let mut inner = self.inner.lock().await;
+                if let Some(child) = inner.child.as_mut() {
+                    log::warn!(
+                        "graceful stop timed out after 2.5s — force-killing FFmpeg \
+                         (non-pipe source or stuck encoder)"
+                    );
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        unsafe {
+                            libc::killpg(pid as i32, libc::SIGTERM);
+                        }
+                    }
+                    let _ = child.start_kill();
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         Ok(())
     }
