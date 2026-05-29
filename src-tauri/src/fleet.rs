@@ -26,9 +26,25 @@ use crate::state::EncoderState;
 use crate::streamer::Streamer;
 use std::sync::Arc;
 
-/// Number of tiles in this Tauri process. Back to 1 in alpha.16 —
-/// see module docs.
-pub const TILE_COUNT: usize = 1;
+/// Number of tiles in this Tauri process. Originally 1 (alpha.16);
+/// bumped to 8 in alpha.40 for the broadcast-multiview rework —
+/// each tile is a full source→DeckLink-output pipeline (an NDI/OMT/
+/// SRT-listen/RTMP-listen/pipe source feeding one DeckLink SDI/HDMI
+/// output) running concurrently in this Tauri process.
+///
+/// Phase A spike (alpha.38) was meant to validate 8x decklink_enc
+/// concurrency before committing — operator priorities pivoted that
+/// to "just try it" so this bump ships without spike confirmation.
+/// If 8 concurrent decklink children turn out to contend or starve
+/// each other on the operator's hardware, the supervisor design
+/// already gives per-tile isolation; worst case we drop back to N
+/// processes via spawn_instance for a particular operator setup.
+///
+/// Per-tile resource footprint: ~one EncoderState + one Streamer +
+/// one Preview struct (a few KB each) when idle. At full saturation:
+/// 8 FFmpeg children + 8 NDI/OMT receivers + 8 watchdogs. ~1.5-2 GB
+/// RSS at 1080p59.94 across 8 tiles on the operator's test rig.
+pub const TILE_COUNT: usize = 8;
 
 /// One tile slot — a complete self-contained pipeline. Every field
 /// is Arc'd so axum handlers can grab them by reference without

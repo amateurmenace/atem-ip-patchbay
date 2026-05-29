@@ -19,6 +19,7 @@ const els = {
   killOrphans: $('#kill-orphans'),
   openNetDiag: $('#open-net-diag'),
   openMonitor: $('#open-monitor'),
+  openMultiview: $('#open-multiview'),
   omtOutputEnabled: $('#omt-output-enabled'),
   omtOutputName:    $('#omt-output-name'),
   omtOutputStatus:  $('#omt-output-status'),
@@ -2084,6 +2085,18 @@ function bind() {
         els.openMonitor.textContent = orig;
         els.openMonitor.disabled = false;
       }
+    });
+  }
+
+  // alpha.40 — Multiview navigates the current WebView to
+  // /static/multiview.html. Same-window navigation (not a Tauri spawn)
+  // keeps the MVP small; the multiview's "← Single-source" link in
+  // its own header gets the operator back. If we later want
+  // multiview-in-a-separate-window, mirror open_monitor_window's
+  // pattern in lib.rs and switch to invoke('open_multiview_window').
+  if (els.openMultiview) {
+    els.openMultiview.addEventListener('click', () => {
+      window.location.href = '/static/multiview.html';
     });
   }
 
