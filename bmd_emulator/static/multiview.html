@@ -614,6 +614,9 @@
     </div>
     <button id="refresh-all" type="button" title="Refresh discovery + tile state">↻ Refresh</button>
     <button id="stop-all" type="button" class="danger" title="Stop every tile that's streaming">Stop All</button>
+    <button id="force-stop-all" type="button" class="danger"
+            style="background:#b3261e; border-color:#d7493f;"
+            title="Emergency: OS-kill every FFmpeg and reset all tiles — use when a tile is wedged and Stop won't clear it">⛔ Force Stop</button>
   </div>
 </header>
 
@@ -1403,6 +1406,25 @@ async function onStopAll() {
   toast(`Stopped ${active.length} tile${active.length === 1 ? '' : 's'}`, 'good');
 }
 
+// Emergency escape hatch — OS-kills every FFmpeg on the machine
+// (lock-free, works even when a tile is wedged in Connecting/Streaming
+// and per-tile Stop won't respond), then resets every tile to Idle.
+async function onForceStopAll() {
+  if (!confirm(
+    "FORCE STOP ALL?\n\n" +
+    "Kills EVERY FFmpeg process on this machine at the OS level " +
+    "(including any unrelated ones) and resets all tiles to Idle. " +
+    "Use this when a tile is wedged and Stop won't clear it."
+  )) return;
+  try {
+    const r = await fetch('/api/i/0/force-stop-all', { method: 'POST' });
+    const j = await r.json();
+    toast(j.message || `Force-stopped (killed ${j.killed ?? '?'})`, 'good');
+  } catch (e) {
+    toast(`Force stop failed: ${e.message}`, 'bad');
+  }
+}
+
 // -------------------------------------------------------------------
 // alpha.41 system health polling
 // -------------------------------------------------------------------
@@ -1712,6 +1734,7 @@ async function bootstrap() {
     await pollAllTiles();
   });
   $('#stop-all').addEventListener('click', onStopAll);
+  $('#force-stop-all').addEventListener('click', onForceStopAll);
 
   knownDecklink = await loadDecklinkOutputs();
   knownNdi = await loadNdiSenders();

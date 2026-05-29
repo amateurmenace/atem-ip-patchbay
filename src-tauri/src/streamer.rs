@@ -703,68 +703,70 @@ impl Streamer {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.stop_requested = true;
-        // Wake the auto-reconnect supervisor's backoff sleep so a
-        // mid-backoff Stop click takes effect within ~milliseconds
-        // rather than waiting up to 60s for the current tick to
-        // elapse. notify_waiters is edge-triggered but the
-        // supervisor's stop_requested check on the next tick covers
-        // any wake-miss race.
-        inner.supervisor_cancel.notify_waiters();
-        if let Some(mut capture) = inner.ndi_capture.take() {
-            // Drop blocks while the receiver thread joins; do it
-            // before killing FFmpeg so the rawvideo input gets a
-            // clean EOF.
-            capture.stop();
-        }
-        if let Some(mut capture) = inner.omt_capture.take() {
-            // Same contract as the NDI capture above — drop sender
-            // first so FFmpeg's stdin closes cleanly before we
-            // SIGTERM the process group.
-            capture.stop();
-        }
-        // Kill the OMT video tee FFmpeg (if running). Done BEFORE
-        // dropping the OmtSender so the tee child's reader task sees
-        // its source go away cleanly (stdout EOF → channel close →
-        // task exit) rather than panicking on a dropped sender.
-        // kill_on_drop on the Child already covers the catastrophic
-        // case; this is the graceful path.
-        if let Some(mut tee_child) = inner.omt_video_tee_child.take() {
-            log::info!("Stopping OMT video tee FFmpeg");
-            let _ = tee_child.start_kill();
-            // Don't await — let the reaper task in Drop clean up. The
-            // primary FFmpeg stop below uses the same fire-and-forget
-            // pattern.
-        }
-        // Drop the OMT publisher last (its lifetime is shorter than
-        // the writer task's; dropping while the writer holds an Arc
-        // would just defer the actual destroy until the task exits,
-        // which is fine — but logging the announcement going away
-        // is cleaner here).
-        if let Some(sender) = inner.omt_sender.take() {
-            log::info!(
-                "OMT output stopping: had {} active connection(s)",
-                sender.connection_count()
-            );
-            // Arc drops when the writer task exits next tick.
-        }
-        if let Some(child) = inner.child.as_mut() {
-            // First send SIGTERM to the whole process group so
-            // FFmpeg can flush + close the SRT/RTMP connection
-            // cleanly. Falls through to SIGKILL via tokio's
-            // start_kill() so a stuck FFmpeg is still guaranteed
-            // to die.
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                unsafe {
-                    // Negative pid = process group; -pid means group
-                    // led by `pid`. Best-effort; if it fails (group
-                    // already gone), no-op.
-                    libc::killpg(pid as i32, libc::SIGTERM);
-                }
+        // Take the captures OUT of `inner` under the lock, then join them
+        // OFF the lock. capture.stop() joins the receiver thread; if we
+        // joined while holding `inner` (as this used to), a back-pressured
+        // or wedged capture thread would freeze every future stop()/
+        // recovery call — they all contend the same lock. The Dante-on-NDI
+        // hang lived here. Everything else below (start_kill, sender drop)
+        // is non-blocking, so it stays under the lock.
+        let (ndi_cap, omt_cap) = {
+            let mut inner = self.inner.lock().await;
+            inner.stop_requested = true;
+            // Wake the auto-reconnect supervisor's backoff sleep so a
+            // mid-backoff Stop click takes effect within ~milliseconds
+            // rather than waiting up to 60s for the current tick to
+            // elapse. notify_waiters is edge-triggered but the
+            // supervisor's stop_requested check on the next tick covers
+            // any wake-miss race.
+            inner.supervisor_cancel.notify_waiters();
+
+            // Kill the OMT video tee FFmpeg (if running). Done BEFORE
+            // dropping the OmtSender so the tee child's reader task sees
+            // its source go away cleanly (stdout EOF → channel close →
+            // task exit) rather than panicking on a dropped sender.
+            // start_kill() is non-blocking.
+            if let Some(mut tee_child) = inner.omt_video_tee_child.take() {
+                log::info!("Stopping OMT video tee FFmpeg");
+                let _ = tee_child.start_kill();
             }
-            let _ = child.start_kill();
+            // Drop the OMT publisher (Arc drops when its writer task
+            // exits next tick).
+            if let Some(sender) = inner.omt_sender.take() {
+                log::info!(
+                    "OMT output stopping: had {} active connection(s)",
+                    sender.connection_count()
+                );
+            }
+            // Force-kill the primary FFmpeg child (non-blocking). On unix,
+            // SIGTERM the whole process group first so FFmpeg flushes +
+            // closes the SRT/RTMP connection cleanly; start_kill() is the
+            // SIGKILL fallback for a stuck FFmpeg. run_one_attempt reaps
+            // the child via inner.child.take()+wait() once stderr hits EOF.
+            if let Some(child) = inner.child.as_mut() {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    unsafe {
+                        // Negative pid = process group; -pid means group
+                        // led by `pid`. Best-effort; no-op if already gone.
+                        libc::killpg(pid as i32, libc::SIGTERM);
+                    }
+                }
+                let _ = child.start_kill();
+            }
+
+            (inner.ndi_capture.take(), inner.omt_capture.take())
+        };
+
+        // --- `inner` is released; the bounded-timeout joins below can
+        // never freeze the lock even if an SDK call wedges. Killing
+        // FFmpeg above also closes its stdin, giving the capture threads
+        // a second (faster) path to exit on top of their stop flag. ---
+        if let Some(mut capture) = ndi_cap {
+            capture.stop();
+        }
+        if let Some(mut capture) = omt_cap {
+            capture.stop();
         }
         Ok(())
     }
@@ -1513,41 +1515,47 @@ impl Streamer {
         // whether to reconnect.
         stall_task.abort();
 
-        // Stderr EOF — child is exiting. Wait for the exit code and
-        // clean up per-attempt resources (NDI/OMT capture so the
-        // next attempt can re-claim the SDK handle; OMT video tee
-        // child; OMT sender). Mirrors stop() but doesn't notify the
-        // supervisor's cancel — that's a separate signal.
-        let exit_code = {
+        // Stderr EOF — child is exiting. Take per-attempt resources out
+        // of `inner` under the lock (cheap take()s), then do the blocking
+        // work — capture joins + child.wait — OFF the lock so a wedged
+        // capture thread can't freeze us (or anyone else contending the
+        // lock) during teardown. Same lock-discipline fix as stop().
+        let (mut child, ndi_cap, omt_cap, tee, sender) = {
             let mut inner = self.inner.lock().await;
-            let mut child = match inner.child.take() {
+            let child = match inner.child.take() {
                 Some(c) => c,
                 // Slot already empty — stop() raced us. Treat as user-stop.
                 None => return AttemptOutcome::UserStopped,
             };
-            // Tear down NDI/OMT capture so the next reconnect attempt
-            // can re-probe + re-claim the SDK handle. Per the
-            // alpha.30 plan we always rebuild captures rather than
-            // try to keep them alive across an FFmpeg exit (the
-            // stdin EOF would race the next attempt's stdin-take).
-            if let Some(mut capture) = inner.ndi_capture.take() {
-                capture.stop();
-            }
-            if let Some(mut capture) = inner.omt_capture.take() {
-                capture.stop();
-            }
-            if let Some(mut tee) = inner.omt_video_tee_child.take() {
-                let _ = tee.start_kill();
-            }
-            if let Some(sender) = inner.omt_sender.take() {
-                log::info!(
-                    "OMT output ending with primary FFmpeg ({} connections at exit)",
-                    sender.connection_count()
-                );
-            }
-            drop(inner); // don't hold lock across .await
-            child.wait().await.ok().and_then(|s| s.code())
+            (
+                child,
+                inner.ndi_capture.take(),
+                inner.omt_capture.take(),
+                inner.omt_video_tee_child.take(),
+                inner.omt_sender.take(),
+            )
         };
+        // Tear down captures so the next reconnect attempt can re-probe +
+        // re-claim the SDK handle (bounded joins — never block forever).
+        // Per alpha.30 we always rebuild captures rather than keep them
+        // across an FFmpeg exit (the stdin EOF would race the next
+        // attempt's stdin-take).
+        if let Some(mut capture) = ndi_cap {
+            capture.stop();
+        }
+        if let Some(mut capture) = omt_cap {
+            capture.stop();
+        }
+        if let Some(mut tee) = tee {
+            let _ = tee.start_kill();
+        }
+        if let Some(sender) = sender {
+            log::info!(
+                "OMT output ending with primary FFmpeg ({} connections at exit)",
+                sender.connection_count()
+            );
+        }
+        let exit_code = child.wait().await.ok().and_then(|s| s.code());
 
         let stop_requested = {
             let inner = self.inner.lock().await;

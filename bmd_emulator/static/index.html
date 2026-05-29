@@ -378,6 +378,27 @@
         stream key (this is a separate ATEM-side lockout, not
         something the app can short-circuit).
       </p>
+
+      <hr style="border:none; border-top:1px dashed rgba(255,255,255,.15); margin:16px 0;" />
+      <p class="recovery-lead">
+        <strong>Still stuck?</strong> If a stream is wedged in
+        Connecting/Streaming and even Stop or Kill-orphans won't clear
+        it, this is the bigger hammer. It force-kills <em>every</em>
+        FFmpeg process on this machine at the OS level — which works
+        even when a channel's controls are frozen — then resets every
+        tile to Idle.
+      </p>
+      <button id="force-stop-all" type="button" class="big recovery-btn"
+              style="background:#b3261e; border-color:#d7493f; color:#fff;"
+              aria-label="Force stop all streams">
+        ⛔ Force Stop ALL streams
+      </button>
+      <p class="recovery-foot">
+        Nuclear option — kills <em>all</em> FFmpeg on this machine,
+        including any unrelated FFmpeg jobs. On a dedicated broadcast
+        rig that's exactly what you want; otherwise prefer
+        <em>Kill orphan streams</em> above.
+      </p>
     </section>
 
     </div><!-- /.config-stack (left) -->
