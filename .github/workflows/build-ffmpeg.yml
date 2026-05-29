@@ -18,8 +18,21 @@
 # - `workflow_dispatch` — manual rebuild, e.g. after editing this
 #   workflow itself or testing a configure-flag change without
 #   bumping the pins.
-# - `push` with `paths: ci/ffmpeg-pins.env` filter — auto-rebuild
-#   when version pins change.
+# - `push` to any BRANCH with `paths: ci/ffmpeg-pins.env` filter —
+#   auto-rebuild when version pins change.
+#
+# Why explicit branches filter: a `push` trigger with only `paths`
+# also fires on TAG pushes (the paths filter compares against the
+# tag's commit diff, which is non-empty for any new alpha tag the
+# main app ships). Without branches:['**'], every `v*` tag the main
+# app ships re-triggers a 30-45 min FFmpeg+DeckLink rebuild AND
+# clobbers the sidecar release assets — racing release.yml's Mac
+# `gh release download` step. The alpha.38 Mac build hit exactly
+# this race and failed at HTTP 404 because the asset upload was
+# mid-flight when the download attempted. branches:['**'] limits the
+# auto-trigger to actual pin/workflow changes on any branch and
+# excludes tag pushes entirely; release.yml's tag-pushed runs now
+# always download a stable already-uploaded sidecar.
 #
 # SETUP REQUIRED before first dispatch will succeed:
 # - amateurmenace/bmd-decklink-sdk-mirror PRIVATE repo with the
@@ -33,6 +46,8 @@ name: Build FFmpeg+DeckLink sidecar
 on:
   workflow_dispatch:
   push:
+    branches:
+      - '**'
     paths:
       - 'ci/ffmpeg-pins.env'
       - '.github/workflows/build-ffmpeg.yml'
