@@ -1,0 +1,598 @@
+<!doctype html>
+<!--
+  Session 16 Phase A — static layout mock for the broadcast multiview UI.
+  No JS, no real polling. Operator reviews this before Phase C commits to a
+  4x2 vs 2x4 grid + tile-component shape. Sample tile states cover the
+  full status taxonomy (idle/connecting/streaming/reconnecting/interrupted)
+  so the operator sees how each renders.
+
+  Production multiview at bmd_emulator/static/multiview.html will reuse
+  this structure with live state polling via /api/multiview-grid.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Multiview (Phase A mock) — ATEM IP Patchbay</title>
+<style>
+  :root {
+    --bg: #0e0f12;
+    --bg-tile: #15171c;
+    --bg-preview: #050608;
+    --border: #2a2e36;
+    --border-active: #3a4250;
+    --text: #e6e6ea;
+    --text-dim: #8a8f9b;
+    --accent: #66d3fa;
+    --good: #5fd06b;
+    --warn: #f0b84f;
+    --bad: #e85c5c;
+    --idle: #6f7682;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  header h1 span.mock {
+    color: var(--warn);
+    margin-left: 8px;
+    font-weight: 500;
+    font-size: 12px;
+  }
+  header .mock-note {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 8px;
+    padding: 8px;
+    height: calc(100vh - 49px);
+  }
+
+  /* Below 1280px, fall to 2x4 portrait. Multiview operators may have
+     vertical secondary monitors; the spec said 4x2 wins on standard
+     16:9 reference monitors but 2x4 reads cleanly when squeezed. */
+  @media (max-width: 1279px) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+      grid-template-rows: repeat(4, 1fr);
+    }
+  }
+
+  .tile {
+    background: var(--bg-tile);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: border-color 100ms;
+  }
+  .tile.streaming { border-color: var(--good); }
+  .tile.reconnecting { border-color: var(--warn); }
+  .tile.interrupted { border-color: var(--bad); }
+
+  .tile-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(0,0,0,0.2);
+    border-bottom: 1px solid var(--border);
+    min-height: 32px;
+  }
+  .tile-idx {
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--text-dim);
+    width: 18px;
+  }
+  .tile-name {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pill {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .pill.idle { background: rgba(111,118,130,0.2); color: var(--idle); }
+  .pill.connecting { background: rgba(102,211,250,0.15); color: var(--accent); }
+  .pill.streaming { background: rgba(95,208,107,0.15); color: var(--good); }
+  .pill.reconnecting { background: rgba(240,184,79,0.15); color: var(--warn); }
+  .pill.interrupted { background: rgba(232,92,92,0.15); color: var(--bad); }
+
+  .preview {
+    position: relative;
+    flex: 1;
+    background: var(--bg-preview);
+    overflow: hidden;
+    min-height: 0; /* lets flex shrink below intrinsic content size */
+  }
+  .preview-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-style: italic;
+  }
+  .preview-img {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    background-color: #1a1d23;
+  }
+  /* Bars placeholder for the empty/idle state */
+  .preview-bars {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+      #c0c0c0 0%, #c0c0c0 14.28%,
+      #c0c000 14.28%, #c0c000 28.57%,
+      #00c0c0 28.57%, #00c0c0 42.85%,
+      #00c000 42.85%, #00c000 57.14%,
+      #c000c0 57.14%, #c000c0 71.42%,
+      #c00000 71.42%, #c00000 85.71%,
+      #0000c0 85.71%, #0000c0 100%
+    );
+    opacity: 0.45;
+  }
+  .preview-overlay-bottom {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 6px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.85);
+    pointer-events: none;
+  }
+
+  /* Audio meter strip: input on left, output on right.
+     Each is a small canvas-equivalent rendered with linear gradients
+     + width-percentages to mock what the live JS would draw. */
+  .meters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 6px 8px;
+    background: rgba(0,0,0,0.15);
+    border-top: 1px solid var(--border);
+    min-height: 36px;
+  }
+  .meter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .meter-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 2px;
+  }
+  .meter-bars {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+  }
+  .meter-bar-track {
+    height: 8px;
+    background: rgba(0,0,0,0.4);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+  }
+  .meter-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--good) 0%, var(--good) 70%, var(--warn) 70%, var(--warn) 90%, var(--bad) 90%);
+    transition: width 80ms;
+  }
+  .meter-bar-peak {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: rgba(255,255,255,0.7);
+  }
+
+  .tile-foot {
+    padding: 6px 10px;
+    background: rgba(0,0,0,0.25);
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 6px;
+    align-items: center;
+    font-size: 11px;
+  }
+  .tile-foot dt {
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .tile-foot dd {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Multiview <span class="mock">— Phase A mock (no live data)</span></h1>
+  <div class="mock-note">/static/multiview-mock.html · 4x2 grid · falls to 2x4 below 1280px</div>
+</header>
+
+<div class="grid">
+
+  <!-- Tile 0: STREAMING, NDI in → DeckLink Studio 4K -->
+  <div class="tile streaming">
+    <div class="tile-head">
+      <span class="tile-idx">0</span>
+      <span class="tile-name">DeckLink Studio 4K</span>
+      <span class="pill streaming">Streaming</span>
+    </div>
+    <div class="preview">
+      <div class="preview-bars"></div>
+      <div class="preview-overlay-bottom">
+        <span>1080p29.97 · Hp29 · 5.9 Mbps · 29.97 fps</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>-12.4 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:65%"></div>
+            <div class="meter-bar-peak" style="left:70%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:62%"></div>
+            <div class="meter-bar-peak" style="left:68%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>-13.1 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:60%"></div>
+            <div class="meter-bar-peak" style="left:67%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:58%"></div>
+            <div class="meter-bar-peak" style="left:65%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>NDI · iPhone NDICAM</dd>
+      <dt>AUD</dt><dd>Auto · stereo</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 1: STREAMING, OMT in → DeckLink 8K Pro (1) -->
+  <div class="tile streaming">
+    <div class="tile-head">
+      <span class="tile-idx">1</span>
+      <span class="tile-name">DeckLink 8K Pro (1)</span>
+      <span class="pill streaming">Streaming</span>
+    </div>
+    <div class="preview">
+      <div class="preview-bars"></div>
+      <div class="preview-overlay-bottom">
+        <span>1080p59.94 · Hp59 · 12.1 Mbps · 59.94 fps</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>-6.2 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:85%"></div>
+            <div class="meter-bar-peak" style="left:88%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:82%"></div>
+            <div class="meter-bar-peak" style="left:86%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>-6.8 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:81%"></div>
+            <div class="meter-bar-peak" style="left:85%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:78%"></div>
+            <div class="meter-bar-peak" style="left:83%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>OMT · Stage Cam</dd>
+      <dt>AUD</dt><dd>Custom · Dante L1/R1</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 2: RECONNECTING, SRT-listen → DeckLink 8K Pro (2) -->
+  <div class="tile reconnecting">
+    <div class="tile-head">
+      <span class="tile-idx">2</span>
+      <span class="tile-name">DeckLink 8K Pro (2)</span>
+      <span class="pill reconnecting">Reconnecting 3s · 2/12</span>
+    </div>
+    <div class="preview">
+      <div class="preview-empty">last frame 8s ago</div>
+      <div class="preview-overlay-bottom">
+        <span>waiting for incoming SRT…</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>SRT receiver · :9710</dd>
+      <dt>AUD</dt><dd>Auto · stereo</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 3: STREAMING, RTMP-listen → DeckLink 8K Pro (3) -->
+  <div class="tile streaming">
+    <div class="tile-head">
+      <span class="tile-idx">3</span>
+      <span class="tile-name">DeckLink 8K Pro (3)</span>
+      <span class="pill streaming">Streaming</span>
+    </div>
+    <div class="preview">
+      <div class="preview-bars"></div>
+      <div class="preview-overlay-bottom">
+        <span>720p59.94 → 1080p59.94 (scaled) · 4.2 Mbps</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>-18.1 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:40%"></div>
+            <div class="meter-bar-peak" style="left:45%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:38%"></div>
+            <div class="meter-bar-peak" style="left:43%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>-18.5 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:38%"></div>
+            <div class="meter-bar-peak" style="left:44%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:37%"></div>
+            <div class="meter-bar-peak" style="left:42%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>RTMP receiver · :1935/live/cam1</dd>
+      <dt>AUD</dt><dd>Auto · stereo</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 4: CONNECTING, NDI in → Output C to Videohub Input 21 -->
+  <div class="tile connecting">
+    <div class="tile-head">
+      <span class="tile-idx">4</span>
+      <span class="tile-name">Output C to Videohub Input 21</span>
+      <span class="pill connecting">Connecting…</span>
+    </div>
+    <div class="preview">
+      <div class="preview-empty">probing NDI source…</div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>NDI · STUDIO-PC (Source 3)</dd>
+      <dt>AUD</dt><dd>Auto · stereo</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 5: IDLE — operator hasn't configured -->
+  <div class="tile">
+    <div class="tile-head">
+      <span class="tile-idx">5</span>
+      <span class="tile-name">— configure a tile —</span>
+      <span class="pill idle">Idle</span>
+    </div>
+    <div class="preview">
+      <div class="preview-empty">click to configure source + destination</div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd style="color:var(--text-dim);font-style:italic">(none)</dd>
+      <dt>OUT</dt><dd style="color:var(--text-dim);font-style:italic">(none)</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 6: STREAMING, OMT in → NDI Machine 2 -->
+  <div class="tile streaming">
+    <div class="tile-head">
+      <span class="tile-idx">6</span>
+      <span class="tile-name">NDI Machine 2</span>
+      <span class="pill streaming">Streaming</span>
+    </div>
+    <div class="preview">
+      <div class="preview-bars"></div>
+      <div class="preview-overlay-bottom">
+        <span>1080p29.97 · Hp29 · 6.0 Mbps · 29.97 fps</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>-9.6 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:74%"></div>
+            <div class="meter-bar-peak" style="left:79%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:72%"></div>
+            <div class="meter-bar-peak" style="left:77%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>-10.0 dB</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:71%"></div>
+            <div class="meter-bar-peak" style="left:76%"></div>
+          </div>
+          <div class="meter-bar-track">
+            <div class="meter-bar-fill" style="width:69%"></div>
+            <div class="meter-bar-peak" style="left:74%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>OMT · ATEM Mini Pro Out</dd>
+      <dt>AUD</dt><dd>Custom · Dante L3/R3</dd>
+    </dl>
+  </div>
+
+  <!-- Tile 7: INTERRUPTED — FFmpeg child died, supervisor giving up -->
+  <div class="tile interrupted">
+    <div class="tile-head">
+      <span class="tile-idx">7</span>
+      <span class="tile-name">Key/Fill 1</span>
+      <span class="pill interrupted">Interrupted</span>
+    </div>
+    <div class="preview">
+      <div class="preview-empty">decklink error · max attempts reached</div>
+      <div class="preview-overlay-bottom">
+        <span style="color:var(--bad)">supervisor stopped after 12 attempts · last err: I/O error</span>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter-group">
+        <div class="meter-label"><span>IN L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+      <div class="meter-group">
+        <div class="meter-label"><span>OUT L/R</span><span>—</span></div>
+        <div class="meter-bars">
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+          <div class="meter-bar-track"><div class="meter-bar-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <dl class="tile-foot">
+      <dt>SRC</dt><dd>pipe · rtsp://192.168.1.50/cam1</dd>
+      <dt>AUD</dt><dd>Silent</dd>
+    </dl>
+  </div>
+
+</div>
+
+</body>
+</html>

@@ -851,6 +851,38 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+      # alpha.38: Session 16 Phase A diagnostic. Spawns N concurrent
+      # decklink_enc FFmpeg children against the operator's real rig
+      # to verify whether the multiview rework can use a single Tauri
+      # process (Option A — EncoderFleet TILE_COUNT=8) or needs to
+      # spread across N processes (Option B). One-off diagnostic, not
+      # bundled into the NSIS installer — separate .exe so operators
+      # can run it standalone without disturbing their app install.
+      - name: Build decklink-spike.exe
+        shell: pwsh
+        run: |
+          Write-Host "Building decklink-spike.exe (Session 16 Phase A)..."
+          Push-Location tools\decklink-spike
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: decklink-spike build failed"
+            exit 1
+          }
+          Pop-Location
+          $spike = "tools\decklink-spike\target\release\decklink-spike.exe"
+          if (-not (Test-Path $spike)) {
+            Write-Host "ERROR: decklink-spike.exe not found at $spike"
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $spike).Length / 1MB, 2)
+          Write-Host "Built decklink-spike.exe ($sizeMB MB)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-decklink-spike
+          path: tools/decklink-spike/target/release/decklink-spike.exe
+          if-no-files-found: error
+
   # ---------------------------------------------------------------
   # atem-net-diag companion tool — Mac arm64 tarball + .app.zip,
   # signed with the same Developer ID + hardened runtime as the
@@ -1017,6 +1049,13 @@ jobs:
           fi
           if compgen -G "artifacts/atem-net-diag-macos-arm64/*.app.zip" > /dev/null; then
             FILES+=(artifacts/atem-net-diag-macos-arm64/*.app.zip)
+          fi
+          # alpha.38: Session 16 Phase A spike diagnostic. Only built
+          # for Windows since the operator's test rig is the
+          # Broadcast Pix Windows machine. Optional artifact — release
+          # publishes even if spike build was skipped or failed.
+          if compgen -G "artifacts/windows-x64-decklink-spike/*.exe" > /dev/null; then
+            FILES+=(artifacts/windows-x64-decklink-spike/*.exe)
           fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
