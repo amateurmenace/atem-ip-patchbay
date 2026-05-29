@@ -3560,6 +3560,165 @@ This entry is the catch-up. The next session picks up cleanly
 from alpha.57 with the operator-side verification queue and the
 Session 18 priorities above.
 
+### Session 18 wins (alpha.58 + alpha.59, 2026-05-29)
+
+Operator-driven firefighting session on the Broadcast Pix Windows
+rig (plus a Mac). Two alphas shipped + CI-green on both platforms +
+installed/verified on Windows. The session was *supposed* to be the
+single-view tile toggle / 6-NDI→DeckLink work, but it turned into a
+production-down debugging marathon that ultimately uncovered a
+long-standing ATEM receiver-slot lockout. Net result: the recovery +
+streaming-reliability foundation is now solid; the 6-NDI feature work
+is still pending.
+
+**alpha.58 (commit `da9531e`) — recovery + crash hardening.** Fixes
+the unrecoverable "attach Dante DVS audio to an NDI source → crash,
+Stop/refresh/kill-orphans all do nothing" report. Three coupled
+structural bugs:
+1. **Stop-aware capture send** (ndi_capture.rs + omt_capture.rs).
+   `tx.blocking_send()` parked the capture OS thread forever when
+   FFmpeg stopped draining stdin (Dante's dshow open hangs → FFmpeg
+   never reads the rawvideo pipe → the bounded channel fills). A
+   parked thread can't see the stop flag, so `stop()`'s `handle.join()`
+   hung — while holding the streamer `inner` lock → every recovery call
+   wedged. Replaced with `send_frame_or_stop` (poll `try_send`,
+   re-check `stop` between full-channel retries) + bounded
+   `join_with_timeout`.
+2. **Off-lock capture joins** in `stop()` + `run_one_attempt` — take
+   captures out under the lock, join off-lock; only non-blocking
+   `start_kill` stays under the lock.
+3. **Poison-proof state RwLock** — `.read()/.write().unwrap()` →
+   `.unwrap_or_else(|e| e.into_inner())`, so one panic while holding the
+   write guard no longer poison-cascades into every /api/* handler +
+   supervisor + stall-detector (a permanent wedge from a single panic).
+   Plus: **Windows kill-orphans implemented** (was a no-op returning
+   "use Task Manager") via CIM + Stop-Process matching our ffmpeg.exe
+   (streamid=/decklink/format_code/tcp://127); and a lock-free
+   **"Force Stop ALL"** button (Recovery card + multiview topbar →
+   `/api/force-stop-all`) that OS-kills every ffmpeg + resets tiles,
+   reachable even when a tile is wedged.
+
+**alpha.59 (commit `9df6320`) — graceful FFmpeg shutdown + source
+hot-swap.** The real fix for "every restart wedges the ATEM."
+1. **Graceful shutdown** (streamer.rs `stop()`). alpha.58 still
+   force-killed FFmpeg up front (TerminateProcess), abandoning the SRT
+   connection → the ATEM held a stale receiver session → input wedged.
+   Fix: for pipe sources (NDI/OMT), stopping the capture closes FFmpeg's
+   stdin → FFmpeg sees input EOF → flushes + writes the MPEG-TS trailer +
+   closes SRT **cleanly** + exits on its own. `stop()` now stops captures
+   and lets FFmpeg exit (polling `is_running()` up to a 2.5s budget),
+   force-killing only as a bounded fallback (non-pipe sources have no
+   stdin EOF). Windows-safe — no CTRL_BREAK/console hacks.
+   `run_one_attempt` stays the sole reaper of `inner.child` (the
+   non-blocking start_kill pattern the stall detector already uses) → no
+   wait()/take() race. `stop()` keeps `&self` → zero caller changes.
+   (Designed via a Plan-agent pass first, since the lifecycle is delicate
+   and can't be compile-tested on this box — no libclang.)
+2. **Source hot-swap** (http.rs `api_settings`). Changing the source
+   dropdown updated `source_id` but the live FFmpeg kept ingesting the
+   OLD source (its input is fixed at launch) — the operator switched to
+   NDI but the ATEM kept showing the test pattern, a major confusion.
+   Now `api_settings` compares `source_identity` (source_id /
+   ndi_source_name / omt_source_name / av_video_index) before+after; if
+   it changed while live, it restarts the stream in a detached task
+   (graceful stop → start) with `status="Switching"`. Per-tile in
+   multiview. No new endpoint/payload/state field.
+3. **⚙ Advanced button** right of the Quality picker (opens + scrolls to
+   the Advanced panel) — operator-requested.
+
+**The debugging marathon + the CONFIRMED root cause** (recorded so the
+next session doesn't repeat the wrong turns I made):
+- A 40-min orphan FFmpeg (NDI+Dante→DeckLink) held the Dante device +
+  DeckLink output; two app instances hung at the **driver level** —
+  `taskkill`/`Stop-Process` couldn't kill them, only .NET
+  `Process.Kill()` did (after the SDK call unwound). The extra instances
+  came from MY relaunch commands during recovery, NOT the operator
+  (they only ever opened one — be careful with Start-Process relaunches).
+- "SRT connects to the ATEM but no image": I wrongly chased the
+  **encoder** (the ATEM decodes BOTH H.265 and H.264 — operator
+  confirmed), the **video format** (matched at 1080p29.97, not it), and
+  an **ATEM-input wedge**. Operator power-cycled the ATEM and it still
+  failed, and reproduced the break on a Mac.
+- **The actual answer** (finally read from the FFmpeg log):
+  `[srt @ ...] Connection to srt://...,u=<KEY> failed: I/O error` = the
+  **ATEM per-key receiver-slot lockout** (documented: "new connections
+  with the same key fail with I/O error"). NDI was **never broken** —
+  the /api/preview JPEG showed REMOTEENGINEERING's full multiviewer
+  feed, and FFmpeg read the input correctly (`rawvideo (BGRA),
+  1920x1080, 30 tbr`). "Test pattern works / NDI doesn't" was a **timing
+  coincidence**: the test pattern grabbed the first clean connection; by
+  the time the source was switched to NDI, the restart churn had locked
+  the key's slot. The lockout comes from the Windows abrupt-kill (no
+  clean SRT close) leaving stale sessions that accumulate; the
+  power-cycle cleared it but Windows (Reconnecting) + the Mac re-grabbed
+  the key and re-locked it. **alpha.59's graceful shutdown is the
+  durable fix; immediate recovery = quiet EVERY machine → power-cycle
+  the ATEM with nothing connecting → ONE clean stream from ONE machine.
+  Only one machine per ATEM key (two = I/O error for the second).**
+
+### Open issues from Session 18
+
+- **alpha.59 NOT yet operator-verified end-to-end (Session 19 #1).** The
+  decisive test is pending: quiet all → power-cycle the ATEM → ONE clean
+  NDI→ATEM connection → does REMOTEENGINEERING show? Then: does
+  hot-swapping between NDI cameras switch cleanly without re-locking the
+  ATEM? (At session end the ATEM slot may still have been locked;
+  Windows was force-stopped/quiet, the Mac still needed quieting.)
+- **Mac needs updating to alpha.59** (Releases v0.2.0-alpha.59 macOS
+  arm64 .dmg) — that's where the operator tests; the graceful-stop fix
+  matters there too.
+- **Intermittent NDI-start wedge on Windows.** Several times,
+  `NdiCapture::start_and_probe_format` → `receiver.capture_video(500ms)`
+  blocked PAST its 5s deadline when the NDI SDK/source was in a bad state
+  (the probe loop never re-checks the deadline) → instance goes
+  Responding=false, all /api/* time out, no ffmpeg spawns. Needs a hard
+  wall-clock timeout / watchdog around the probe so a hung NDI probe
+  can't wedge the process. A wedged SDK currently needs a reboot.
+- **/api/state has NO `.snapshot` wrapper** — fields are top-level
+  (`$r.stats.status`, `$r.video_encoder`, …). Only /api/load_xml wraps in
+  `{service, snapshot}`; /api/log returns `{command, lines[]}`. (Noted —
+  wasted time parsing `.snapshot` on /api/state.)
+- **NSIS file-lock on reinstall** still bites — kill atem-ip-patchbay.exe
+  + ffmpeg.exe (+ net-diag) before installing or the installer silently
+  skips locked files. The Session 16 NSIS pre-install taskkill hook is
+  still unaddressed.
+- **6-NDI → DeckLink (the Session 16 headline) did not progress** — the
+  session was consumed by the firefight. Still pending: 8 tiles, DeckLink
+  concurrency, broadcast-multiview.
+- **True seamless source switching** (SRT stays up, swap FFmpeg's input)
+  — deferred; a bigger architecture. alpha.59's graceful-stop +
+  auto-restart is the practical version.
+- Longstanding carryovers untouched: pre-show checks panel (net-utility),
+  OMT-out audio for non-raw sources, pipe/relay custom audio, Net Utility
+  "Saving forever".
+
+### Session 19 priorities
+
+1. **Verify alpha.59 end-to-end (#1).** Update the Mac to alpha.59. Then
+   quiet every machine → power-cycle the ATEM → ONE clean NDI→ATEM stream
+   → confirm REMOTEENGINEERING shows. Then confirm hot-swapping between
+   NDI cameras switches cleanly (source change auto-restarts, status
+   briefly "Switching", ATEM re-acquires without locking). Closes the
+   Session-18 arc.
+2. **Harden the NDI-start wedge.** Hard wall-clock timeout/watchdog
+   around `NdiCapture::start_and_probe_format` so a hung `capture_video`
+   can't freeze the instance. The remaining reliability hole.
+3. **6-NDI → DeckLink (resume the Session 16 headline).** TILE_COUNT→8,
+   DeckLink concurrency at 6-8 outputs, broadcast-multiview UX. The
+   operator's stated real-world goal.
+4. **Single-view tile toggle** (the original Session 18 ask, never
+   started) — cycle the single-view UI across configured tiles.
+5. **Carryovers:** NSIS pre-install taskkill hook; pre-show checks panel;
+   OMT-out audio non-raw; pipe/relay custom audio; Net Utility "Saving
+   forever".
+
+### Session 18 also includes CLAUDE.md catch-up + commit
+
+This entry is the catch-up. Session 19 picks up from alpha.59
+installed-on-Windows, with operator-verification of the graceful-stop +
+hot-swap fixes (quiet-all → power-cycle → one clean NDI→ATEM connection)
+as the immediate next step.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
@@ -3917,6 +4076,29 @@ Key implementation gotchas:
   pixel-format conversion. Manually verified before
   commit with testsrc2 → Output C to Videohub Input 21
   → frames written at 30fps. 10-bit V210 path deferred.
+- `v0.2.0-alpha.58` (commit `da9531e`): Session 18 — recovery +
+  crash hardening. Stop-aware capture send (ndi_capture.rs +
+  omt_capture.rs: `blocking_send` → `send_frame_or_stop` +
+  `join_with_timeout`) fixing the Dante-on-NDI wedge where a
+  back-pressured capture thread parked forever and froze `stop()`;
+  off-lock capture joins in stop()/run_one_attempt; poison-proof
+  state RwLock (`.unwrap_or_else(|e| e.into_inner())`); real Windows
+  kill-orphans (CIM + Stop-Process, was a no-op); lock-free
+  "Force Stop ALL" button (`/api/force-stop-all`). CI green Mac +
+  Windows; installed + verified on the Windows rig.
+- `v0.2.0-alpha.59` (commit `9df6320`): Session 18 — graceful
+  FFmpeg shutdown + source hot-swap. `stop()` no longer force-kills
+  up front; for NDI/OMT it stops the capture (→ stdin EOF → FFmpeg
+  flushes + closes SRT cleanly + exits) with a 2.5s bounded
+  force-kill fallback — the durable fix for the ATEM per-key
+  receiver-slot lockout that abrupt kills caused. `api_settings`
+  auto-restarts the stream on a source change while live
+  (`status="Switching"`) so switching sources actually switches
+  what's streaming. ⚙ Advanced button right of the Quality picker.
+  CI green Mac + Windows; installed + verified on Windows. Confirmed
+  the session's "NDI won't reach the ATEM" was the per-key lockout
+  (SRT "I/O error"), NOT NDI — NDI capture was always healthy
+  (preview proof + correct FFmpeg input interpretation).
 
 ### v0.2.0 UI / UX scope (queued)
 
