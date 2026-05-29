@@ -1,16 +1,24 @@
 <!doctype html>
 <!--
-  alpha.40 broadcast multiview — 8 channels in one window. Each tile
+  alpha.41 broadcast multiview — 4 channels in one window. Each tile
   is a full source→DeckLink-output pipeline routed via the same
-  /api/i/:idx/* endpoints the single-source UI uses; TILE_COUNT=8 in
-  fleet.rs gives us 8 independent EncoderState + Streamer + Preview
-  slots. Per-tile NDI/OMT source picker, DeckLink output picker,
-  start/stop, live preview, status pill.
+  /api/i/:idx/* endpoints the single-source UI uses; TILE_COUNT=4 in
+  fleet.rs gives us 4 independent EncoderState + Streamer + Preview
+  slots.
 
-  This is the MVP — wired end-to-end but with minimal controls. Adds
-  for subsequent alphas: per-tile audio source + L/R Dante channel,
-  per-tile input + output audio meters, hardware-accel decoder
-  routing for incoming streams, finer per-tile reconnect tuning.
+  alpha.41 production hardening:
+  - System health pill in header (CPU/RAM polled every 2s via
+    /api/system-health, traffic-light Green/Yellow/Red).
+  - Confirm dialog on Stop / Stop All when tile is Streaming —
+    prevents stray-click off-air during a live show.
+  - Source / DeckLink output / Mode dropdowns disabled while a tile
+    is Streaming, so config can't silently drift from the live state.
+  - Per-tile state persisted to disk via /api/i/N/settings → reloads
+    on restart so a crash / Cmd-Q / installer doesn't wipe configs.
+  - Backend stall detector: FFmpeg "Streaming with fps=0 for 5s"
+    triggers a force-kill that the alpha.30 supervisor catches and
+    reconnects — operator sees "Reconnecting" rather than a stuck-
+    Streaming-forever tile.
 -->
 <html lang="en">
 <head>
@@ -91,17 +99,52 @@
     background: rgba(232,92,92,0.15);
   }
 
+  /* alpha.41 system health pill — polled from /api/system-health
+     every 2s. Tooltip on hover shows CPU/RAM detail. */
+  .sys-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: default;
+    user-select: none;
+    line-height: 1;
+  }
+  .sys-pill .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--idle);
+    flex-shrink: 0;
+  }
+  .sys-pill.green { border-color: rgba(95,208,107,0.5); color: var(--good); }
+  .sys-pill.green .dot { background: var(--good); box-shadow: 0 0 6px rgba(95,208,107,0.6); }
+  .sys-pill.yellow { border-color: rgba(240,184,79,0.55); color: var(--warn); }
+  .sys-pill.yellow .dot { background: var(--warn); box-shadow: 0 0 6px rgba(240,184,79,0.6); }
+  .sys-pill.red { border-color: rgba(232,92,92,0.7); color: var(--bad); background: rgba(232,92,92,0.06); }
+  .sys-pill.red .dot { background: var(--bad); box-shadow: 0 0 8px rgba(232,92,92,0.8); }
+  .sys-pill.unknown { color: var(--text-dim); }
+  .sys-pill .label-text {
+    font-variant-numeric: tabular-nums;
+  }
+
   .grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     grid-template-rows: repeat(2, 1fr);
-    gap: 6px;
-    padding: 6px;
+    gap: 8px;
+    padding: 8px;
     height: calc(100vh - 43px);
   }
-  @media (max-width: 1279px) {
+  /* Below 800px width, stack vertically so the controls still fit. */
+  @media (max-width: 800px) {
     .grid {
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: 1fr;
       grid-template-rows: repeat(4, 1fr);
     }
   }
@@ -314,8 +357,12 @@
 <body>
 
 <header>
-  <h1>Multiview <span class="sub">8 channels · NDI/OMT → DeckLink</span></h1>
+  <h1>Multiview <span class="sub">4 channels · NDI/OMT → DeckLink</span></h1>
   <div class="controls">
+    <div id="sys-pill" class="sys-pill unknown" title="System health — CPU + memory">
+      <span class="dot"></span>
+      <span class="label-text" id="sys-pill-label">starting…</span>
+    </div>
     <a href="/">← Single-source</a>
     <button id="refresh-all" type="button" title="Refresh discovery + tile state">↻ Refresh</button>
     <button id="stop-all" type="button" class="danger" title="Stop every tile that's streaming">Stop All</button>
@@ -329,10 +376,17 @@
 <script>
 "use strict";
 
-const TILE_COUNT = 8;
+const TILE_COUNT = 4;
 const TILES = Array.from({ length: TILE_COUNT }, (_, i) => i);
 const POLL_INTERVAL_MS = 1000;
 const PREVIEW_INTERVAL_MS = 500;
+const SYS_HEALTH_INTERVAL_MS = 2000;
+
+// alpha.41: status taxonomy that should be confirmed before
+// destructive actions. "Reconnecting" not in this set because
+// reconnecting is already "off-air" (operator stopping it just
+// makes it permanent, no surprise content disappears).
+const STREAMING_STATUSES = new Set(['streaming', 'connecting']);
 
 // Per-tile in-memory state cache. Populated lazily on first state poll.
 const tileState = {};
@@ -622,6 +676,24 @@ async function onStart(idx) {
 }
 
 async function onStop(idx) {
+  // alpha.41 destructive-op guard: when the tile is in Streaming
+  // (or Connecting), a stray click takes a real output off-air. Pop
+  // a synchronous confirm() with the current bitrate + destination
+  // so the operator sees what they're about to interrupt. Skipped
+  // for Idle / Interrupted / Reconnecting tiles where there's no
+  // live content to lose.
+  const snap = tileState[idx]?.snapshot;
+  const status = (snap?.stats?.status || '').toLowerCase();
+  if (STREAMING_STATUSES.has(status)) {
+    const bitrate = snap?.stats?.bitrate || 0;
+    const fps = snap?.stats?.fps || 0;
+    const dest = describeDest(snap);
+    const msg = `Stop tile ${idx + 1}?\n\n` +
+      `Currently ${status === 'streaming' ? 'streaming' : 'connecting'}: ` +
+      `${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps\n` +
+      `→ ${dest}`;
+    if (!confirm(msg)) return;
+  }
   try {
     await fetchJson(`/api/i/${idx}/stop`, { method: 'POST' });
     toast(`Tile ${idx + 1}: stopping`, 'good');
@@ -631,14 +703,74 @@ async function onStop(idx) {
 }
 
 async function onStopAll() {
-  for (const idx of TILES) {
-    const snap = tileState[idx]?.snapshot;
-    const status = snap?.stats?.status?.toLowerCase();
-    if (status && status !== 'idle' && status !== 'interrupted') {
-      try { await fetch(`/api/i/${idx}/stop`, { method: 'POST' }); } catch {}
+  // Find the streaming tiles up front so we can include the count
+  // in the confirm prompt. "Reconnecting" tiles count too — they're
+  // a stream the operator intends to recover, stopping them gives
+  // up the recovery.
+  const active = TILES.filter(idx => {
+    const status = (tileState[idx]?.snapshot?.stats?.status || '').toLowerCase();
+    return status === 'streaming' || status === 'connecting' || status === 'reconnecting';
+  });
+  if (active.length === 0) {
+    toast('No active tiles to stop', 'good');
+    return;
+  }
+  if (!confirm(`Stop ALL ${active.length} active tile${active.length === 1 ? '' : 's'}?\n\nThis takes every running output off-air.`)) {
+    return;
+  }
+  for (const idx of active) {
+    try { await fetch(`/api/i/${idx}/stop`, { method: 'POST' }); } catch {}
+  }
+  toast(`Stopped ${active.length} tile${active.length === 1 ? '' : 's'}`, 'good');
+}
+
+// -------------------------------------------------------------------
+// alpha.41 system health polling
+// -------------------------------------------------------------------
+
+async function pollSystemHealth() {
+  try {
+    const data = await fetchJson('/api/system-health');
+    renderSystemHealth(data);
+  } catch (e) {
+    const pill = document.getElementById('sys-pill');
+    const lbl = document.getElementById('sys-pill-label');
+    if (pill && lbl) {
+      pill.className = 'sys-pill unknown';
+      lbl.textContent = 'monitor offline';
+      pill.title = 'Cannot reach /api/system-health';
     }
   }
-  toast('All running tiles stopped', 'good');
+}
+
+function renderSystemHealth(data) {
+  const pill = document.getElementById('sys-pill');
+  const lbl = document.getElementById('sys-pill-label');
+  if (!pill || !lbl) return;
+  const status = data.status || 'unknown';
+  pill.className = 'sys-pill ' + status;
+  const cpu = Math.round(data.cpu_percent || 0);
+  const memUsed = data.mem_used_mb || 0;
+  const memTotal = data.mem_total_mb || 0;
+  const memPct = Math.round(data.mem_percent || 0);
+
+  let summary;
+  if (status === 'unknown') {
+    summary = 'starting…';
+  } else if (status === 'red') {
+    summary = (data.warning || `CPU ${cpu}% · MEM ${memPct}%`).split('—')[0].trim();
+  } else {
+    summary = `CPU ${cpu}% · MEM ${memPct}%`;
+  }
+  lbl.textContent = summary;
+
+  const tooltipParts = [
+    `Status: ${status.toUpperCase()}`,
+    `CPU: ${cpu}% (${data.cpu_count || '?'} cores)`,
+    `Memory: ${memPct}% — ${(memUsed / 1024).toFixed(1)} / ${(memTotal / 1024).toFixed(1)} GB`,
+  ];
+  if (data.warning) tooltipParts.push('', data.warning);
+  pill.title = tooltipParts.join('\n');
 }
 
 // -------------------------------------------------------------------
@@ -726,6 +858,43 @@ function renderTile(idx, data) {
   // Reflect server state in the dropdowns whenever it changes (e.g.
   // operator made changes in another window or via the single-source UI).
   setAudioDropdown(idx);
+
+  // alpha.41 destructive-op guard: disable configuration dropdowns
+  // while the tile is Streaming or Connecting so source/dest/mode
+  // changes can't silently drift away from the running stream's
+  // actual config. Re-enabled the moment status drops back to
+  // Idle / Interrupted / Reconnecting (Reconnecting because at that
+  // point the operator should be free to reconfigure during backoff).
+  const locked = STREAMING_STATUSES.has((snap?.stats?.status || '').toLowerCase());
+  const lockTitle = locked
+    ? 'Locked while streaming — Stop the tile to change configuration'
+    : '';
+  for (const ctrl of [
+    `tile-src-${idx}`,
+    `tile-dl-${idx}`,
+    `tile-mode-${idx}`,
+    `tile-audio-${idx}`,
+    `tile-start-${idx}`,
+  ]) {
+    const el = document.getElementById(ctrl);
+    if (!el) continue;
+    // Skip the mode dropdown if it has no real choices yet (no
+    // DeckLink picked) — its own "disabled" reflects that case.
+    if (ctrl === `tile-mode-${idx}` && !tileState[idx]?.snapshot?.decklink_device_name) {
+      continue;
+    }
+    if (ctrl === `tile-start-${idx}`) {
+      // Start should only be disabled while ACTIVELY streaming —
+      // Connecting allowed because clicking Start during Connecting
+      // does nothing anyway. Stop is always enabled (it's the
+      // escape hatch).
+      el.disabled = (snap?.stats?.status || '').toLowerCase() === 'streaming';
+    } else {
+      el.disabled = locked;
+    }
+    if (locked) el.title = lockTitle;
+    else el.removeAttribute('title');
+  }
 }
 
 async function pollTile(idx) {
@@ -807,6 +976,12 @@ async function bootstrap() {
     populateSourceDropdown(idx);
     populateDecklinkDropdown(idx);
   }
+
+  // alpha.41: kick off system health polling alongside tile state.
+  // Fire one immediate poll so the pill doesn't sit on "starting…"
+  // for the full interval before the first real reading.
+  pollSystemHealth();
+  setInterval(pollSystemHealth, SYS_HEALTH_INTERVAL_MS);
 
   setInterval(pollAllTiles, POLL_INTERVAL_MS);
   setInterval(refreshPreviews, PREVIEW_INTERVAL_MS);

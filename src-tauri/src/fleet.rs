@@ -27,24 +27,24 @@ use crate::streamer::Streamer;
 use std::sync::Arc;
 
 /// Number of tiles in this Tauri process. Originally 1 (alpha.16);
-/// bumped to 8 in alpha.40 for the broadcast-multiview rework —
-/// each tile is a full source→DeckLink-output pipeline (an NDI/OMT/
-/// SRT-listen/RTMP-listen/pipe source feeding one DeckLink SDI/HDMI
-/// output) running concurrently in this Tauri process.
+/// bumped to 8 in alpha.40 for the broadcast-multiview rework;
+/// dropped to 4 in alpha.41 after a UX + reliability review.
 ///
-/// Phase A spike (alpha.38) was meant to validate 8x decklink_enc
-/// concurrency before committing — operator priorities pivoted that
-/// to "just try it" so this bump ships without spike confirmation.
-/// If 8 concurrent decklink children turn out to contend or starve
-/// each other on the operator's hardware, the supervisor design
-/// already gives per-tile isolation; worst case we drop back to N
-/// processes via spawn_instance for a particular operator setup.
+/// Why 4 not 8: a 2x2 grid at 1600x900 gives each tile ~750x420 —
+/// comfortable controls + a big preview. 4x2 at 8 tiles squeezes
+/// each to ~400x450 with cramped pickers. Decklink-driver concurrency
+/// is also well-understood at 4 (matches typical multi-output decoder
+/// appliance scenarios); 8 was the unverified bet the Phase A spike
+/// was originally meant to validate. Operators who need more channels
+/// can launch a second instance via the existing `--instance-name`
+/// CLI flag (Session 11 alpha.16 pattern). Bumping 4→8 later is
+/// trivial; shrinking 8→4 after operators rely on the slots is not.
 ///
 /// Per-tile resource footprint: ~one EncoderState + one Streamer +
 /// one Preview struct (a few KB each) when idle. At full saturation:
-/// 8 FFmpeg children + 8 NDI/OMT receivers + 8 watchdogs. ~1.5-2 GB
-/// RSS at 1080p59.94 across 8 tiles on the operator's test rig.
-pub const TILE_COUNT: usize = 8;
+/// 4 FFmpeg children + 4 NDI/OMT receivers + 4 watchdogs. ~800 MB-
+/// 1 GB RSS at 1080p59.94 across 4 tiles on the operator's test rig.
+pub const TILE_COUNT: usize = 4;
 
 /// One tile slot — a complete self-contained pipeline. Every field
 /// is Arc'd so axum handlers can grab them by reference without
