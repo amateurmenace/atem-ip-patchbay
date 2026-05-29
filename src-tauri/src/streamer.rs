@@ -1025,14 +1025,34 @@ impl Streamer {
             cmd.push(filter.into());
         }
 
-        // DeckLink output muxer takes raw video (rawvideo codec — set
-        // explicitly so FFmpeg doesn't try to AAC-encode), PCM audio
-        // at 48 kHz, and the pixel format the card expects. Modern
-        // DeckLink cards default to uyvy422 (8-bit YUV 4:2:2);
-        // 10-bit cards can take yuv422p10le but the UI doesn't
-        // surface that yet. -format_code is the per-card mode
-        // identifier (Hp59 == 1080p59.94, etc.) — passed through
-        // from build_plan_decklink which looked it up via
+        // DeckLink output muxer is picky about its input codec.
+        // alpha.21 shipped `-c:v rawvideo` which sounds right (the
+        // muxer wants raw frames) but is actually wrong — FFmpeg's
+        // decklink_enc.cpp rejects rawvideo at header-write time:
+        //
+        //   [decklink @ ...] Unsupported codec type!
+        //   Only V210 and wrapped frame with AV_PIX_FMT_UYVY422
+        //   are supported.
+        //   [out#0/decklink @ ...] Could not write header
+        //   (incorrect codec parameters ?): I/O error
+        //
+        // First surfaced live in alpha.36 testing on the Broadcast
+        // Pix rig — the device-list parse fix landed but the actual
+        // Start Stream errored out at FFmpeg launch. Fix: switch to
+        // `wrapped_avframe`, FFmpeg's pseudo-codec that passes raw
+        // AVFrames straight to the muxer without re-encoding. The
+        // upstream `format=uyvy422` in the video filter (set by
+        // build_plan_decklink) handles pixel-format conversion;
+        // `wrapped_avframe` just packages the AVFrame for delivery.
+        //
+        // For 10-bit DeckLink cards, V210 would be the alternative
+        // — would need a -c:v v210 path with yuv422p10le pixel
+        // format. UI doesn't surface 10-bit yet; ship 8-bit only.
+        //
+        // PCM audio at 48 kHz, channel count per the audio mixer
+        // setting. -format_code (Hp59 == 1080p59.94 etc.) is the
+        // per-card mode identifier, passed through from
+        // build_plan_decklink which looked it up via
         // probe_decklink_modes against the live card.
         let pix_fmt = if plan.decklink_pixel_format.is_empty() {
             "uyvy422"
@@ -1041,7 +1061,7 @@ impl Streamer {
         };
         let ac = if plan.audio_output_mono { "1" } else { "2" };
         cmd.extend([
-            "-c:v".into(), "rawvideo".into(),
+            "-c:v".into(), "wrapped_avframe".into(),
             "-pix_fmt".into(), pix_fmt.into(),
             "-c:a".into(), "pcm_s16le".into(),
             "-ar".into(), "48000".into(),
