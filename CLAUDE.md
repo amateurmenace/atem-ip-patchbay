@@ -3656,6 +3656,29 @@ next session doesn't repeat the wrong turns I made):
   the ATEM with nothing connecting → ONE clean stream from ONE machine.
   Only one machine per ATEM key (two = I/O error for the second).**
 
+**alpha.60 (commit `e3ff37b`) — the ACTUAL "NDI black" fix (a SECOND,
+separate bug from the lockout).** After alpha.59, the operator reported
+NDI STILL showed black on the ATEM — on a Mac too, while **webcams and
+the test pattern worked fine**, and even a **fresh never-used
+destination** was black (so NOT the lockout — my lockout conclusion above
+was incomplete). The /api/preview proved the NDI capture was perfect
+(full multiviewer), and FFmpeg encoded correct yuv420p Main 6 Mbps
+reaching the ATEM (q≈22 = real detail, not black frames). The ONE thing
+unique to NDI vs the working sources: the **NDI audio TCP bridge** tags
+audio with `-use_wallclock_as_timestamps 1` (the alpha.49 DeckLink
+drift remedy). On the SRT/MPEG-TS path that puts the audio on a real-time
+timeline while the video (rawvideo pipe) is 0-based frame time → the
+mismatched PTS breaks the program PCR → the ATEM can't present the video
+→ black. The operator PROVED it: setting the Audio Mixer to **Silent**
+(no bridge) made the video appear instantly. **Fix:
+`AudioBridge::ffmpeg_input_args(use_wallclock)` — DeckLink keeps wallclock
+(its drift remedy), SRT/RTMP use sample-count PTS (0-based, aligned with
+the video).** So the session's "NDI won't reach the ATEM" was TWO
+separate bugs: the per-key SRT lockout (alpha.59 prevents the lockup) AND
+the audio-bridge timestamps (alpha.60 — the dominant cause of the black
+video). NDI capture/encode were always healthy. **Immediate operator
+workaround while alpha.60 builds: Audio Mixer = Silent.**
+
 ### Open issues from Session 18
 
 - **alpha.59 NOT yet operator-verified end-to-end (Session 19 #1).** The
@@ -4098,7 +4121,18 @@ Key implementation gotchas:
   CI green Mac + Windows; installed + verified on Windows. Confirmed
   the session's "NDI won't reach the ATEM" was the per-key lockout
   (SRT "I/O error"), NOT NDI — NDI capture was always healthy
-  (preview proof + correct FFmpeg input interpretation).
+  (preview proof + correct FFmpeg input interpretation). (See alpha.60 —
+  there was ALSO a second, dominant "NDI black" cause: the audio bridge.)
+- `v0.2.0-alpha.60` (commit `e3ff37b`): Session 18 — the actual
+  "NDI → ATEM shows black" fix. The NDI audio TCP bridge tagged audio
+  with `-use_wallclock_as_timestamps 1` (alpha.49 DeckLink drift remedy);
+  on the SRT/MPEG-TS path that put audio on a wallclock timeline vs the
+  0-based video → broken program PCR → ATEM couldn't present the video.
+  Operator-confirmed by Audio Mixer = Silent making the video appear.
+  Fix: `ffmpeg_input_args(use_wallclock)` — wallclock for DeckLink only;
+  SRT/RTMP use sample-count PTS aligned with the video. Restores NDI
+  video + audio to the ATEM. Webcams/test-pattern were never affected
+  (no bridge).
 
 ### v0.2.0 UI / UX scope (queued)
 
