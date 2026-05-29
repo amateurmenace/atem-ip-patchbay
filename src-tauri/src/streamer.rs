@@ -1382,6 +1382,7 @@ impl Streamer {
         let stall_self = self.clone();
         let stall_task = tokio::spawn(async move {
             let mut consec_stalls: u32 = 0;
+            let mut consec_connecting: u32 = 0;
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // First tick fires immediately — skip it so we get a
@@ -1391,6 +1392,42 @@ impl Streamer {
                 tick.tick().await;
                 let snap = stall_self.state.snapshot();
                 let status_low = snap.stats.status.to_lowercase();
+
+                // alpha.57 Connecting stall detector. If FFmpeg sits
+                // in Connecting with no first-frame progress for 15s,
+                // force-kill it so the alpha.30 supervisor catches
+                // the death and goes to backoff. Operator bug report:
+                // a second NDI source → DeckLink output hung in
+                // "Connecting…" forever when the DeckLink card was
+                // busy (already in use by another tile). The original
+                // alpha.41 detector only ran during Streaming, so
+                // stuck-Connecting tiles couldn't recover without an
+                // app restart. 15s threshold is generous enough for
+                // a clean NDI discovery + SRT handshake + DeckLink
+                // EnableVideoOutput to complete; anything past that
+                // means FFmpeg is genuinely stuck.
+                if status_low == "connecting" {
+                    consec_connecting += 1;
+                    if consec_connecting >= 15 {
+                        log::warn!(
+                            "Stall detector: FFmpeg stuck in Connecting for 15s — \
+                             killing the child so the supervisor can recover"
+                        );
+                        stall_self.state.stats_in_place(|s| {
+                            s.error = Some(
+                                "FFmpeg stuck in Connecting for 15s (DeckLink card busy, NDI source slow, or output mode rejected). Restarting.".into(),
+                            );
+                        });
+                        let mut inner = stall_self.inner.lock().await;
+                        if let Some(child) = inner.child.as_mut() {
+                            let _ = child.start_kill();
+                        }
+                        return;
+                    }
+                } else {
+                    consec_connecting = 0;
+                }
+
                 if status_low != "streaming" {
                     consec_stalls = 0;
                     continue;
