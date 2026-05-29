@@ -3122,6 +3122,444 @@ hot-fix continuation of Session 15.
    (alpha.35/36/37), encoder picker routing to nvenc/qsv/
    amf on a multi-GPU Windows machine.
 
+### Session 17 wins (alpha.38 through alpha.57, 2026-05-29)
+
+Longest single-session push in the project's history — 20 tagged
+alphas in ~24 hours. Completed Session 16's broadcast-multiview
+direction (Phase A spike + Phase B/C implementation), added the
+NDI audio TCP bridge that finally made NDI → DeckLink streams
+audible, six substantial UI overhaul iterations driven by operator
+feedback, a system monitoring drawer shared across single + multi
+views, per-tile expandable stream stats, and a series of hot-fixes
+for Windows-only bugs that Mac CI silently masked. Organized by
+theme rather than per-alpha because the threads interleaved.
+
+**1. Broadcast multiview is now production-shipped.**
+
+alpha.38 shipped Phase A: a standalone `tools/decklink-spike/` Rust
+crate (~350 LOC) that the operator could run on their rig to verify
+8 concurrent `decklink_enc` instances coexist + a 4x2 layout mock
+at `/static/multiview-mock.html`. Plus the alpha.39 Windows watchdog
+parity (`#[cfg(windows)]` mirror of streamer.rs:486's Unix bash
+watchdog) so the 8-channel orphan-FFmpeg footgun didn't multiply
+when Phase B landed.
+
+alpha.40 shipped the headline: `EncoderFleet::TILE_COUNT` bumped
+from 1 to 8, new `/static/multiview.html` (single-file, embedded
+CSS + JS), 4x2 grid of tile components, per-tile NDI / OMT / Test
+pattern source picker, per-tile DeckLink output picker with mode
+dropdown, Start/Stop, live preview JPEG @ 2 Hz. Topbar "Multiview"
+button (later removed) navigated to it.
+
+alpha.41 was the production hardening pass — five Tier-1 broadcast
+gaps closed in one alpha:
+- TILE_COUNT 8 → 4 (operator UX + reliability call — 2x2 at 1600x900
+  gives each tile ~750x420 vs ~400x450 at 8; decklink-driver
+  concurrency well-understood at 4).
+- New `state_persist.rs` module — per-tile JSON persistence written
+  atomically (.tmp + rename) on every settings change, loaded at
+  boot via the same `apply_settings` path. Tile configs survive
+  Cmd-Q / crash / reinstall.
+- New `system_monitor.rs` module — `sysinfo` crate polls CPU%/RAM
+  every 1.5s, traffic-light pill in multiview header, sustained-
+  CPU-streak detection + sticky-memory-threshold logic. **Hidden
+  Windows-only crash bug** shipped here (see #8 below).
+- Stall detector in `run_one_attempt` — after 5 consecutive
+  Streaming-with-fps<0.5 ticks, force-kills FFmpeg → alpha.30
+  supervisor catches as UnexpectedExit → triggers reconnect.
+- UI guards — Stop confirms when tile is live, dropdowns disabled
+  while Streaming so config can't drift.
+
+alpha.42 reshaped the UI per operator feedback: dedicated
+`[Single | Multi]` segmented toggle in both topbars (replacing the
+standalone Multiview button), Hide-intro button on the hero with
+localStorage persist, Net Utility restyled `.prominent` (bigger,
+accent border + soft fill), multiview tile redesign (compact, no
+scrollbars, header + 1fr preview + auto controls strip),
+bidirectional destination toggle per tile `[DeckLink | Remote SRT]`
+with device-vs-URL field swap, and physical source options
+(Cameras / Screen) added to the per-tile source dropdown.
+
+**2. NDI audio TCP bridge — the alpha.42 headline.**
+
+Operator: "NO SOURCE AUDIO is playing when i have an ndi source
+going to decklink." Root cause: `build_ffmpeg_cmd_for_ndi` fell
+back to `lavfi anullsrc` (silent) whenever `audio_mode != "custom"`.
+NDI audio drained fine into `OmtSender` (alpha.13) but never
+reached FFmpeg.
+
+New `src-tauri/src/audio_bridge.rs` module — TCP loopback at
+127.0.0.1:0. FFmpeg's input args become `-use_wallclock_as_timestamps 1
+-f s16le -ar 48000 -ac 2 -i tcp://127.0.0.1:PORT?listen=0`. The
+NDI capture's audio drain converts planar-f32 → interleaved-s16le
+(per-channel scaling + clamp-on-overflow so clipping signal doesn't
+wrap-around to noise). 5 unit tests cover mono→stereo, planar→
+interleaved, clipping, multi-channel truncation, empty-input.
+
+Why TCP loopback over the obvious alternatives:
+- Stdin already carries raw video; container muxing would mean
+  building nut/matroska in-process. Heavy.
+- FD-based pipes (fd 3/4) need `pre_exec` on Unix + named pipes on
+  Windows. Cross-platform fragility.
+- libndi_newtek as FFmpeg demuxer — our sidecar doesn't build it
+  (licensing).
+
+TCP is the boring-correct answer. Per-attempt fresh bridge so the
+alpha.30 reconnect supervisor works clean (single-accept design;
+each attempt gets a new listener). Operator field-confirmed end-
+to-end: "great, audio works now with ndi to decklink". Saved as
+memory ([[ndi-audio-bridge-tcp-loopback-works]]) so future me
+doesn't try to "simplify" the transport.
+
+**alpha.49 audio drift fix.** After confirming audio worked, the
+operator reported "audio was working and then it died after a
+couple minutes". Classic source-vs-output clock drift symptom.
+The bridge sent raw s16le bytes with no embedded timestamps;
+FFmpeg derived PTS from sample-count math (4 bytes = 1 sample @
+48kHz). NDI source's crystal vs. DeckLink card's crystal drift by
+±20-100 ppm typical, accumulating to 6-30ms over 5 min, then
+FFmpeg's a/v sync logic drops audio frames and eventually stops
+entirely. Two-piece fix:
+- `audio_bridge.rs::ffmpeg_input_args` adds
+  `-use_wallclock_as_timestamps 1` so FFmpeg stamps each audio
+  chunk with receiver wallclock instead of inferring time.
+- `build_audio_filter` appends `aresample=async=1000:first_pts=0`
+  to the audio chain when destination_type == decklink. The
+  resampler absorbs up to 1000 samples/sec of drift in either
+  direction continuously. Only applied for DeckLink because
+  ATEM/SRT have encoder-level PTS handling.
+
+Also alpha.49 tightened bridge writer failure surfacing — `send()`
+returns bool now (was `let _ = ...`); ndi_audio_writer_task logs
+loud + once on first failure, then throttled on subsequent dropped
+chunks, so `/api/log` surfaces the cause if FFmpeg disconnects
+its TCP audio.
+
+**3. DeckLink-specific fixes.**
+
+alpha.44 fixed "NDI → DeckLink: Could not write header (incorrect
+codec parameters?)" — alpha.37's `wrapped_avframe` codec was
+correct but `build_ffmpeg_cmd_for_ndi`'s scale-filter logic at
+streamer.rs:1087 OVERWROTE `build_plan_decklink`'s
+`scale=W:H,format=uyvy422` with just `scale=W:H:flags=lanczos`
+whenever source dims ≠ output dims (almost always — iPhone NDICAM
+720p → 1080p output). The `format=uyvy422` step was lost; BGRA
+frames reached `wrapped_avframe` (passthrough codec), decklink_enc
+rejected them. Fix: COMPOSE filters instead of replacing — splice
+the lanczos scale into the position of the existing scale clause,
+preserving the format=uyvy422 suffix.
+
+alpha.48 dropped the alpha.31 `!is_decklink()` astats gate. The
+original comment claimed astats was tied to the encoder pipeline
+("raw output, no encoder pipeline"); wrong mental model. astats
+is a FILTER not an encoder concern; the audio chain runs filters
+→ output regardless of codec downstream. With audio now flowing
+via the alpha.42 bridge, the meters need to reflect it.
+
+**4. System monitoring drawer — both views.**
+
+alpha.50 shipped a slide-out drawer (right edge) shared between
+single + multi via new `/static/system-drawer.js`. Per-core CPU
+bar grid, RAM bar, swap usage with paging-warning sub-text,
+FFmpeg process table (pid + cpu% + mem_mb + cmd_excerpt, sorted
+by CPU desc), available video encoder chips (HW encoders
+highlighted), recent log tail. Backend extended `SystemHealth`
+with `cpu_per_core`, `ffmpeg_processes`, `swap_*` fields;
+`sys.refresh_processes_specifics` with scoped `ProcessRefreshKind`
+keeps the 1.5s tick cheap. FFmpeg detection by name-contains-
+"ffmpeg" (case-insensitive); cmd excerpt centers around
+`-format_code`/`srt://`/`rtmp://`/`decklink` markers so
+streaming-FFmpeg is distinguishable from OMT-tee-FFmpeg.
+
+Single view gained a sys-pill in topbar (none before). Same shape
+as multiview's; click opens the same drawer.
+
+alpha.50 also added per-tile expandable stats panel in multiview.
+Click "Stats ▾" on tile head → 8-cell grid unfolds between head
+and preview: Status, Bitrate (Mbps), FPS, Speed (1.00x target),
+Frames sent, Dropped, Duration, Reconnects-this-session. Last
+error fills a wide row underneath when present. Cells color-code
+on FPS deviance, speed deviance, drop count, reconnect count.
+Per-tile expand preference persists via localStorage.
+
+**5. UI overhaul (six iterations driven by operator feedback).**
+
+- alpha.42 view-mode toggle + hide-intro + Net Utility prominence
+  (covered above).
+- alpha.45 audio meters in multiview tile (VU bars top-right of
+  preview), extended preview stats overlay (bitrate · fps · frames),
+  Custom audio mode unfold (device picker + L/R Dante channel
+  pickers per tile).
+- alpha.46 multiview layout hotfix — `aspect-ratio: 16/9` on
+  `.preview` was forcing the preview to ~450px in tiles that only
+  had ~430px, pushing the controls strip off the visible bottom
+  edge. Operator: "i still don't see controls in multiview". Drop
+  the aspect-ratio constraint; object-fit:contain on the img
+  letterboxes correctly within whatever grid 1fr gives the row.
+- alpha.48 added VU meter overlay to single-view preview frame
+  (mirroring the multiview tile pattern). pollAudioLevels gained
+  preview-meter-l/r as additional render targets — no extra poll.
+- alpha.51 topbar layout hotfix — Session-17-added view-toggle
+  + sys-pill pushed topbar content past the original 1080px
+  max-width cap; `.brand` had `min-width: 0` so it collapsed into
+  a single-character column. Operator: "the new stuff at the top
+  of the page is cutting off the site logo and title, fix". Drop
+  the max-width, flex-shrink:0 on brand, status-block margin-left:
+  auto to push right, brand-mark 64→48px, tighter gaps.
+- alpha.52 removed the Monitor button. Operator: "get rid of
+  'monitor' mode - that is now redundant behavior and the button
+  takes up too much space." alpha.16's single-tile companion
+  window pattern is fully superseded by multiview + per-tile
+  stats. Tauri command `open_monitor_window` stays registered
+  (harmless).
+- alpha.53 → alpha.54 → alpha.55 intro-toggle iterations:
+  - alpha.53: replaced the conditional "↓ About" button with an
+    always-visible #intro-toggle-btn that flips text/title
+    between Hide and Show. (Pre-53: button was display:none until
+    hero was hidden → operator couldn't discover the unhide
+    path.)
+  - alpha.54: defer attribute on app.js so system-drawer.js
+    (which has defer) loads first. Without this, app.js executed
+    inline during HTML parse before the deferred drawer script
+    ran; `window.createSystemDrawer` was undefined when the
+    sys-pill check ran; single-view CPU pill never got wired
+    + clicks did nothing. Multiview worked because its bootstrap
+    is in a DOMContentLoaded handler.
+  - alpha.55: rename "Intro" → "About" throughout the UI;
+    localStorage persistence dropped so About always shows on
+    app launch (operator's chosen "hide" is session-only). Old
+    flag actively cleared from localStorage on every load.
+
+**6. Net Utility timeout — instrumented, root cause TBD.**
+
+Operator reported alpha.43's multithreading fix didn't fully solve
+the "Saving forever" timeout. alpha.51 added eprintln! per-phase
+instrumentation in `apply_config_update` so the next reproduction
+will surface which phase is slow (JSON parse, lock acquisition,
+individual field updates). Operator needs to install alpha.51+
+and reproduce. **Still open** — see Open issues from Session 17.
+
+**7. alpha.57 Connecting-state stall detector.**
+
+Operator: "when trying to connect a second ndi source to decklink
+in multiview, it says connecting forever, so maybe there is a
+problem with the decklink output, but then i am unable to stop it
+from trying to connect." alpha.41's stall detector only fired
+during Streaming; tiles stuck in Connecting (FFmpeg launched but
+no first-frame progress — DeckLink card busy, output mode rejected,
+NDI source went unreachable mid-handshake) had no automatic
+recovery. New detector counts consecutive 1s ticks where status=
+connecting; after 15s force-kills the child via start_kill →
+supervisor catches UnexpectedExit → reconnect cycle. Per-tile
+isolation preserved. **Needs operator verification post-install.**
+
+**8. Critical Windows-only bugs the Mac CI happily masked.**
+
+alpha.41 shipped a `tokio::spawn` outside Tokio runtime context in
+`SystemMonitor::start`. Mac CI built clean; alpha.41 + .42 + .43
++ .44 + .45 + .46 all also shipped this latent bug because Mac
+runtime pin made the panic invisible. Windows CI also passed —
+because CI never EXECUTES the binary, only builds the installer.
+Operator installed alpha.44 from CI → app exited within 2 seconds
+silently. Captured stderr via `Start-Process -RedirectStandardError`
+revealed:
+
+```
+thread 'main' panicked at src\system_monitor.rs:97:9:
+there is no reactor running, must be called from the context of a
+Tokio 1.x runtime
+```
+
+alpha.47 fixed by switching to `tauri::async_runtime::spawn` which
+routes through Tauri's managed runtime regardless of caller
+context. This is the canonical pattern for spawning tasks from
+Tauri's synchronous setup() hook.
+
+alpha.50 then shipped a sysinfo 0.30 compile error
+(`.to_string_lossy()` on `&str` from `Process::name()` — wrong
+type assumption). Mac CI ALSO failed but I'd been pushing fast;
+cancelled the doomed alpha.51-.55 CI runs that all inherited the
+break, fixed in alpha.56, saved as memory
+([[sysinfo-0.30-string-types]]).
+
+**9. Development workflow improvements.**
+
+- `scripts/dev-swap-ui.ps1` — instant UI iteration. Copies
+  `bmd_emulator/static/*` into the installed app's static/ dir.
+  HTML/JS/CSS changes show on F5 without rebuild. -NetDiag flag
+  also rebuilds tools/atem-net-diag/ locally (no libclang needed,
+  ~30-60s). -Force flag taskkills running processes first.
+  Refuses to run while app is open by default; MD5-compares to
+  skip unchanged files.
+- Auto-install pattern matured: when CI completes, `gh release
+  download`, run NSIS installer silent (per-user, no UAC), kill
+  any zombies, re-apply dev-swap, launch. Used continuously from
+  alpha.47 onward. Saved hours of manual install + click-through
+  during the session.
+
+### Open issues from Session 17
+
+1. **Net Utility "Saving forever" still firing**. alpha.51 added
+   eprintln! instrumentation in apply_config_update; the operator
+   needs to install alpha.57+ and reproduce so the log shows which
+   phase is slow. Next session should READ /api/log via the system
+   drawer after a reproduction attempt + iterate based on what's
+   slow. Most likely culprit per Session 17 analysis: contention
+   on state.lock() with the unifi/wan/system polling threads
+   despite the alpha.43 spawn-per-request multithreading. Worth
+   considering: a separate RwLock for the config struct so polls
+   can read without blocking config writes, OR a copy-on-write
+   pattern.
+
+2. **alpha.57 Connecting stall detector untested on rig**.
+   Currently in CI; operator should verify the 15s timeout fires
+   correctly when a second tile is forced to fight for the same
+   DeckLink output device. Look for the log line
+   "Stall detector: FFmpeg stuck in Connecting for 15s..." in
+   /api/log when reproducing.
+
+3. **Single-view multi-source toggle requested.** Operator (end
+   of Session 17): "when i configure multiple input/outputs in
+   multiview, when i go back to single mode, i should be able to
+   toggle through to the different connections i have." Concrete
+   feature: single view currently only ever shows/edits tile 0.
+   Add a tile-selector control in single view (likely topbar
+   chips or a dropdown next to the view-toggle: "Tile 1 / Tile 2
+   / Tile 3 / Tile 4") so the operator can cycle between
+   configured tiles using the rich single-source UI. The single
+   view's /api/* alias currently hard-resolves to tile 0
+   (http.rs:230); needs a session-level tile-idx state + the alias
+   becomes dynamic OR all `/api/*` calls in app.js add a `/i/N`
+   prefix when a non-zero tile is selected.
+
+4. **Hardware acceleration verification pass deferred to next
+   session**. The encoder picker + auto-mode priority routing
+   (VT > nvenc > qsv > amf > libx*) is already live since alpha.25
+   per Session 12. Windows FFmpeg sidecar (gyan.dev full_build)
+   ships all three HW encoders. What's needed: operator-side test
+   pass on the multi-GPU Windows rig to confirm auto-mode picks
+   nvenc (or whatever's appropriate) + that CPU stays reasonable
+   under 4-tile load. The alpha.50 system drawer's
+   "Available video encoders" chips show what's compiled in;
+   FFmpeg process table shows per-encoder CPU. Both wired —
+   operator just needs to test.
+
+5. **OMT-out audio for non-raw sources** — still carrying over
+   from Session 12. Needs cross-platform pipe-FD plumbing. The
+   alpha.42 audio_bridge.rs pattern is reusable; OMT capture
+   would expose audio_rx like NDI, the writer task fans out the
+   same way. Probably ~150 LOC + 1 day.
+
+6. **Pipe / relay custom audio extension** — still carrying over
+   from Session 12. alpha.14's NDI dshow audio injection pattern
+   needs to apply to AVF / pipe / RTSP / SRT-listen / RTMP-listen
+   source factories on Windows + Mac. Mechanical but tedious
+   (10 touchpoints).
+
+7. **Long tail of operator-side verification** still pending:
+   - The alpha.45/46 multiview meter behavior under 4-tile concurrent
+     load on the test rig.
+   - The alpha.50 system drawer's FFmpeg process table on a real
+     streaming session (should show ~4 ffmpegs with cmd excerpts).
+   - The alpha.50 per-tile stats panel under reconnect/interrupted
+     scenarios.
+   - The alpha.49 NDI audio drift correction over a 30+ min stream
+     (the original failure mode took "a couple minutes" — verify
+     past 30 min).
+   - The alpha.51 topbar layout at various window widths
+     (especially the Broadcast Pix monitor's native resolution).
+   - The alpha.55 About-resets-on-launch behavior.
+
+8. **CI flakiness** observed twice this session:
+   - alpha.38 Mac job failed downloading the FFmpeg+DeckLink sidecar
+     because build-ffmpeg.yml fired concurrently (tag-push race);
+     fixed mid-session by adding `branches: ['**']` to build-
+     ffmpeg.yml's push trigger.
+   - alpha.47 Windows job failed `cargo install tauri-cli` due to a
+     crates.io network blip; resolved via `gh run rerun --failed`.
+   - alpha.47 publish-release step failed because a partial release
+     was created during a previous failed run + the rerun couldn't
+     create-over-existing. Fixed manually by downloading the
+     Windows artifact + `gh release upload --clobber`.
+   - alpha.50-.55 inherited the sysinfo `to_string_lossy` compile
+     error; alpha.56 fixed root + cascaded.
+
+### Session 18 priorities (next pickup)
+
+In approximate order of operator impact:
+
+1. **Investigate + fix Net Utility timeout** (Session 17 Open
+   issue #1). alpha.51's eprintln instrumentation is in the latest
+   install. Reproduction approach:
+   - Open Net Utility → UDM panel
+   - Paste a real UDM API key + click Save
+   - Open the system drawer → "Recent FFmpeg log" section won't
+     have net-diag's stderr (different process). Need to either:
+     (a) tail net-diag's log directly via `Get-Content -Tail`,
+     (b) add a `/api/log` endpoint to net-diag that surfaces its
+         own eprintln output, OR
+     (c) update the system drawer's log-tail to also fetch
+         net-diag's recent log via an additional endpoint.
+   - Once a reproduction shows which phase is slow, fix the
+     specific bottleneck. Likely candidates: `state.lock()`
+     contention against polling threads, an unintended network
+     call inside apply_config_update, or a body read that's
+     blocking on a slow client.
+
+2. **Single-view multi-source tile toggle** (Session 17 Open
+   issue #3). End-of-Session-17 ask: single view currently only
+   addresses tile 0. Add a tile selector (probably topbar
+   `[T1 ◉ T2 T3 T4]` chips next to the view-toggle, with the
+   active tile highlighted). On switch:
+   - JS rewrites all `/api/*` fetches to `/api/i/N/*` (where N is
+     the selected tile), OR
+   - Backend's `/api/*` alias becomes dynamic with a cookie or
+     query-param hint.
+   Tile 0 stays the default for back-compat. The single-source
+   UI's existing per-tile state (which is already in
+   tile.encoder for each tile) just gets surfaced to whichever
+   tile the operator picked. ~200-300 LOC across app.js +
+   index.html + http.rs.
+
+3. **Hardware acceleration verification pass** (Session 17
+   Open issue #4). Already 95% built; just needs operator verify.
+   Test plan:
+   - 4 tiles, all NDI → DeckLink, watch CPU in the system drawer
+   - Check FFmpeg process table's cmd excerpts to confirm
+     `-c:v h264_nvenc` (or similar) is being picked vs. libx264
+   - If software encoder is being picked despite nvenc being
+     available, debug `select_encoder`'s auto-mode priority.
+
+4. **alpha.57 Connecting timeout verification** (Session 17 Open
+   issue #2). Quick operator test: configure tile 1 with an NDI
+   source to DeckLink Studio 4K running. Configure tile 2 with a
+   different NDI source ALSO targeting DeckLink Studio 4K (same
+   device — should be the contention case). Hit Start on tile 2.
+   It should: enter Connecting, sit ~15s, log the stall message,
+   flip to Reconnecting, then go through backoff. Stop should
+   work during Reconnecting.
+
+5. **OMT-out audio for non-raw sources** (Session 17 Open issue
+   #5, longstanding carryover).
+
+6. **Pipe / relay custom audio extension** (Session 17 Open issue
+   #6, longstanding carryover).
+
+7. **Long-tail operator verification pass** (Session 17 Open
+   issue #7). A focused dedicated session would clear most of
+   these in 1-2 hours.
+
+8. **Carry-overs not pulled forward** — pre-show checks panel
+   (Session 12 priority #4) and OMT receive in production +
+   alpha.32/33 Windows tests + net-diag Windows/Linux builds.
+   None are blocking; ship as opportunities arise.
+
+### Session 17 also includes CLAUDE.md catch-up + commit
+
+This entry is the catch-up. The next session picks up cleanly
+from alpha.57 with the operator-side verification queue and the
+Session 18 priorities above.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
