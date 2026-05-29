@@ -17,6 +17,7 @@ const els = {
   duration:   $('#duration'),
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
+  forceStopAll: $('#force-stop-all'),
   openNetDiag: $('#open-net-diag'),
   // alpha.42: openMultiview button removed; the view-mode toggle in
   // the topbar (.view-toggle) handles Single ↔ Multi navigation now.
@@ -2027,6 +2028,35 @@ function bind() {
         alert('Kill failed: ' + e.message);
       } finally {
         els.killOrphans.disabled = false;
+      }
+    });
+  }
+
+  // Force Stop ALL — emergency escape hatch. OS-kills every FFmpeg on
+  // the machine (lock-free, works even when a tile's controls are
+  // wedged), then resets all tiles to Idle. The guaranteed-to-work
+  // recovery path when Stop / Kill-orphans aren't enough.
+  if (els.forceStopAll) {
+    els.forceStopAll.addEventListener('click', async () => {
+      const ok = confirm(
+        "FORCE STOP ALL streams?\n\n" +
+        "This kills EVERY FFmpeg process on this machine at the OS level " +
+        "— including any unrelated FFmpeg jobs — then resets all tiles to " +
+        "Idle. Use it when a stream is wedged and Stop / Kill-orphans " +
+        "won't clear it.\n\n" +
+        "On a dedicated broadcast machine this is safe and is the " +
+        "guaranteed way to recover."
+      );
+      if (!ok) return;
+      els.forceStopAll.disabled = true;
+      try {
+        const r = await fetch('/api/force-stop-all', { method: 'POST' });
+        const j = await r.json();
+        alert(j.message || ('Force-stopped. Killed: ' + (j.killed ?? '?')));
+      } catch (e) {
+        alert('Force stop failed: ' + e.message);
+      } finally {
+        els.forceStopAll.disabled = false;
       }
     });
   }

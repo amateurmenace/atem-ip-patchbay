@@ -147,6 +147,14 @@ impl StreamStats {
 
 #[derive(Debug)]
 pub struct EncoderState {
+    // NOTE: every access below uses `.unwrap_or_else(|e| e.into_inner())`
+    // rather than `.unwrap()`. This is deliberate — a plain unwrap would
+    // panic on a poisoned lock, and since EncoderState is read/written by
+    // every /api/* handler, the streamer supervisor, and the stall
+    // detector, one panic-while-holding-the-write-guard would cascade
+    // into an app-wide wedge (every subsequent access panics too). The
+    // closure recovers the guard and carries on. Do NOT "simplify" these
+    // back to `.unwrap()`.
     inner: RwLock<Inner>,
 }
 
@@ -405,7 +413,7 @@ impl EncoderState {
             .and_then(|s| s.to_str())
             .unwrap_or("file");
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if inner.services.contains_key(&svc.name) {
                 svc.name = format!("{} [{}]", svc.name, stem);
             }
@@ -420,7 +428,7 @@ impl EncoderState {
     /// `add_service_from_xml_text(replace=true)` so dropping a new
     /// XML replaces the old one instead of accumulating.
     pub fn clear_services(&self) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.services.clear();
         inner.current_service_name.clear();
         inner.current_server_name = "SRT".into();
@@ -436,7 +444,7 @@ impl EncoderState {
         // filename so we use a "(pasted N)" suffix where N is the
         // first integer that doesn't collide.
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if inner.services.contains_key(&svc.name) {
                 let mut n = 2;
                 loop {
@@ -454,7 +462,7 @@ impl EncoderState {
     }
 
     fn register_service(&self, svc: StreamService, make_active: Option<bool>) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let first_load = inner.current_service_name.is_empty();
         let should_activate = make_active.unwrap_or(first_load);
         let svc_name = svc.name.clone();
@@ -486,7 +494,7 @@ impl EncoderState {
     /// streamer apply audio_mode-specific routing themselves so the
     /// stored device pick is preserved across mode changes.
     pub fn source_selection(&self) -> SourceSelection {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let dimensions = video_dimensions(&inner.video_mode);
         SourceSelection {
             source_id: inner.source_id.clone(),
@@ -514,7 +522,7 @@ impl EncoderState {
     /// control protocol's IDENTITY handler calls this when a control
     /// client sends `Label: ...`.
     pub fn set_label(&self, label: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.label = label.to_string();
     }
 
@@ -523,7 +531,7 @@ impl EncoderState {
     /// (bitrate, fps, frames_sent, etc.) atomically and cheaply
     /// (~200 ns per call).
     pub fn stats_in_place<F: FnOnce(&mut StreamStats)>(&self, f: F) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         f(&mut inner.stats);
     }
 
@@ -533,7 +541,7 @@ impl EncoderState {
     /// poll is on the hot path so we avoid cloning the entire
     /// EncoderState's worth of strings.
     pub fn read_audio_levels(&self) -> (f32, f32, f32, f32, f64) {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         (
             inner.stats.audio_db_rms_l,
             inner.stats.audio_db_rms_r,
@@ -547,7 +555,7 @@ impl EncoderState {
     /// scan. Called once at boot from Tauri's setup() so the source
     /// dropdowns have something selected on first launch.
     pub fn apply_default_devices(&self, video_index: i32, video_name: &str, audio_index: i32, audio_name: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.av_video_index = video_index;
         inner.av_video_name = video_name.to_string();
         inner.av_audio_index = audio_index;
@@ -559,7 +567,7 @@ impl EncoderState {
     /// unchanged. Validation happens here — unknown video modes / codecs
     /// are silently rejected (Python's behavior).
     pub fn apply_settings(&self, update: &SettingsUpdate) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = &update.video_mode {
             if AVAILABLE_VIDEO_MODES.contains(&v.as_str()) {
                 inner.video_mode = v.clone();
@@ -776,7 +784,7 @@ impl EncoderState {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let svc = inner.services.get(&inner.current_service_name);
         let active = current_active_server(&inner);
 

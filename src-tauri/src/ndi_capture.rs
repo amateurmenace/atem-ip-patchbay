@@ -249,7 +249,13 @@ impl NdiCapture {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            // Bounded join. With the stop-aware send loop the capture
+            // thread exits within ~one 500ms poll once `stop` is set, so
+            // this normally returns immediately. The timeout is the
+            // belt-and-suspenders cap: if a grafton-ndi SDK call ever
+            // blocks past it, we detach rather than hang — shutdown and
+            // recovery must never freeze on a stuck capture thread.
+            join_with_timeout(handle, "ndi-capture", Duration::from_secs(3));
         }
     }
 }
@@ -257,6 +263,68 @@ impl NdiCapture {
 impl Drop for NdiCapture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Result of [`send_frame_or_stop`].
+enum SendOutcome {
+    /// Frame handed off to the channel.
+    Sent,
+    /// `stop` was set while the channel was full, or the receiver was
+    /// dropped — the capture loop should exit.
+    Stopped,
+}
+
+/// Send one frame to the bounded channel without ever parking the
+/// capture thread indefinitely. `tx.blocking_send()` blocks until
+/// capacity frees, which never happens if downstream FFmpeg has
+/// stopped reading its stdin (hung opening a dshow audio device, a
+/// stalled DeckLink output, etc.). A parked capture thread can't
+/// observe the `stop` flag, so `stop()`'s `handle.join()` hangs
+/// forever — and it holds the streamer lock while it does. That is the
+/// unrecoverable Dante-on-NDI wedge. We poll `try_send` and re-check
+/// `stop` on every full-channel retry so a back-pressured or wedged
+/// FFmpeg can never make this thread unkillable.
+fn send_frame_or_stop(
+    tx: &mpsc::Sender<Vec<u8>>,
+    mut buf: Vec<u8>,
+    stop: &AtomicBool,
+) -> SendOutcome {
+    loop {
+        match tx.try_send(buf) {
+            Ok(()) => return SendOutcome::Sent,
+            Err(mpsc::error::TrySendError::Closed(_)) => return SendOutcome::Stopped,
+            Err(mpsc::error::TrySendError::Full(returned)) => {
+                if stop.load(Ordering::Acquire) {
+                    return SendOutcome::Stopped;
+                }
+                buf = returned;
+                // Brief yield before retry. 5ms is ~a third of a 60fps
+                // frame interval — short enough to add no meaningful
+                // latency when back-pressure is transient, long enough
+                // not to spin the CPU when FFmpeg is genuinely stuck.
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+/// Join a thread but give up after `timeout`, logging and detaching
+/// instead of blocking forever. Used by `stop()` so a wedged receiver
+/// thread can never freeze the shutdown/recovery path. A short-lived
+/// helper thread owns the actual join; if it doesn't complete in time
+/// we return and let the OS reclaim everything at process exit.
+fn join_with_timeout(handle: JoinHandle<()>, name: &str, timeout: Duration) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(timeout).is_err() {
+        log::warn!(
+            "{name} thread did not exit within {timeout:?}; detaching \
+             (reclaimed at process exit)"
+        );
     }
 }
 
@@ -300,12 +368,11 @@ fn run_capture_loop(
                 // Drop releases the NDI buffer at end-of-scope.
                 let bpp = bytes_per_pixel(frame.pixel_format);
                 let packed = pack_frame(&frame, bpp);
-                match tx.blocking_send(packed) {
-                    Ok(()) => window_frames += 1,
-                    Err(_) => {
-                        // Receiver dropped — streamer told us to stop.
+                match send_frame_or_stop(&tx, packed, &stop) {
+                    SendOutcome::Sent => window_frames += 1,
+                    SendOutcome::Stopped => {
                         log::info!(
-                            "NDI capture: channel closed by streamer (sent {frame_counter} frames)"
+                            "NDI capture: stop requested or channel closed (sent {frame_counter} frames)"
                         );
                         break;
                     }

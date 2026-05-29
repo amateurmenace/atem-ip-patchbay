@@ -139,6 +139,7 @@ fn tile_api_routes() -> Router<HttpAppState> {
         .route("/start", post(api_start))
         .route("/stop", post(api_stop))
         .route("/kill-orphans", post(api_kill_orphans))
+        .route("/force-stop-all", post(api_force_stop_all))
         .route("/settings", post(api_settings))
         .route("/load_xml", post(api_load_xml))
         .route("/load_xml_text", post(api_load_xml_text))
@@ -930,17 +931,7 @@ async fn api_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
 /// rebuild, so the Drop on Streamer never runs and the FFmpeg
 /// process group survives.
 async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
-    #[cfg(target_os = "macos")]
-    let result = run_pkill("ffmpeg.*streamid=");
-    #[cfg(target_os = "linux")]
-    let result = run_pkill("ffmpeg.*streamid=");
-    #[cfg(target_os = "windows")]
-    let result: Result<usize, String> = Err(
-        "Orphan-kill not yet implemented on Windows. Use Task Manager to end \
-         any 'ffmpeg.exe' processes if a prior run left one streaming."
-            .into(),
-    );
-    match result {
+    match kill_orphan_ffmpeg() {
         Ok(killed) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -957,6 +948,58 @@ async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
             Json(serde_json::json!({"error": err})),
         ),
     }
+}
+
+/// Emergency "Force Stop All" — the guaranteed recovery path for when a
+/// stream is wedged and normal Stop / Kill-orphans aren't enough.
+///
+/// Order matters and is the whole point:
+///   1. OS-kill EVERY ffmpeg process at the process level FIRST. This is
+///      lock-free — it works even if a tile's streamer lock is held by a
+///      stuck task. Killing FFmpeg closes its stdin, which unblocks any
+///      back-pressured capture thread, which in turn unblocks any
+///      in-flight stop() that was waiting on it.
+///   2. Best-effort stop() each tile (bounded by a timeout so the
+///      handler itself can never hang) to tear down captures + OMT
+///      senders that the OS kill didn't own.
+///   3. Reset every tile's stats to Idle so the UI reflects reality.
+async fn api_force_stop_all(State(state): State<HttpAppState>) -> impl IntoResponse {
+    // Step 1 — nuclear OS kill. This is what makes recovery guaranteed
+    // regardless of lock state.
+    let killed = kill_all_ffmpeg().unwrap_or(0);
+
+    // Steps 2 + 3 — per-tile cleanup. stop() is non-wedging after the
+    // alpha.58 lock-discipline fix, but the timeout guards against any
+    // future regression making this escape hatch itself hang.
+    let mut tiles_reset = 0usize;
+    for tile in state.fleet.tiles() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            tile.streamer.stop(),
+        )
+        .await;
+        tile.encoder.stats_in_place(|s| {
+            s.status = "Idle".into();
+            s.started_at = None;
+            s.bitrate = 0;
+            s.fps = 0.0;
+            s.error = None;
+            s.reconnect_attempt = 0;
+            s.reconnect_next_secs = 0;
+        });
+        tiles_reset += 1;
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "killed": killed,
+            "tiles_reset": tiles_reset,
+            "message": format!(
+                "Force-stopped: killed {killed} ffmpeg process(es), reset {tiles_reset} tile(s) to Idle."
+            )
+        })),
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -996,6 +1039,77 @@ fn run_pkill(pattern: &str) -> Result<usize, String> {
     } else {
         0
     };
+    Ok(killed)
+}
+
+/// Surgical orphan kill (backs the "Kill orphan streams" button).
+/// Matches FFmpeg command lines carrying one of OUR markers — SRT
+/// (`streamid=`), DeckLink (`decklink` / `format_code`), or the NDI
+/// audio bridge (`tcp://127`) — so an unrelated ffmpeg the operator is
+/// running for something else is left alone. (Note: this now also
+/// catches DeckLink-output orphans, which the old `streamid=`-only
+/// pattern silently missed.)
+fn kill_orphan_ffmpeg() -> Result<usize, String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        run_pkill("ffmpeg.*(streamid=|decklink|format_code|tcp://127)")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        kill_ffmpeg_windows(Some("streamid=|decklink|format_code|tcp://127"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Ok(0)
+    }
+}
+
+/// Nuclear kill — EVERY ffmpeg process, no command-line filter. Backs
+/// the emergency Force-Stop-All escape hatch, used when a stream is
+/// wedged and the operator needs a guaranteed kill.
+fn kill_all_ffmpeg() -> Result<usize, String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        run_pkill("ffmpeg")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        kill_ffmpeg_windows(None)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Ok(0)
+    }
+}
+
+/// Kill ffmpeg.exe on Windows via CIM + Stop-Process. `cmdline_filter`
+/// (a PowerShell `-match` regex) optionally narrows to our own streams;
+/// `None` kills every ffmpeg.exe. CIM exposes CommandLine, which plain
+/// `taskkill` can't filter on. Runs through `hide_console_std` so no
+/// console window flashes (alpha.13 CREATE_NO_WINDOW pattern).
+#[cfg(target_os = "windows")]
+fn kill_ffmpeg_windows(cmdline_filter: Option<&str>) -> Result<usize, String> {
+    use std::process::Command;
+    let where_clause = match cmdline_filter {
+        Some(rx) => format!(" | Where-Object {{ $_.CommandLine -match '{rx}' }}"),
+        None => String::new(),
+    };
+    let script = format!(
+        "$p = Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\"{where_clause}; \
+         $n = 0; \
+         foreach ($x in $p) {{ try {{ Stop-Process -Id $x.ProcessId -Force -ErrorAction Stop; $n++ }} catch {{}} }}; \
+         Write-Output $n"
+    );
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("powershell launch failed: {e}"))?;
+    let killed = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<usize>()
+        .unwrap_or(0);
     Ok(killed)
 }
 
