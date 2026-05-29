@@ -55,48 +55,99 @@
     padding: 8px 14px;
     border-bottom: 1px solid var(--border);
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    height: 42px;
+    gap: 16px;
+    height: 48px;
   }
-  header h1 {
-    font-size: 13px;
-    font-weight: 600;
+  header .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
   }
-  header h1 .sub {
-    color: var(--text-dim);
-    font-weight: 400;
-    margin-left: 8px;
+  header .brand-text {
+    color: var(--text);
+    font-weight: 500;
     font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
   header .controls {
     display: flex;
     gap: 8px;
     align-items: center;
+    margin-left: auto;
   }
-  header a, header button {
+  header .controls button {
     background: var(--bg-input);
     color: var(--text);
     border: 1px solid var(--border);
-    padding: 5px 10px;
-    border-radius: 4px;
+    padding: 6px 12px;
+    border-radius: 5px;
     font-size: 11px;
-    text-decoration: none;
     cursor: pointer;
     font-family: inherit;
   }
-  header a:hover, header button:hover {
+  header .controls button:hover {
     border-color: var(--accent);
     color: var(--accent);
   }
-  header button.danger {
+  header .controls button.danger {
     border-color: rgba(232,92,92,0.5);
     color: var(--bad);
   }
-  header button.danger:hover {
+  header .controls button.danger:hover {
     border-color: var(--bad);
     background: rgba(232,92,92,0.15);
+  }
+
+  /* View-mode toggle — same shape as index.html so the operator's
+     navigation feels consistent. Primary affordance in the topbar. */
+  .view-toggle {
+    display: inline-flex;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(102,211,250,0.25);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 3px;
+  }
+  .view-toggle-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 7px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.15s ease, background 0.15s ease;
+    font-family: inherit;
+  }
+  .view-toggle-btn svg {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+  }
+  .view-toggle-btn:hover {
+    color: var(--text);
+  }
+  .view-toggle-btn.active {
+    background: var(--accent);
+    color: #0e0f12;
+    box-shadow: 0 0 12px rgba(102,211,250,0.35);
+  }
+  .view-toggle-btn.active:hover {
+    color: #0e0f12;
   }
 
   /* alpha.41 system health pill — polled from /api/system-health
@@ -152,9 +203,9 @@
   .tile {
     background: var(--bg-tile);
     border: 1px solid var(--border);
-    border-radius: 4px;
-    display: flex;
-    flex-direction: column;
+    border-radius: 6px;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
     overflow: hidden;
     min-height: 0;
   }
@@ -166,25 +217,61 @@
   .tile-head {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
+    gap: 8px;
+    padding: 6px 10px;
     background: rgba(0,0,0,0.3);
     border-bottom: 1px solid var(--border);
-    min-height: 28px;
-    font-size: 11px;
+    min-height: 32px;
+    font-size: 12px;
   }
   .tile-idx {
-    font-weight: 700;
+    font-weight: 800;
     color: var(--accent);
-    width: 14px;
+    font-size: 14px;
+    width: 18px;
+    flex-shrink: 0;
   }
   .tile-name {
     flex: 1;
-    font-weight: 500;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--text-dim);
+    color: var(--text);
+  }
+  .tile-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .tile-actions button {
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 9px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: 600;
+  }
+  .tile-actions button.primary {
+    border-color: var(--good);
+    color: var(--good);
+  }
+  .tile-actions button.primary:hover:not(:disabled) {
+    background: rgba(95,208,107,0.18);
+  }
+  .tile-actions button.danger {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+  .tile-actions button.danger:hover:not(:disabled) {
+    background: rgba(232,92,92,0.18);
+  }
+  .tile-actions button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
   .pill {
     font-size: 9px;
@@ -240,92 +327,69 @@
     color: var(--bad);
   }
 
-  .controls {
-    display: flex;
-    flex-direction: column;
+  /* Compact 2-row controls strip below the preview. No scrollbars —
+     everything is inline. Grid gives us a fixed-width label column +
+     a flexible content area. */
+  .tile-controls {
+    background: rgba(0,0,0,0.25);
+    border-top: 1px solid var(--border);
+    padding: 6px 8px;
+    display: grid;
+    grid-template-rows: auto auto;
     gap: 4px;
-    padding: 6px;
-    overflow-y: auto;
-    flex: 1;
     min-height: 0;
   }
   .control-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: 38px 1fr;
+    align-items: center;
+    gap: 6px;
   }
   .control-label {
     font-size: 9px;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.06em;
+    font-weight: 700;
   }
-  select, .control-row input[type=text] {
+  .control-row .control-fields {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+  .control-row .control-fields > * {
+    min-width: 0;
+  }
+  select, input[type=text] {
     background: var(--bg-input);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 3px 5px;
+    border-radius: 4px;
+    padding: 4px 6px;
     font-size: 11px;
     font-family: inherit;
     width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
   }
   select option {
     background: #0e0f12;
     color: #e6e6ea;
   }
-  select:focus, .control-row input:focus {
+  select:focus, input[type=text]:focus {
     outline: none;
     border-color: var(--accent);
   }
-
-  .row-actions {
-    display: flex;
-    gap: 4px;
-    margin-top: 4px;
-  }
-  .row-actions button {
-    flex: 1;
-    background: var(--bg-input);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 5px 8px;
-    font-size: 11px;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .row-actions button.primary {
-    border-color: var(--good);
-    color: var(--good);
-  }
-  .row-actions button.primary:hover {
-    background: rgba(95,208,107,0.12);
-  }
-  .row-actions button.danger {
-    border-color: var(--bad);
-    color: var(--bad);
-  }
-  .row-actions button.danger:hover {
-    background: rgba(232,92,92,0.12);
-  }
-  .row-actions button:disabled {
-    opacity: 0.4;
+  select:disabled, input:disabled {
+    opacity: 0.5;
     cursor: not-allowed;
   }
-
-  .tile-foot {
-    padding: 4px 8px;
-    background: rgba(0,0,0,0.2);
-    border-top: 1px solid var(--border);
-    font-size: 10px;
-    color: var(--text-dim);
-    display: flex;
-    justify-content: space-between;
-    gap: 6px;
-    min-height: 22px;
-    align-items: center;
-  }
+  /* Audio dropdown is narrower than source — limit its flex. */
+  .audio-sel { flex: 0 0 110px; }
+  /* Source dropdown takes the rest. */
+  .src-sel { flex: 1 1 auto; }
+  /* Dest type fixed-narrow; the dest fields fill the rest. */
+  .desttype-sel { flex: 0 0 96px; font-weight: 700; }
 
   /* Toast for error/info */
   #toast {
@@ -357,13 +421,48 @@
 <body>
 
 <header>
-  <h1>Multiview <span class="sub">4 channels · NDI/OMT → DeckLink</span></h1>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="14" height="14">
+        <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+    </span>
+    <span class="brand-text">ATEM IP Patchbay</span>
+  </div>
+  <!-- alpha.42 view-mode toggle. Same shape as index.html's so the
+       operator's navigation is consistent across both views. Multi
+       side is the "active" tab here; clicking Single navigates back
+       to / which serves the single-source UI. -->
+  <div class="view-toggle" role="tablist" aria-label="View mode">
+    <a id="view-toggle-single" href="/" class="view-toggle-btn"
+       role="tab" aria-selected="false"
+       title="Single source view — configure one source → one destination">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="8" r="2.4" fill="currentColor"/>
+      </svg>
+      Single
+    </a>
+    <button id="view-toggle-multi" type="button" class="view-toggle-btn active"
+            role="tab" aria-selected="true"
+            title="Multiview — 4 channels in one window">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+      Multi
+    </button>
+  </div>
   <div class="controls">
     <div id="sys-pill" class="sys-pill unknown" title="System health — CPU + memory">
       <span class="dot"></span>
       <span class="label-text" id="sys-pill-label">starting…</span>
     </div>
-    <a href="/">← Single-source</a>
     <button id="refresh-all" type="button" title="Refresh discovery + tile state">↻ Refresh</button>
     <button id="stop-all" type="button" class="danger" title="Stop every tile that's streaming">Stop All</button>
   </div>
@@ -436,11 +535,18 @@ async function fetchJson(url, opts) {
 
 function buildTile(idx) {
   const tile = el('div', { class: 'tile', id: `tile-${idx}`, dataset: { idx: String(idx) } },
+    // Header — idx + dest summary + status pill + Start/Stop
     el('div', { class: 'tile-head' },
       el('span', { class: 'tile-idx' }, idx + 1),
-      el('span', { class: 'tile-name', id: `tile-name-${idx}` }, 'Idle'),
-      el('span', { class: 'pill idle', id: `tile-pill-${idx}` }, 'Idle')
+      el('span', { class: 'tile-name', id: `tile-name-${idx}` }, '— configure tile —'),
+      el('span', { class: 'pill idle', id: `tile-pill-${idx}` }, 'Idle'),
+      el('div', { class: 'tile-actions' },
+        el('button', { class: 'primary', id: `tile-start-${idx}`, onclick: () => onStart(idx), title: 'Start streaming' }, '▶'),
+        el('button', { class: 'danger', id: `tile-stop-${idx}`, onclick: () => onStop(idx), title: 'Stop streaming' }, '◼')
+      )
     ),
+    // Preview — fills remaining vertical space, JPEG inserted by
+    // refreshPreviews when status is Streaming.
     el('div', { class: 'preview', id: `tile-preview-${idx}` },
       el('div', { class: 'preview-placeholder' }, 'no signal'),
       el('div', { class: 'preview-overlay' },
@@ -448,43 +554,109 @@ function buildTile(idx) {
         el('span', { id: `tile-err-${idx}`, class: 'err' }, '')
       )
     ),
-    el('div', { class: 'controls' },
+    // Compact controls — 2 rows: source/audio and dest type/config.
+    el('div', { class: 'tile-controls' },
       el('div', { class: 'control-row' },
-        el('label', { class: 'control-label', for: `tile-src-${idx}` }, 'Source'),
-        el('select', { id: `tile-src-${idx}`, onchange: (e) => onSourceChange(idx, e.target.value) },
-          el('option', { value: '__none__' }, '— pick source —')
+        el('label', { class: 'control-label' }, 'SRC'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-src-${idx}`, class: 'src-sel', onchange: (e) => onSourceChange(idx, e.target.value) },
+            el('option', { value: '__none__' }, '— pick source —')
+          ),
+          el('select', { id: `tile-audio-${idx}`, class: 'audio-sel', onchange: (e) => onAudioChange(idx, e.target.value) },
+            el('option', { value: 'auto' }, 'Auto audio'),
+            el('option', { value: 'silent' }, 'Silent')
+          )
         )
       ),
       el('div', { class: 'control-row' },
-        el('label', { class: 'control-label', for: `tile-dl-${idx}` }, 'DeckLink output'),
-        el('select', { id: `tile-dl-${idx}`, onchange: (e) => onDecklinkChange(idx, e.target.value) },
-          el('option', { value: '__none__' }, '— pick output —')
+        el('label', { class: 'control-label' }, 'DST'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-desttype-${idx}`, class: 'desttype-sel', onchange: (e) => onDestTypeChange(idx, e.target.value), title: 'Destination type' },
+            el('option', { value: 'decklink' }, 'DeckLink'),
+            el('option', { value: 'atem' }, 'Remote SRT')
+          ),
+          // Container that swaps between DeckLink dropdowns and Remote
+          // ATEM text inputs depending on dest type. Populated by
+          // renderDestFields() on tile state changes.
+          el('div', { class: 'control-fields', id: `tile-dest-fields-${idx}`, style: 'flex: 1 1 auto; gap: 4px;' })
         )
-      ),
-      el('div', { class: 'control-row' },
-        el('label', { class: 'control-label', for: `tile-mode-${idx}` }, 'Output mode'),
-        el('select', { id: `tile-mode-${idx}`, onchange: (e) => onModeChange(idx, e.target.value), disabled: true },
-          el('option', { value: '__none__' }, '— pick output first —')
-        )
-      ),
-      el('div', { class: 'control-row' },
-        el('label', { class: 'control-label', for: `tile-audio-${idx}` }, 'Audio'),
-        el('select', { id: `tile-audio-${idx}`, onchange: (e) => onAudioChange(idx, e.target.value) },
-          el('option', { value: 'auto' }, 'Auto (from source)'),
-          el('option', { value: 'silent' }, 'Silent')
-        )
-      ),
-      el('div', { class: 'row-actions' },
-        el('button', { class: 'primary', id: `tile-start-${idx}`, onclick: () => onStart(idx) }, '▶ Start'),
-        el('button', { class: 'danger', id: `tile-stop-${idx}`, onclick: () => onStop(idx) }, '◼ Stop')
       )
-    ),
-    el('div', { class: 'tile-foot' },
-      el('span', { id: `tile-foot-src-${idx}` }, ''),
-      el('span', { id: `tile-foot-dest-${idx}` }, '')
     )
   );
   return tile;
+}
+
+function renderDestFields(idx) {
+  const container = document.getElementById(`tile-dest-fields-${idx}`);
+  if (!container) return;
+  const snap = tileState[idx]?.snapshot || {};
+  const destType = snap.destination_type || 'decklink';
+  container.innerHTML = '';
+  if (destType === 'decklink') {
+    // DeckLink: device + mode dropdowns.
+    const dl = el('select', {
+      id: `tile-dl-${idx}`,
+      onchange: (e) => onDecklinkChange(idx, e.target.value),
+      title: 'DeckLink output device'
+    },
+      el('option', { value: '__none__' }, '— pick output —')
+    );
+    const mode = el('select', {
+      id: `tile-mode-${idx}`,
+      onchange: (e) => onModeChange(idx, e.target.value),
+      disabled: !snap.decklink_device_name,
+      title: 'DeckLink output mode'
+    },
+      el('option', { value: '__none__' }, snap.decklink_device_name ? '— pick mode —' : '— pick device first —')
+    );
+    container.appendChild(dl);
+    container.appendChild(mode);
+    populateDecklinkDropdown(idx);
+  } else {
+    // Remote ATEM/SRT: URL + stream key text inputs. Inline edits
+    // POST to /api/i/N/settings on blur or Enter.
+    const urlEl = el('input', {
+      type: 'text',
+      id: `tile-url-${idx}`,
+      placeholder: 'srt://host:port',
+      value: snap.custom_url || '',
+      title: 'Destination URL — usually srt://<atem-host>:<port> or rtmp://…',
+    });
+    const keyEl = el('input', {
+      type: 'text',
+      id: `tile-key-${idx}`,
+      placeholder: 'stream key',
+      value: snap.stream_key || '',
+      title: 'BMD stream key (u=…) — paste from your ATEM streaming service config',
+      style: 'flex: 0 0 120px;',
+    });
+    const commit = () => {
+      const payload = {
+        destination_type: 'atem',
+        custom_url: urlEl.value.trim(),
+        stream_key: keyEl.value.trim(),
+      };
+      applySettings(idx, payload);
+    };
+    urlEl.addEventListener('change', commit);
+    keyEl.addEventListener('change', commit);
+    urlEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') urlEl.blur(); });
+    keyEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') keyEl.blur(); });
+    container.appendChild(urlEl);
+    container.appendChild(keyEl);
+  }
+}
+
+async function onDestTypeChange(idx, value) {
+  // Don't apply yet — the dest-type swap rebuilds the fields, and
+  // the actual config (decklink device / atem URL) lives in the
+  // fields themselves. POST the type change so the backend knows
+  // which destination_type to validate against, then rerender.
+  await applySettings(idx, { destination_type: value });
+  // Force-refresh tile state so the new destination_type drives
+  // renderDestFields' choice.
+  await pollTile(idx);
+  renderDestFields(idx);
 }
 
 // -------------------------------------------------------------------
@@ -529,13 +701,30 @@ async function loadDecklinkOutputs() {
 let knownDecklink = { devices: [] };
 let knownNdi = [];
 let knownOmt = [];
+// alpha.42 — also pick up physical sources (AVF/dshow cameras +
+// screen capture) so an operator can run "camera → remote SRT" tiles
+// alongside "NDI → DeckLink" ones in the same window. Loaded once
+// per session; refresh-all reloads.
+let knownDevices = { video: [], audio: [] };
+
+async function loadDevices() {
+  try {
+    const data = await fetchJson('/api/i/0/devices');
+    return data || { video: [], audio: [] };
+  } catch (e) {
+    console.warn('Devices load failed:', e);
+    return { video: [], audio: [] };
+  }
+}
 
 function populateSourceDropdown(idx) {
   const sel = document.getElementById(`tile-src-${idx}`);
   if (!sel) return;
-  const current = tileState[idx]?.snapshot?.source_id;
-  const currentNdi = tileState[idx]?.snapshot?.ndi_source_name;
-  const currentOmt = tileState[idx]?.snapshot?.omt_source_name;
+  const snap = tileState[idx]?.snapshot || {};
+  const current = snap.source_id;
+  const currentNdi = snap.ndi_source_name;
+  const currentOmt = snap.omt_source_name;
+  const currentAvName = snap.av_video_name;
 
   sel.innerHTML = '';
   sel.appendChild(el('option', { value: '__none__' }, '— pick source —'));
@@ -560,8 +749,40 @@ function populateSourceDropdown(idx) {
     }
     sel.appendChild(grp);
   }
-  // Always offer the test pattern as a safe fallback for verifying
-  // that 8x decklink_enc concurrency actually works on the rig.
+  // alpha.42 — physical sources (cameras + screens) so a tile can
+  // do "physical camera → remote SRT" in addition to the original
+  // "NDI → DeckLink" pattern. Each device's category drives the
+  // source_id we'll POST:
+  //   screen* → "screen_capture"
+  //   anything else video → "avfoundation" (Mac) / "dshow" (Win)
+  if (knownDevices.video && knownDevices.video.length) {
+    const screens = knownDevices.video.filter(d => /screen|desk view|screen capture/i.test(d.name || ''));
+    const cameras = knownDevices.video.filter(d => !screens.includes(d));
+    if (cameras.length) {
+      const grp = el('optgroup', { label: 'Cameras' });
+      for (const d of cameras) {
+        const val = `camera:${d.index}|${d.name}`;
+        const opt = el('option', { value: val }, d.name);
+        if ((current === 'avfoundation' || current === 'dshow') && currentAvName === d.name) {
+          opt.selected = true;
+        }
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+    if (screens.length) {
+      const grp = el('optgroup', { label: 'Screen capture' });
+      for (const d of screens) {
+        const val = `screen:${d.index}`;
+        const opt = el('option', { value: val }, d.name);
+        if (current === 'screen_capture' || current === 'gdigrab') opt.selected = true;
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+  }
+  // Test pattern — always available, useful for verifying 4x decklink_enc
+  // concurrency on the rig without needing 4 live sources.
   const tp = el('option', { value: 'test_pattern' }, 'Test pattern (SMPTE bars)');
   if (current === 'test_pattern') tp.selected = true;
   sel.appendChild(tp);
@@ -634,6 +855,30 @@ async function onSourceChange(idx, value) {
     await applySettings(idx, { source_id: 'ndi', ndi_source_name: value.slice(4) });
   } else if (value.startsWith('omt:')) {
     await applySettings(idx, { source_id: 'omt', omt_source_name: value.slice(4) });
+  } else if (value.startsWith('camera:')) {
+    // Format: "camera:<index>|<name>". Use the platform-appropriate
+    // source_id; backend's source factories treat avfoundation
+    // (macOS) and dshow (Windows) interchangeably for naming.
+    const rest = value.slice(7);
+    const pipe = rest.indexOf('|');
+    const index = pipe >= 0 ? parseInt(rest.slice(0, pipe), 10) || 0 : 0;
+    const name = pipe >= 0 ? rest.slice(pipe + 1) : '';
+    const platformSrcId = navigator.platform.toLowerCase().includes('mac')
+      ? 'avfoundation' : 'dshow';
+    await applySettings(idx, {
+      source_id: platformSrcId,
+      av_video_index: index,
+      av_video_name: name,
+    });
+  } else if (value.startsWith('screen:')) {
+    const index = parseInt(value.slice(7), 10) || 0;
+    // Backend source_id for screen capture is "screen_capture"; on
+    // Windows that internally selects gdigrab, on macOS it selects
+    // avfoundation with the screen device index.
+    await applySettings(idx, {
+      source_id: 'screen_capture',
+      av_video_index: index,
+    });
   } else if (value === 'test_pattern') {
     await applySettings(idx, { source_id: 'test_pattern' });
   }
@@ -815,11 +1060,23 @@ function describeSource(snap) {
 
 function describeDest(snap) {
   if (snap.destination_type === 'decklink') {
-    const dev = snap.decklink_device_name || '(no device)';
+    const dev = snap.decklink_device_name || '(pick DeckLink)';
     const mode = snap.decklink_output_mode || snap.decklink_format_code || '';
     return mode ? `${dev} · ${mode}` : dev;
   }
-  return 'ATEM/SRT (set DeckLink to route here)';
+  // ATEM / SRT remote — show host:port from the active or custom URL.
+  // current_url is populated by the backend from XML or custom_url;
+  // fall back to raw custom_url for newly-configured tiles where the
+  // service has not yet been resolved.
+  const url = snap.current_url || snap.custom_url || '';
+  if (url) {
+    try {
+      // Strip protocol + path so it fits in the header line.
+      const stripped = url.replace(/^[a-z]+:\/\//i, '').split('?')[0].split('/')[0];
+      return `Remote · ${stripped}`;
+    } catch (_e) { return `Remote · ${url}`; }
+  }
+  return 'Remote (configure URL + key)';
 }
 
 function renderTile(idx, data) {
@@ -829,71 +1086,81 @@ function renderTile(idx, data) {
   const klass = statusToClass(snap?.stats?.status);
   tile.className = 'tile' + (klass ? ' ' + klass : '');
 
+  // Header name = destination summary so the operator sees at a
+  // glance what each tile is sending TO (vs. tile idx alone).
   const name = document.getElementById(`tile-name-${idx}`);
-  name.textContent = snap?.decklink_device_name || snap?.label || `Tile ${idx + 1}`;
+  name.textContent = describeDest(snap) || `Tile ${idx + 1}`;
 
   const pill = document.getElementById(`tile-pill-${idx}`);
   pill.className = 'pill ' + klass;
   pill.textContent = statusPillText(snap);
 
+  // Preview overlay — source label on left, error text on right.
   const info = document.getElementById(`tile-info-${idx}`);
   const bitrate = snap?.stats?.bitrate || 0;
   const fps = snap?.stats?.fps || 0;
+  const srcSummary = describeSource(snap);
   if (klass === 'streaming') {
-    info.textContent = `${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps`;
+    info.textContent = `${srcSummary} · ${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps`;
   } else if (klass === 'connecting') {
-    info.textContent = 'connecting…';
+    info.textContent = `${srcSummary} · connecting…`;
   } else if (klass === 'reconnecting') {
-    info.textContent = `attempt ${snap.stats.reconnect_attempt}/${snap?.auto_reconnect_max_attempts || 12}`;
+    info.textContent = `${srcSummary} · attempt ${snap.stats.reconnect_attempt}/${snap?.auto_reconnect_max_attempts || 12}`;
   } else {
-    info.textContent = '';
+    info.textContent = srcSummary;
   }
 
   const errEl = document.getElementById(`tile-err-${idx}`);
-  errEl.textContent = snap?.stats?.error ? String(snap.stats.error).slice(0, 80) : '';
+  errEl.textContent = snap?.stats?.error ? String(snap.stats.error).slice(0, 60) : '';
 
-  document.getElementById(`tile-foot-src-${idx}`).textContent = describeSource(snap);
-  document.getElementById(`tile-foot-dest-${idx}`).textContent = describeDest(snap);
-
-  // Reflect server state in the dropdowns whenever it changes (e.g.
-  // operator made changes in another window or via the single-source UI).
+  // Reflect server state in dropdowns. setAudioDropdown is safe to
+  // call every poll; the dest-type dropdown is here too so a state
+  // change from another tab is reflected.
   setAudioDropdown(idx);
+  const dt = document.getElementById(`tile-desttype-${idx}`);
+  if (dt) {
+    const want = snap.destination_type || 'decklink';
+    if (dt.value !== want) {
+      dt.value = want;
+      // Type changed externally — rebuild the field strip to match.
+      renderDestFields(idx);
+    }
+  }
 
-  // alpha.41 destructive-op guard: disable configuration dropdowns
-  // while the tile is Streaming or Connecting so source/dest/mode
-  // changes can't silently drift away from the running stream's
-  // actual config. Re-enabled the moment status drops back to
-  // Idle / Interrupted / Reconnecting (Reconnecting because at that
-  // point the operator should be free to reconfigure during backoff).
+  // alpha.41/42 destructive-op guard: disable configuration controls
+  // while the tile is Streaming or Connecting so the live config
+  // can't silently drift. Lifted as soon as the tile is Idle /
+  // Interrupted / Reconnecting (Reconnecting → operator should be
+  // free to reconfigure during backoff).
   const locked = STREAMING_STATUSES.has((snap?.stats?.status || '').toLowerCase());
   const lockTitle = locked
     ? 'Locked while streaming — Stop the tile to change configuration'
     : '';
-  for (const ctrl of [
+  const controlIds = [
     `tile-src-${idx}`,
+    `tile-audio-${idx}`,
+    `tile-desttype-${idx}`,
     `tile-dl-${idx}`,
     `tile-mode-${idx}`,
-    `tile-audio-${idx}`,
+    `tile-url-${idx}`,
+    `tile-key-${idx}`,
     `tile-start-${idx}`,
-  ]) {
-    const el = document.getElementById(ctrl);
-    if (!el) continue;
-    // Skip the mode dropdown if it has no real choices yet (no
-    // DeckLink picked) — its own "disabled" reflects that case.
-    if (ctrl === `tile-mode-${idx}` && !tileState[idx]?.snapshot?.decklink_device_name) {
-      continue;
+  ];
+  for (const ctrl of controlIds) {
+    const elx = document.getElementById(ctrl);
+    if (!elx) continue;
+    if (ctrl === `tile-mode-${idx}` && !snap?.decklink_device_name) {
+      continue; // mode dropdown's own "no device" disable wins
     }
     if (ctrl === `tile-start-${idx}`) {
-      // Start should only be disabled while ACTIVELY streaming —
-      // Connecting allowed because clicking Start during Connecting
-      // does nothing anyway. Stop is always enabled (it's the
-      // escape hatch).
-      el.disabled = (snap?.stats?.status || '').toLowerCase() === 'streaming';
+      // Start should only be disabled while ACTIVELY streaming.
+      // Connecting allowed (clicking Start does nothing anyway).
+      elx.disabled = (snap?.stats?.status || '').toLowerCase() === 'streaming';
     } else {
-      el.disabled = locked;
+      elx.disabled = locked;
     }
-    if (locked) el.title = lockTitle;
-    else el.removeAttribute('title');
+    if (locked) elx.title = lockTitle;
+    else elx.removeAttribute('title');
   }
 }
 
@@ -901,10 +1168,20 @@ async function pollTile(idx) {
   try {
     const data = await fetchJson(`/api/i/${idx}/state`);
     const wasFirst = !tileState[idx];
+    // Backend's StateResponse uses #[serde(flatten)] on snapshot, so
+    // the snapshot fields are at the TOP LEVEL of `data`, not nested
+    // under a `snapshot` key. Self-reference here so the existing
+    // `tileState[idx]?.snapshot?.field` accessors throughout this
+    // file all resolve uniformly.
+    data.snapshot = data;
     tileState[idx] = data;
     if (wasFirst) {
       populateSourceDropdown(idx);
-      populateDecklinkDropdown(idx);
+      // renderDestFields seeds the dest-fields container with the
+      // appropriate widgets (DeckLink dropdowns vs. Remote ATEM
+      // text inputs) based on the persisted destination_type, then
+      // calls populateDecklinkDropdown for the DeckLink branch.
+      renderDestFields(idx);
     }
     renderTile(idx, data);
   } catch (e) {
@@ -960,9 +1237,12 @@ async function bootstrap() {
     knownDecklink = await loadDecklinkOutputs();
     knownNdi = await loadNdiSenders();
     knownOmt = await loadOmtSenders();
+    knownDevices = await loadDevices();
     for (const idx of TILES) {
       populateSourceDropdown(idx);
-      populateDecklinkDropdown(idx);
+      // Rebuild dest fields so a freshly-attached DeckLink device
+      // appears in the dropdown without a full page reload.
+      renderDestFields(idx);
     }
     await pollAllTiles();
   });
@@ -971,10 +1251,13 @@ async function bootstrap() {
   knownDecklink = await loadDecklinkOutputs();
   knownNdi = await loadNdiSenders();
   knownOmt = await loadOmtSenders();
+  knownDevices = await loadDevices();
   await pollAllTiles();
   for (const idx of TILES) {
     populateSourceDropdown(idx);
-    populateDecklinkDropdown(idx);
+    // Dest-fields strip already rendered by pollTile on first poll;
+    // populateDecklinkDropdown ran inside renderDestFields if the
+    // current dest type is "decklink". No extra call needed here.
   }
 
   // alpha.41: kick off system health polling alongside tile state.

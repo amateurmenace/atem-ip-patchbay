@@ -1,3 +1,4 @@
+mod audio_bridge;
 mod device_scanner;
 mod ffmpeg_path;
 mod fleet;

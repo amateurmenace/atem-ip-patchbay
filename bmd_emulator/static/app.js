@@ -19,7 +19,10 @@ const els = {
   killOrphans: $('#kill-orphans'),
   openNetDiag: $('#open-net-diag'),
   openMonitor: $('#open-monitor'),
-  openMultiview: $('#open-multiview'),
+  // alpha.42: openMultiview button removed; the view-mode toggle in
+  // the topbar (.view-toggle) handles Single ↔ Multi navigation now.
+  heroHideBtn: $('#hero-hide-btn'),
+  showIntroBtn: $('#show-intro-btn'),
   omtOutputEnabled: $('#omt-output-enabled'),
   omtOutputName:    $('#omt-output-name'),
   omtOutputStatus:  $('#omt-output-status'),
@@ -2088,16 +2091,27 @@ function bind() {
     });
   }
 
-  // alpha.40 — Multiview navigates the current WebView to
-  // /static/multiview.html. Same-window navigation (not a Tauri spawn)
-  // keeps the MVP small; the multiview's "← Single-source" link in
-  // its own header gets the operator back. If we later want
-  // multiview-in-a-separate-window, mirror open_monitor_window's
-  // pattern in lib.rs and switch to invoke('open_multiview_window').
-  if (els.openMultiview) {
-    els.openMultiview.addEventListener('click', () => {
-      window.location.href = '/static/multiview.html';
-    });
+  // alpha.42 — view-toggle was previously a separate "Open Multiview"
+  // button; now it's the .view-toggle in the topbar (.view-toggle-btn
+  // anchor tags) which uses default navigation. Nothing to wire here.
+
+  // alpha.42 — Hide intro persistence. localStorage key
+  // 'atemPatchbay_heroHidden' (also read by the inline <script> in
+  // index.html's <head> to apply the data attribute before paint and
+  // avoid a flash). The "↓ About" topbar button surfaces when hidden
+  // and restores the hero.
+  function setHeroHidden(hidden) {
+    document.documentElement.dataset.heroHidden = hidden ? 'true' : 'false';
+    try {
+      if (hidden) localStorage.setItem('atemPatchbay_heroHidden', '1');
+      else localStorage.removeItem('atemPatchbay_heroHidden');
+    } catch (e) { /* private mode etc */ }
+  }
+  if (els.heroHideBtn) {
+    els.heroHideBtn.addEventListener('click', () => setHeroHidden(true));
+  }
+  if (els.showIntroBtn) {
+    els.showIntroBtn.addEventListener('click', () => setHeroHidden(false));
   }
 
   els.audioPanL.addEventListener('change', () => {
