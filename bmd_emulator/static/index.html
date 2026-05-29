@@ -1373,6 +1373,15 @@
   <!-- alpha.22's UDM config dialog removed in alpha.25 (relocated to
        net-diag's own dashboard). -->
 
-  <script src="/static/app.js"></script>
+  <!-- alpha.54: defer app.js to match system-drawer.js's defer.
+       Without this, app.js ran during HTML parse (before deferred
+       scripts execute) so window.createSystemDrawer was undefined
+       when app.js checked. Result: single-view sys-pill never got
+       a click handler and never started polling. With both deferred,
+       they run in document order (system-drawer first, then app)
+       after the DOM is fully parsed — createSystemDrawer is defined,
+       the pill gets wired + polls /api/system-health like the
+       multiview's. -->
+  <script src="/static/app.js" defer></script>
 </body>
 </html>
