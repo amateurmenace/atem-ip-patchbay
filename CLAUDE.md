@@ -2691,6 +2691,437 @@ In rough order of operator-impact value:
    subsequent sessions should add their wins + open issues +
    priorities in the same shape.
 
+### Session 15 wins (alpha.35 + alpha.36 + alpha.37, 2026-05-28 evening)
+
+Three tagged alphas. alpha.35 shipped the Session 15 priority
+#1 Mac dylib fix that unblocked alpha.34. alpha.36 + alpha.37
+were back-to-back follow-ups as operator testing on the
+Broadcast Pix rig surfaced first a parsing bug (devices weren't
+appearing) then a codec bug (Start Stream failed at FFmpeg
+header-write). Both were isolated to single-line fixes in the
+patchbay code; the rev2 sidecar FFmpeg itself was healthy.
+
+**alpha.35 (commits `ee2c75c` + `1e7d4f8`) — Mac Homebrew dylib
+bundling.** The carryover from Session 14: the FFmpeg we built
+in build-ffmpeg.yml linked dynamically against /opt/homebrew/...
+dylibs. The build runner had Homebrew installed via the `brew
+install nasm yasm pkg-config x264 x265 srt` step; release.yml's
+Mac runner doesn't, so `src-tauri/sidecar/ffmpeg -version` died
+at dyld load with "Library not loaded: /opt/homebrew/opt/srt/
+lib/libsrt.1.5.dylib" before main(). publish-release was gated
+on Mac success; alpha.34 never produced a Releases page.
+
+Fix is the standard "portable Mach-O bundle" pattern (what
+dylibbundler / macdylibbundler / Python's delocate-wheel all do)
+hand-rolled in build-ffmpeg.yml between the sanity check + the
+tarball step:
+
+- Iteratively walk ffmpeg + each newly-bundled dylib's
+  `otool -L` output, filter to /opt/homebrew + /usr/local
+  prefixes, copy next to ffmpeg in /tmp/ffmpeg-out/, set each
+  copy's LC_ID_DYLIB to @executable_path/<name> via -id,
+  rewrite every load-command reference via -change. Loop until
+  no non-system refs remain. Hard-cap at 10 passes as safety.
+- Final audit greps every Mach-O for surviving /opt/homebrew
+  refs, fails the build loud if found.
+- Smoke test invokes the bundled ffmpeg with `env -i` so dyld
+  can ONLY use embedded load commands (no DYLD_FALLBACK_LIBRARY_
+  PATH leakage from the runner's brew install). If
+  @executable_path resolution is wrong, the build dies right at
+  build-ffmpeg.yml's smoke step instead of failing 20 min later
+  in release.yml.
+
+Live capture from the rev2 build:
+- Pass 1 bundled 14 dylibs: libsrt.1.5, libssl.3, libcrypto.3,
+  libx264.165, libx265.216, libxcb.1 + 5 libxcb-* siblings
+  (shape, render, shm, xfixes), libXau.6, libXdmcp.6, libX11.6.
+- Pass 2 caught a small number of cross-references between
+  the just-bundled dylibs (no new copies needed).
+- Final audit: clean.
+- Bundled ffmpeg launches via env -i, srt protocol + decklink
+  muxer both present.
+
+X11/libxcb deps came in because FFmpeg's configure auto-enabled
+the xcb_xfixes input device when libxcb headers were detected
+on the build host. Adds ~2 MB to the tarball but never gets
+loaded at runtime on end-user machines (no display server
+context). Could shave with `--disable-indev=xcbgrab` (or
+`--disable-libxcb`) in a future rev; deferred.
+
+Mac sidecar tarball size: rev1 9 MB → rev2 16.7 MB (the bundled
+dylibs).
+
+Also in alpha.35:
+- release.yml Mac block: extract changed from `tar -xzf to /tmp;
+  cp /tmp/ffmpeg sidecar/` to `tar -xzf -C src-tauri/sidecar`
+  so the dylibs land alongside ffmpeg automatically. Existing
+  src-tauri/sidecar/README.txt placeholder stays (tar extract
+  doesn't delete files not in the archive).
+- release.yml Mac block added an otool audit that fails the
+  build loud if any /opt/homebrew refs somehow survived
+  (catches misconfigured tag pulls of pre-bundling tarballs).
+- BUILD_REVISION bumped 1 → 2 in ci/ffmpeg-pins.env. New sidecar
+  prerelease tag: ffmpeg-decklink-8.1.1-bmd16.0-rev2. paths-
+  filter on build-ffmpeg.yml auto-fired.
+- The existing release.yml deep-codesign Phase 2 walks
+  Contents/Resources/* recursively + hardened-runtime signs
+  every Mach-O it finds, so the 14 new dylibs got Developer ID
+  signing without additional wiring. Apple's notary accepted.
+
+alpha.34 tag dangles in git pointing at the swap-without-fix
+commit (0f216ba) — no Release page; treated as a historical
+pointer. alpha.35 is the first DeckLink-enabled FFmpeg
+published to the Releases page on both platforms.
+
+**alpha.36 (commit `c0616c8`) — DeckLink device parsing for
+FFmpeg n8.1.1 log prefix.** Operator (on the Broadcast Pix test
+rig) installed alpha.35, picked "Local (DeckLink | SDI/HDMI)"
+destination, expected the device dropdown to populate with the
+13 DeckLink-visible devices (DeckLink Studio 4K + DeckLink 8K
+Pro x3 + NDI Machine x4 + Videohub I/O routes + Key/Fill 1).
+Got "No DeckLink devices found" warning instead.
+
+Diagnosed via direct probe of the bundled FFmpeg:
+
+```
+$ ffmpeg.exe -hide_banner -f decklink -list_devices true -i dummy
+[Blackmagic DeckLink indev @ 0x...] The "list_devices" option is
+   deprecated: use ffmpeg -sources decklink instead
+[in#0 @ 0x...] Blackmagic DeckLink input devices:
+[in#0 @ 0x...] 	'DeckLink Studio 4K'
+[in#0 @ 0x...] 	'NDI Machine'
+   ... 13 lines total ...
+```
+
+FFmpeg n8.1.1 changed the decklink indev's log prefix from
+`[decklink @ 0x...]` (what older FFmpeg used) to `[in#0 @
+0x...]`. On the per-device `-list_formats 1` output, the bracket
+prefix is dropped entirely and per-format rows are now just
+tab-indented (e.g. `\tHp59\t\t1920x1080 at 60000/1001 fps`).
+
+Both regexes in device_scanner.rs were anchored to the literal
+`[decklink` prefix, so every device + every format-row was
+silently skipped on the new FFmpeg.
+
+Fix is regex-only:
+
+- `DECKLINK_DEVICE_LINE`: drop the literal `decklink` requirement.
+  Now matches any bracketed prefix `[…]` followed by single-
+  quoted name. False-positive risk: the deprecation warning line
+  uses DOUBLE quotes, doesn't match; header lines like
+  "Blackmagic DeckLink input devices:" have no quotes; only
+  actual device rows have `'NAME'`.
+
+- `DECKLINK_FORMAT_LINE`: make the bracket prefix entirely
+  optional. The header row `\tformat_code\tdescription` skips
+  naturally because the regex requires "WxH at N/D fps"
+  structure after the first token, which "description" lacks.
+  The explicit format_code check in parse_decklink_modes stays
+  as belt-and-suspenders.
+
+Added two regression-test fixtures (parse_devices_n8_1_1_format
+and parse_modes_n8_1_1_format) with live captures from the test
+rig output alongside the existing legacy-format tests. If a
+future FFmpeg upgrade changes the format again, the tests fail
+loud against the live capture instead of shipping silent.
+
+The user's test pass continued post-alpha.36 — drop-down
+populated correctly with all 13 devices. User picked "Output C
+to Videohub Input 21" at Hp29, hit Start Stream, immediately
+hit a different error (the alpha.37 codec bug below).
+
+**alpha.37 (commit `7dc0d02`) — DeckLink output codec
+rawvideo → wrapped_avframe.** Picked from the running app's
+/api/log endpoint:
+
+```
+[decklink @ ...] Unsupported codec type! Only V210 and wrapped
+   frame with AV_PIX_FMT_UYVY422 are supported.
+[out#0/decklink @ ...] Could not write header
+   (incorrect codec parameters ?): I/O error
+```
+
+alpha.21 shipped `-c:v rawvideo` for the decklink-output path
+in `build_decklink_output_cmd` — sounds right (the muxer wants
+raw frames) but is actually the wrong codec name. FFmpeg's
+decklink_enc.cpp explicitly checks for wrapped_avframe or V210
+at write_header time and rejects everything else. rawvideo
+packages raw pixel BYTES; the muxer needs the raw AVFrame
+structure preserved end-to-end so it can hand the frame to the
+BMD driver via the DeckLink SDK's ScheduleVideoFrame API.
+
+Fix is a one-codec swap: `-c:v wrapped_avframe`. wrapped_avframe
+is FFmpeg's pseudo-codec for passing raw AVFrames straight to
+a muxer that knows how to consume them. The upstream
+`format=uyvy422` in the video filter (set by
+build_plan_decklink) handles pixel-format conversion to what
+the card expects; wrapped_avframe just packages the AVFrame
+for delivery.
+
+Manually verified before commit:
+
+```
+$ ffmpeg.exe -f lavfi -i testsrc2=size=1920x1080:rate=30 \
+    -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+    -vf format=uyvy422 \
+    -c:v wrapped_avframe -c:a pcm_s16le -ar 48000 -ac 2 \
+    -f decklink -format_code Hp29 'Output C to Videohub Input 21'
+[decklink @ ...] Found Decklink mode 1920 x 1080 with rate 30.00
+Output #0, decklink, to 'Output C to Videohub Input 21':
+  Stream #0:0: Video: wrapped_avframe, uyvy422(progressive), ...
+  Stream #0:1: Audio: pcm_s16le, 48000 Hz, stereo, ...
+frame=  90 ... (running cleanly)
+```
+
+For 10-bit DeckLink cards, V210 would be the alternative codec
+— would need a -c:v v210 path with yuv422p10le pixel format
+selection. UI doesn't surface 10-bit yet; deferred.
+
+### Session 15 wins also include CLAUDE.md catch-up
+
+This entry (in the same CLAUDE.md commit that documents Session
+15) is the catch-up; Session 16 picks up cleanly from here.
+
+### Open issues from Session 15
+
+- **DeckLink output end-to-end NOT YET FUNCTIONALLY VERIFIED.**
+  alpha.36 fixes the device-list parse so devices appear in the
+  dropdown. The next step — pick a network source, pick DeckLink
+  card + output mode, Start Stream, see signal on SDI/HDMI —
+  has not yet been driven through on the test rig as of this
+  CLAUDE.md update (operator testing in parallel). First test
+  may surface mode-string format edge cases, scale-filter
+  interactions, or driver-error surfacing the UI hints don't
+  handle gracefully.
+
+- **X11/libxcb dylibs bundled but unused on end-user Macs.**
+  rev2 Mac sidecar grew 9 MB → 16.7 MB; ~2 MB of that is
+  libX11 + 6 libxcb-* dylibs that FFmpeg auto-enabled because
+  the build host had libxcb headers present (xcb_xfixes indev).
+  End users have no display server context to invoke these,
+  so they're dead weight. Future rev: add
+  `--disable-indev=xcbgrab` or `--disable-libxcb` to the Mac
+  configure step in build-ffmpeg.yml. Defer until other
+  Session 16 work lands.
+
+- **FFmpeg `-list_devices true` flag is deprecated.** FFmpeg 8.x
+  warns "use ffmpeg -sources decklink instead". Still works in
+  8.1.1; could be REMOVED in a future FFmpeg upgrade. Forward-
+  compatible fix would be to switch to `-sources decklink`
+  (which may have a different output format that the regex
+  would need to handle too). Defer until either FFmpeg removes
+  the old flag, or we have a reason to upgrade FFmpeg past
+  8.1.1.
+
+- **NSIS file-lock during reinstall pattern kept biting.**
+  Each of the Session 15 install attempts (alpha.33 → alpha.35,
+  alpha.35 → alpha.36) needed manual `taskkill /F /IM
+  atem-ip-patchbay.exe + atem-net-diag.exe` for the installer
+  to replace the bundled sidecar files. Long-term fix per
+  Session 13 Open issues #1: Tauri NSIS pre-install hook that
+  taskkills the sidecar procs, OR explicit "Quit and reinstall"
+  prompt in the installer. Now "kept hitting" status — worth
+  fixing before next operator install pass.
+
+- **Mac dylib bundle on real end-user Mac not yet tested.**
+  Mac CI's env-stripped `ffmpeg -version` smoke test passes
+  + Apple's notary accepted the .dmg, but no end-user Mac has
+  yet installed alpha.35/36 + driven a stream → ATEM. Same
+  caveat as the DeckLink output direction: pending first-
+  operator test.
+
+- **alpha.32/33 features still not yet operator-verified.**
+  Carryover from Session 14. UDM password-manager defense
+  form, per-switch pin behavior on busy LANs. Wasn't tested
+  this session (DeckLink was the focus).
+
+### Session 16 direction: BROADCAST MULTIVIEW (NDI → DeckLink, 8 channels)
+
+**The headline pivot for Session 16, user-stated at the end of
+Session 15 after the alpha.37 codec fix landed.** The
+single-source per-instance UX (what we've shipped through
+alpha.37) works but doesn't match how a broadcast operator
+actually uses this tool. The vision:
+
+> "When user clicks [Local DeckLink], open a brand new
+> interface that looks like a multiview on a video switcher,
+> with 8 channels, all in one interface, so a user can route
+> up to 8 remote sources to DeckLink outputs. Keep ability to
+> switch audio sources at each input. Put audio meters at each
+> input/output. Want to use this for broadcast. Should use
+> hardware to best of its ability and be reliable."
+
+What this means concretely:
+
+- **A new dedicated UI mode** — operator picks "DeckLink
+  broadcast multiview" (working title) and the existing
+  single-source main window switches into multiview layout
+  (or opens a new dedicated window — design decision for
+  Session 16). Live patchbay grid view shows 8 source tiles,
+  each routed to a configured DeckLink output, all running
+  concurrently.
+- **8 channels in one window.** This is the in-app multiview
+  pattern. Session 11 attempted a 2x2 iframe grid (alpha.15)
+  and abandoned it as too cramped; pivoted to the monitor-
+  window pattern (alpha.16) where each instance gets its own
+  small monitor window the operator drags around. The
+  multiview rework is closer to alpha.15's intent but with
+  the lessons learned — no iframes, native multi-pipeline
+  scheduling in one Tauri window.
+- **Per-channel input picker.** Same NDI / OMT / SRT-listen /
+  RTMP-listen / pipe options that exist today on the single-
+  source UI, just compactified into a per-tile picker.
+- **Per-channel DeckLink output picker.** Each of the 8 tiles
+  has its own DeckLink device + output mode dropdown. The
+  Broadcast Pix test rig surfaced 13 devices via alpha.36;
+  operators in real productions will likely have 4-8
+  DeckLink/Videohub outputs.
+- **Per-channel audio source picker** (the existing Audio
+  Mixer Card surface — Auto / Custom / Silent + L/R Dante
+  channel picker — applied per tile).
+- **Audio meters at each input AND each output.** alpha.31
+  shipped the meters on the single-source UI; this rework
+  multiplies the meter rendering by 8 (per tile, both
+  source-side and output-side). The output meters are new —
+  alpha.31 only showed meters on the encoded SRT-out path,
+  DeckLink-out had no meters.
+- **Hardware accel.** For NDI sources (already-raw frames,
+  no decode), no encode (wrapped_avframe straight through),
+  HW accel really only applies to:
+  - Source-side decoders for non-raw sources (cuvid / qsv /
+    amf for incoming H.264/H.265 via SRT-listen / RTMP-
+    listen / pipe RTSP). Session 12 priority #2 carryover.
+  - Color conversion (CPU vs GPU) for the format=uyvy422
+    step. FFmpeg's filter chain auto-uses GPU paths if
+    available with -hwaccel options.
+- **Reliability for broadcast.** Auto-reconnect supervisor
+  shipped in alpha.30 — needs verification under 8-channel
+  concurrent load. One channel's failure shouldn't cascade.
+  The watchdog/process-supervisor architecture from alpha.4
+  + alpha.30 carries over but needs per-channel isolation.
+
+Architectural decisions to make in Session 16 (in order of
+when they bite):
+
+1. **Single Tauri process with N pipelines, or N separate
+   processes (existing multi-instance pattern)?** The Session
+   11 monitor-window pattern is N processes; the alpha.15
+   abandoned grid was 1 process with N iframes. For broadcast
+   reliability, isolation between channels matters — if
+   channel 3's FFmpeg dies, channels 1, 2, 4-8 should keep
+   running. Multi-process gives this for free (kernel
+   isolation). Single-process needs careful Tokio task
+   structuring + per-channel supervisor.
+2. **`EncoderFleet` already exists (Session 11) with
+   TILE_COUNT=1.** It's vestigial today. Bumping TILE_COUNT to
+   8 + restoring the per-tile route prefix `/api/i/:idx/*`
+   gets us most of the way to a working backend. UI is the
+   bigger lift.
+3. **UI layout.** The "looks like a multiview on a video
+   switcher" cue — likely a 4x2 or 2x4 grid of tiles, each
+   showing live preview JPEG + status + source/dest labels.
+   Plus an overlay or sidebar for per-tile audio meters.
+   Likely needs a dedicated route like /multiview.html or a
+   layout-mode toggle.
+4. **Preview pipeline.** alpha.13 added a 2 Hz JPEG preview
+   served via `/api/preview`. For 8 simultaneous previews
+   the bandwidth + CPU adds up. Could batch into a single
+   /api/preview-grid endpoint that returns 8 sub-images, or
+   keep per-channel endpoints and let the browser fetch
+   8 in parallel. Browser caching + JPEG quality settings
+   matter.
+5. **DeckLink card capacity.** A single DeckLink 8K Pro has 4
+   outputs (and the user's rig has multiple cards). For 8
+   simultaneous outputs, the operator may be using multiple
+   physical cards or a Videohub matrix. The DeckLink SDK has
+   per-device ScheduleVideoFrame concurrency rules — need to
+   verify FFmpeg handles 8 concurrent decklink_enc instances
+   cleanly (or batch through fewer FFmpeg processes).
+6. **Plan agent pass strongly recommended** before
+   implementation — this is comparable in scope to the
+   Session 12 DeckLink direction (~970 LOC across 13 files)
+   and probably larger, given the UI rework.
+
+Phase sketch (subject to Plan agent revision):
+
+- **Phase A (design + spike):** Plan agent designs the
+  architecture; small spike to verify 8 concurrent
+  decklink_enc FFmpeg instances actually work on the test
+  rig (or whether they need to share a process). Confirms
+  single-process-N-pipelines vs N-processes decision.
+- **Phase B (backend):** Bump EncoderFleet TILE_COUNT to 8.
+  Add per-tile DeckLink destination state. Route prefix
+  /api/i/:idx/* re-mounted. Per-tile preview slots.
+  Per-tile supervisor isolation.
+- **Phase C (UI):** New /multiview.html route + JS module.
+  4x2 grid of tile components. Per-tile source picker
+  modal. Per-tile DeckLink destination picker modal.
+- **Phase D (audio meters everywhere):** Per-tile input
+  meters + output meters. Likely needs astats filter chain
+  injection on the source-side (for input meters) AND a
+  separate astats path on the output-side (for output
+  meters, since DeckLink path doesn't go through the
+  encoded SRT pipeline that alpha.31's existing meters
+  read from).
+- **Phase E (hardware accel for incoming streams):**
+  Plumb cuvid/qsv/amf decoders for non-raw sources so an
+  operator running 8 SRT-listen channels doesn't melt the
+  CPU. Same select_decoder pattern Session 12 sketched.
+- **Phase F (broadcast-quality reliability):** Auto-
+  reconnect tested under 8-channel concurrent load. Per-
+  channel isolation verified (kill one channel, others
+  keep running). Watchdog catches dead FFmpeg children.
+  Document recovery semantics in the UI.
+
+Scope sketch: This is the largest architectural change
+since alpha.21 (the original DeckLink output direction).
+Multiple alpha cycles expected. The user explicitly chose
+to defer this to a new session ("let's do this change in
+a new session") so it's the Session 16+ project, not a
+hot-fix continuation of Session 15.
+
+### Session 16 also picks up (smaller carryovers)
+
+1. **Verify alpha.37 end-to-end on real hardware** (if not
+   already confirmed by end of Session 15). Pick NDI source,
+   pick DeckLink output, hit Start Stream, see signal on
+   SDI. Should work post-alpha.37 — manual probe with
+   testsrc2 confirmed against the same device + mode. If
+   any new errors appear, iterate before the multiview
+   work starts.
+
+2. **NSIS pre-install process kill** (Session 15 Open issue
+   #4). Recurring friction during operator install passes —
+   each upgrade needs manual `taskkill` for the installer
+   to replace sidecar files. Tauri 2 NSIS hook can run
+   taskkill pre-install. ~50 LOC. Lifts a constant
+   irritation. Probably ship as alpha.38 before the
+   multiview work starts so testing iterations don't keep
+   hitting it.
+
+3. **Drop X11/libxcb deps from Mac FFmpeg build** (Session
+   15 Open issue #2). `--disable-indev=xcbgrab` (or
+   `--disable-libxcb`) in build-ffmpeg.yml's Mac configure.
+   Bump BUILD_REVISION 2 → 3. Saves ~2 MB.
+
+4. **Pre-show checks panel** — Session 12 priority #4
+   carryover. Useful for net-utility but not on the
+   critical path for the multiview work. Could be
+   parallelized as a quick interleaved alpha.
+
+5. **OMT-out audio for non-raw sources** — cross-platform
+   pipe-FD plumbing. Was Session 12 priority #5 carryover;
+   stays carried over.
+
+6. **Pipe / relay custom audio extension** — was Session
+   12 priority #6 carryover; stays carried over.
+
+7. **Operator-side testing pass for alpha.32-36 features.**
+   UDM password-manager defense form (alpha.32), per-switch
+   pin behavior (alpha.33), Mac DeckLink output end-to-end
+   (alpha.35/36/37), encoder picker routing to nvenc/qsv/
+   amf on a multi-GPU Windows machine.
+
 ### atem-net-diag tool architecture (Session 4)
 
 Lives at `tools/atem-net-diag/`. Standalone Rust crate (its own
@@ -3000,6 +3431,54 @@ Key implementation gotchas:
   did succeed but is only retrievable via the CI run's
   artifacts, not the Releases page. See Open issues from
   Session 14 for the dylib-bundling fix.
+- `v0.2.0-alpha.35` (commits `ee2c75c` + `1e7d4f8`):
+  Session 15 #1 — Mac Homebrew dylib bundling fix in
+  build-ffmpeg.yml. Iterative otool + install_name_tool
+  bundler walks ffmpeg + each newly-bundled dylib's deps
+  until no /opt/homebrew refs remain. 14 dylibs bundled
+  (libsrt, libssl, libcrypto, libx264, libx265, libxcb*,
+  libX11, libXau, libXdmcp). Mac sidecar 9 MB → 16.7 MB.
+  release.yml Mac extract changed to flat `tar -xzf -C
+  src-tauri/sidecar`. BUILD_REVISION 1 → 2 (new sidecar
+  prerelease ffmpeg-decklink-8.1.1-bmd16.0-rev2). **First
+  DeckLink-enabled FFmpeg published on the Releases page
+  on both Mac and Windows.** Notary accepted. (alpha.34
+  tag stays as historical pointer to swap-without-fix
+  commit, no Release page.)
+- `v0.2.0-alpha.36` (commit `c0616c8`): Session 15 hot-
+  fix — DeckLink device parsing for FFmpeg n8.1.1 log
+  prefix. Operator tested alpha.35 on the Broadcast Pix
+  test rig (DeckLink Studio 4K + DeckLink 8K Pro x3 +
+  NDI Machine x4 + Videohub I/O routes + Key/Fill 1 = 13
+  visible devices); UI showed "No DeckLink devices found"
+  because FFmpeg n8.1.1 changed the decklink indev log
+  prefix from `[decklink @ 0x...]` to `[in#0 @ 0x...]`
+  and dropped the bracket prefix entirely on per-format
+  rows (now tab-indented only). Both
+  DECKLINK_DEVICE_LINE + DECKLINK_FORMAT_LINE regexes in
+  device_scanner.rs were anchored to literal `[decklink`,
+  silently skipped every line on the new FFmpeg. Fix is
+  regex-only: drop the literal word from DEVICE_LINE +
+  make the bracket prefix optional in FORMAT_LINE. Plus
+  two regression-test fixtures captured live from the
+  test rig output (parse_devices_n8_1_1_format,
+  parse_modes_n8_1_1_format) alongside the existing
+  legacy-format tests.
+- `v0.2.0-alpha.37` (commit `7dc0d02`): Session 15 second
+  hot-fix — DeckLink output codec rawvideo →
+  wrapped_avframe in build_decklink_output_cmd. After
+  alpha.36 populated the device dropdown, operator picked
+  a device + mode, hit Start Stream, immediately errored
+  at FFmpeg header-write: "Unsupported codec type! Only
+  V210 and wrapped frame with AV_PIX_FMT_UYVY422 are
+  supported." alpha.21 shipped `-c:v rawvideo` which
+  sounds right but FFmpeg's decklink_enc.cpp rejects it.
+  wrapped_avframe is FFmpeg's pseudo-codec for passing
+  AVFrames straight to a muxer; the existing
+  `format=uyvy422` upstream filter handles the actual
+  pixel-format conversion. Manually verified before
+  commit with testsrc2 → Output C to Videohub Input 21
+  → frames written at 30fps. 10-bit V210 path deferred.
 
 ### v0.2.0 UI / UX scope (queued)
 
@@ -3370,48 +3849,56 @@ fast-forward of `main` to `tauri-rewrite` happened at
 
 ## What's next (priority order if picking up cold)
 
-See **"Session 15 priorities (next pickup)"** under the v0.2.0
-direction section above for the full detail. Quick summary:
+See **"Session 16 direction: BROADCAST MULTIVIEW"** under the
+v0.2.0 direction section above for the full architectural
+pivot. Quick summary:
 
-1. **Fix the Mac dylib gap in build-ffmpeg.yml.** THE blocker
-   on alpha.34 actually shipping. The Mac sidecar tarball
-   has dynamic deps on Homebrew dylibs; end-user .apps
-   can't find them. Fix shape: `otool -L` + copy dylibs
-   into tarball + `install_name_tool` to @executable_path.
-   Bump BUILD_REVISION in ci/ffmpeg-pins.env, re-dispatch
-   build-ffmpeg.yml, re-attempt release.yml.
+**Headline pivot (the new direction, user-stated end of
+Session 15):** Reframe the DeckLink output path as a
+broadcast multiview interface — 8 channels in one window,
+each routing a network source (NDI/OMT/SRT-listen/etc.) to
+a DeckLink output, with per-channel audio source picker +
+input/output audio meters, hardware-accel where possible,
+broadcast-grade reliability (per-channel isolation,
+auto-reconnect, watchdog).
 
-2. **Verify alpha.34 end-to-end once Mac dylib is fixed.**
-   Install on a clean Mac + Windows. Pick a network source.
-   Pick "Local (DeckLink | SDI/HDMI)" destination. Verify
-   SDI output of a real DeckLink card lights up. Proof
-   that alpha.21's DeckLink output direction works on
-   shipped installers.
+This is the largest architectural change since alpha.21
+(the original DeckLink output direction). Multiple alpha
+cycles expected. Plan agent pass strongly recommended
+before implementation. Six suggested phases in the Session
+16 direction section above (design+spike → backend →
+UI → audio meters → HW accel → reliability).
 
-3. **Pre-show checks panel (carryover).** Full-width card
-   with explicit pass/warn/fail rows. Pure projection over
-   existing state.
+**Before the multiview work starts, smaller follow-ups:**
 
-4. **Hardware accel for Windows + DeckLink-out decoding.**
-   Encoder side now ships nvenc via sidecar; decoder side
-   for DeckLink-output path is still libx264/x265 software.
-   Plumb cuvid/qsv/amf for incoming network streams.
+1. **Verify alpha.37 end-to-end on real hardware** (if not
+   already confirmed by end of Session 15). NDI source →
+   DeckLink output → signal on SDI. Should work post-
+   alpha.37; manual probe confirmed.
 
-5. **OMT-out audio for non-raw sources.** alpha.13's video
-   tee is video-only. Needs cross-platform pipe-FD plumbing
-   (pipe:3 on UNIX, named pipes on Windows) OR a dual-
-   FFmpeg-process fallback.
+2. **NSIS pre-install process kill.** Recurring friction
+   during install passes — each upgrade needs manual
+   taskkill. Tauri 2 NSIS hook. ~50 LOC. Ship as alpha.38
+   probably.
 
-6. **Pipe / relay custom audio extension.** Apply the
-   alpha.14 Windows dshow / macOS AVF audio-injection
-   pattern to pipe / RTSP / SRT-listen / RTMP-listen video
-   sources.
+3. **Drop X11/libxcb deps from Mac FFmpeg build.** Session
+   15 Open issue #2. Saves ~2 MB. Easy win.
 
-7. **Carry-overs**: alpha.15-19 features need first-pass
-   Windows verification (monitor window, OMT discovery,
-   audio dropdown contrast, etc.), unified client-list
-   dashboard, stream-protocol-tag fallback, interface picker
-   UX, net-diag auto mode, net-diag W+L builds.
+**Carryovers (parallel-able with multiview work):**
+
+4. **Pre-show checks panel** — Session 12 priority #4.
+   Net-utility dashboard, ~300 LOC.
+
+5. **OMT-out audio for non-raw sources** — cross-platform
+   pipe-FD plumbing.
+
+6. **Pipe / relay custom audio extension** — alpha.14
+   Windows dshow / Mac AVF pattern for pipe / RTSP /
+   SRT-listen / RTMP-listen.
+
+7. **Operator-side testing pass** — alpha.32-37 features
+   need real-hardware verification (UDM form, per-switch
+   pin, Mac DeckLink, multi-GPU encoder picker).
 
 ## v0.2.0 candidate features
 
