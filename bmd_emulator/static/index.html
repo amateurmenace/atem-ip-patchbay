@@ -76,15 +76,12 @@
       <div class="duration" id="duration">00:00:00:00</div>
       <button id="show-intro-btn" type="button" class="show-intro-btn"
               title="Show the intro / About text again">↓ About</button>
-      <button id="open-monitor" type="button" class="monitor-btn"
-              title="Open a small companion window showing live preview + stream stats — position one per running instance like a video-switcher multiview"
-              aria-label="Open Monitor Window">
-        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
-          <rect x="1.5" y="3" width="13" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/>
-          <path d="M5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-        Monitor
-      </button>
+      <!-- alpha.52: Monitor button removed. The single-tile companion
+           window pattern from alpha.16 is superseded by the alpha.40
+           multiview UI + alpha.50 per-tile stats panel — the operator
+           can monitor any source there. Tauri command
+           open_monitor_window stays registered in lib.rs (harmless
+           leftover; nothing surfaces it). -->
       <!-- alpha.50 system health pill in single-view topbar. Click → drawer. -->
       <div id="sys-pill" class="sys-pill-topbar unknown" title="System health — CPU + memory. Click for details.">
         <span class="dot"></span>
