@@ -34,7 +34,7 @@
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use sysinfo::System;
+use sysinfo::{ProcessRefreshKind, System};
 
 #[derive(Clone, Copy, Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -65,6 +65,33 @@ pub struct SystemHealth {
     /// Number of CPU cores. Useful context for the operator
     /// interpreting "system load".
     pub cpu_count: u32,
+    /// Per-core CPU usage. Same order as the OS reports them; UI
+    /// renders a small bar grid in the system drawer (alpha.50). On
+    /// systems with hyperthreading these are LOGICAL cores.
+    pub cpu_per_core: Vec<f32>,
+    /// Running FFmpeg processes (from our sidecar or otherwise).
+    /// Operators want to see which encoders are eating CPU during a
+    /// multiview stream — separates "system is hot because OS" from
+    /// "system is hot because FFmpegs". alpha.50 also lets the
+    /// drawer cross-reference these PIDs against per-tile streams
+    /// in the future, but for now it's just a visibility panel.
+    pub ffmpeg_processes: Vec<FfmpegProcess>,
+    /// Total swap used. High swap with low free RAM is the
+    /// "system is about to thrash" pattern; surfacing it lets the
+    /// operator see paging before the broadcast suffers.
+    pub swap_used_mb: u64,
+    pub swap_total_mb: u64,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct FfmpegProcess {
+    pub pid: u32,
+    pub cpu_percent: f32,
+    pub mem_mb: u64,
+    /// First 40 chars of the cmdline so the operator can tell
+    /// streaming-FFmpeg apart from the OMT-tee-FFmpeg or any other
+    /// they might have running.
+    pub cmd_excerpt: String,
 }
 
 impl Default for SystemHealth {
@@ -78,6 +105,10 @@ impl Default for SystemHealth {
             warning: None,
             updated_at: 0.0,
             cpu_count: 0,
+            cpu_per_core: Vec::new(),
+            ffmpeg_processes: Vec::new(),
+            swap_used_mb: 0,
+            swap_total_mb: 0,
         }
     }
 }
@@ -125,12 +156,79 @@ impl SystemMonitor {
                 tick.tick().await;
                 sys.refresh_cpu_usage();
                 sys.refresh_memory();
+                // alpha.50: also refresh process info so we can list
+                // FFmpeg PIDs + per-process CPU. ProcessRefreshKind
+                // with .with_cpu()/.with_memory() keeps the refresh
+                // scoped to what we need — full process refresh would
+                // be heavier than necessary at 1.5s cadence.
+                sys.refresh_processes_specifics(
+                    ProcessRefreshKind::new().with_cpu().with_memory(),
+                );
 
                 let cpu = global_cpu_avg(&sys);
+                let cpu_per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
                 let mem_used = sys.used_memory();
                 let mem_total = sys.total_memory().max(1);
                 let mem_percent = (mem_used as f64 / mem_total as f64 * 100.0) as f32;
+                let swap_used = sys.used_swap();
+                let swap_total = sys.total_swap();
                 let cpu_count = sys.cpus().len() as u32;
+
+                // alpha.50: collect running FFmpeg processes. Match
+                // by basename containing "ffmpeg" so we catch both
+                // our sidecar and any operator-launched debug ffmpeg.
+                // sysinfo reports per-process CPU as percent-of-one-
+                // core so a fully-loaded 8-core encoder shows ~800%
+                // here — operators expect that convention, matches
+                // Activity Monitor / Task Manager's "process CPU".
+                let mut ffmpeg_processes: Vec<FfmpegProcess> = sys
+                    .processes()
+                    .iter()
+                    .filter(|(_, p)| {
+                        p.name().to_string_lossy().to_lowercase().contains("ffmpeg")
+                    })
+                    .map(|(pid, p)| {
+                        let cmd_vec = p.cmd();
+                        let cmd_str: String = cmd_vec
+                            .iter()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        // Trim to first 80 chars and try to find a
+                        // human-meaningful sub-arg (-format_code,
+                        // destination url, etc.) for the excerpt.
+                        let excerpt = if cmd_str.len() > 80 {
+                            // Look for "decklink", "srt://", "rtmp://" first
+                            for marker in ["-format_code", "srt://", "rtmp://", "decklink"] {
+                                if let Some(pos) = cmd_str.find(marker) {
+                                    let start = pos.saturating_sub(0);
+                                    let end = (start + 80).min(cmd_str.len());
+                                    return FfmpegProcess {
+                                        pid: pid.as_u32(),
+                                        cpu_percent: p.cpu_usage(),
+                                        mem_mb: p.memory() / (1024 * 1024),
+                                        cmd_excerpt: cmd_str[start..end].to_string(),
+                                    };
+                                }
+                            }
+                            format!("{}…", &cmd_str[..80])
+                        } else {
+                            cmd_str
+                        };
+                        FfmpegProcess {
+                            pid: pid.as_u32(),
+                            cpu_percent: p.cpu_usage(),
+                            mem_mb: p.memory() / (1024 * 1024),
+                            cmd_excerpt: excerpt,
+                        }
+                    })
+                    .collect();
+                // Sort by CPU desc so the hottest encoders are first.
+                ffmpeg_processes.sort_by(|a, b| {
+                    b.cpu_percent
+                        .partial_cmp(&a.cpu_percent)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
 
                 let (status, warning) = compute_status(cpu, mem_percent, &mut high_cpu_streak);
 
@@ -148,6 +246,10 @@ impl SystemMonitor {
                     warning,
                     updated_at: now,
                     cpu_count,
+                    cpu_per_core,
+                    ffmpeg_processes,
+                    swap_used_mb: swap_used / (1024 * 1024),
+                    swap_total_mb: swap_total / (1024 * 1024),
                 };
 
                 if let Ok(mut guard) = health_for_task.lock() {

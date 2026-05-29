@@ -2095,6 +2095,42 @@ function bind() {
   // button; now it's the .view-toggle in the topbar (.view-toggle-btn
   // anchor tags) which uses default navigation. Nothing to wire here.
 
+  // alpha.50 — system health pill + drawer. Pill polls /api/system-health
+  // at 2 Hz to color-code itself; clicking opens the slide-out drawer
+  // with per-core CPU, FFmpeg processes, encoder inventory, log tail.
+  // Same drawer component multiview.html uses (see system-drawer.js).
+  const sysPillEl = $('#sys-pill');
+  if (sysPillEl && typeof window.createSystemDrawer === 'function') {
+    window.createSystemDrawer({
+      anchorEl: sysPillEl,
+      getLogUrl: () => '/api/log',
+    });
+    async function pollSystemHealth() {
+      try {
+        const r = await fetch('/api/system-health', { cache: 'no-store' });
+        if (!r.ok) return;
+        const data = await r.json();
+        const status = data.status || 'unknown';
+        sysPillEl.className = 'sys-pill-topbar ' + status;
+        const cpu = Math.round(data.cpu_percent || 0);
+        const memPct = Math.round(data.mem_percent || 0);
+        const lbl = $('#sys-pill-label');
+        if (lbl) lbl.textContent = `CPU ${cpu}% · MEM ${memPct}%`;
+        const tooltip = [
+          `Status: ${status.toUpperCase()}`,
+          `CPU: ${cpu}% (${data.cpu_count || '?'} cores)`,
+          `Memory: ${memPct}% — ${((data.mem_used_mb || 0) / 1024).toFixed(1)} / ${((data.mem_total_mb || 0) / 1024).toFixed(1)} GB`,
+          data.warning || null,
+          '',
+          'Click for full system monitor',
+        ].filter(Boolean).join('\n');
+        sysPillEl.title = tooltip;
+      } catch (e) { /* silent */ }
+    }
+    pollSystemHealth();
+    setInterval(pollSystemHealth, 2000);
+  }
+
   // alpha.42 — Hide intro persistence. localStorage key
   // 'atemPatchbay_heroHidden' (also read by the inline <script> in
   // index.html's <head> to apply the data attribute before paint and

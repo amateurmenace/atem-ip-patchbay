@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ATEM IP Patchbay</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script src="/static/system-drawer.js" defer></script>
   <!-- alpha.42: apply persisted hero-hidden state BEFORE the page
        paints so the operator who hid the hero doesn't see it flash
        on every reload. localStorage read is sync + fast (~0.1ms). -->
@@ -84,6 +85,11 @@
         </svg>
         Monitor
       </button>
+      <!-- alpha.50 system health pill in single-view topbar. Click → drawer. -->
+      <div id="sys-pill" class="sys-pill-topbar unknown" title="System health — CPU + memory. Click for details.">
+        <span class="dot"></span>
+        <span class="label-text" id="sys-pill-label">CPU —</span>
+      </div>
       <button id="open-net-diag" type="button" class="net-diag-btn prominent"
               title="Open the ATEM Net Utility operator dashboard (UDM polling, ATEM reachability, WAN headroom, per-flow stats, pre-show checks)"
               aria-label="Open ATEM Net Utility">

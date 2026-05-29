@@ -25,6 +25,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ATEM IP Patchbay · Multiview</title>
+<script src="/static/system-drawer.js" defer></script>
 <style>
   :root {
     --bg: #0e0f12;
@@ -205,7 +206,9 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    /* Row 1: head | Row 2: stats panel (auto, but display:none when
+       collapsed → takes 0 rows) | Row 3: preview (fills) | Row 4: controls */
+    grid-template-rows: auto auto 1fr auto;
     overflow: hidden;
     min-height: 0;
   }
@@ -406,6 +409,69 @@
     font-size: 9px;
     color: var(--text-dim);
     text-transform: uppercase;
+  }
+
+  /* alpha.50 — expandable per-tile stats panel. Click ▼ on tile head
+     to reveal a grid of all StreamStats fields under the head. */
+  .tile-stats-panel {
+    display: none;
+    background: rgba(15,19,28,0.92);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px 12px;
+    font-size: 10px;
+  }
+  .tile-stats-panel.show { display: grid; }
+  .stat-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .stat-cell .stat-lbl {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .stat-cell .stat-val {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .stat-cell.warn .stat-val { color: var(--warn); }
+  .stat-cell.bad .stat-val { color: var(--bad); }
+  .stat-cell.good .stat-val { color: var(--good); }
+  .stat-cell.wide {
+    grid-column: span 4;
+  }
+  .stat-cell.wide .stat-val {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--bad);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    word-break: break-word;
+    white-space: normal;
+  }
+  .tile-stats-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 3px;
+    padding: 2px 7px;
+    font-size: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color 0.15s ease;
+    line-height: 1;
+  }
+  .tile-stats-toggle:hover { color: var(--text); }
+  .tile-stats-toggle.expanded {
+    background: rgba(102,211,250,0.15);
+    color: var(--accent);
+    border-color: rgba(102,211,250,0.4);
   }
 
   /* alpha.45: brighter, taller controls strip so the operator can't
@@ -618,14 +684,55 @@ async function fetchJson(url, opts) {
 
 function buildTile(idx) {
   const tile = el('div', { class: 'tile', id: `tile-${idx}`, dataset: { idx: String(idx) } },
-    // Header — idx + dest summary + status pill + Start/Stop
+    // Header — idx + dest summary + status pill + Stats toggle + Start/Stop
     el('div', { class: 'tile-head' },
       el('span', { class: 'tile-idx' }, idx + 1),
       el('span', { class: 'tile-name', id: `tile-name-${idx}` }, '— configure tile —'),
       el('span', { class: 'pill idle', id: `tile-pill-${idx}` }, 'Idle'),
       el('div', { class: 'tile-actions' },
+        el('button', { class: 'tile-stats-toggle', id: `tile-stats-toggle-${idx}`, onclick: () => toggleStatsPanel(idx), title: 'Show detailed stream stats (bitrate, fps, frames, reconnects)' }, 'Stats ▾'),
         el('button', { class: 'primary', id: `tile-start-${idx}`, onclick: () => onStart(idx), title: 'Start streaming' }, '▶'),
         el('button', { class: 'danger', id: `tile-stop-${idx}`, onclick: () => onStop(idx), title: 'Stop streaming' }, '◼')
+      )
+    ),
+    // alpha.50 expandable stats panel. Hidden by default; click "Stats ▾"
+    // in the head to reveal a grid of all StreamStats fields.
+    el('div', { class: 'tile-stats-panel', id: `tile-stats-${idx}` },
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-status-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Status'),
+        el('div', { class: 'stat-val', id: `tile-stat-status-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-bitrate-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Bitrate'),
+        el('div', { class: 'stat-val', id: `tile-stat-bitrate-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-fps-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'FPS'),
+        el('div', { class: 'stat-val', id: `tile-stat-fps-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-speed-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Speed'),
+        el('div', { class: 'stat-val', id: `tile-stat-speed-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell' },
+        el('div', { class: 'stat-lbl' }, 'Frames sent'),
+        el('div', { class: 'stat-val', id: `tile-stat-frames-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-dropped-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Dropped'),
+        el('div', { class: 'stat-val', id: `tile-stat-dropped-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell' },
+        el('div', { class: 'stat-lbl' }, 'Duration'),
+        el('div', { class: 'stat-val', id: `tile-stat-dur-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-recon-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Reconnects'),
+        el('div', { class: 'stat-val', id: `tile-stat-recon-${idx}` }, '0')
+      ),
+      el('div', { class: 'stat-cell wide', id: `tile-stat-cell-err-${idx}`, style: 'display:none' },
+        el('div', { class: 'stat-lbl' }, 'Last error'),
+        el('div', { class: 'stat-val', id: `tile-stat-err-${idx}` }, '')
       )
     ),
     // Preview — fills remaining vertical space, JPEG inserted by
@@ -891,6 +998,83 @@ function renderDestFields(idx) {
     keyEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') keyEl.blur(); });
     container.appendChild(urlEl);
     container.appendChild(keyEl);
+  }
+}
+
+function toggleStatsPanel(idx) {
+  const panel = document.getElementById(`tile-stats-${idx}`);
+  const toggle = document.getElementById(`tile-stats-toggle-${idx}`);
+  if (!panel || !toggle) return;
+  const open = !panel.classList.contains('show');
+  panel.classList.toggle('show', open);
+  toggle.classList.toggle('expanded', open);
+  toggle.textContent = open ? 'Stats ▴' : 'Stats ▾';
+  // Localstorage persist per-tile preference so reopening the
+  // multiview keeps panels the operator likes expanded.
+  try { localStorage.setItem(`atemMv_statsPanel_${idx}`, open ? '1' : '0'); } catch (_e) {}
+}
+
+function applyStatsPanelPersistedState() {
+  for (const idx of TILES) {
+    try {
+      if (localStorage.getItem(`atemMv_statsPanel_${idx}`) === '1') {
+        toggleStatsPanel(idx);
+      }
+    } catch (_e) {}
+  }
+}
+
+function renderStatsPanel(idx, snap) {
+  const panel = document.getElementById(`tile-stats-${idx}`);
+  if (!panel || !panel.classList.contains('show')) return; // skip when collapsed
+  const stats = snap?.stats || {};
+  const set = (id, val, klass) => {
+    const e = document.getElementById(`tile-stat-${id}-${idx}`);
+    if (e) e.textContent = val;
+    if (klass) {
+      const cell = document.getElementById(`tile-stat-cell-${id}-${idx}`);
+      if (cell) {
+        cell.classList.remove('good', 'warn', 'bad');
+        cell.classList.add(klass);
+      }
+    }
+  };
+  const status = stats.status || 'Idle';
+  const sLow = status.toLowerCase();
+  set('status', status, sLow === 'streaming' ? 'good' : sLow === 'reconnecting' ? 'warn' : sLow === 'interrupted' ? 'bad' : '');
+  const bitrate = stats.bitrate || 0;
+  set('bitrate', bitrate ? `${(bitrate / 1000).toFixed(2)} Mbps` : '—');
+  const fps = stats.fps || 0;
+  const targetFps = snap?.video_mode ? parseFloat(snap.video_mode.match(/p(\d+\.?\d*)/i)?.[1] || '0') : 0;
+  let fpsKlass = '';
+  if (fps > 0 && targetFps > 0) {
+    const dev = Math.abs(fps - targetFps) / targetFps;
+    fpsKlass = dev < 0.05 ? 'good' : dev < 0.15 ? 'warn' : 'bad';
+  }
+  set('fps', fps ? fps.toFixed(2) : '—', fpsKlass);
+  const speed = stats.speed || 0;
+  let speedKlass = '';
+  if (speed > 0) {
+    const dev = Math.abs(speed - 1.0);
+    speedKlass = dev < 0.05 ? 'good' : dev < 0.15 ? 'warn' : 'bad';
+  }
+  set('speed', speed ? `${speed.toFixed(2)}x` : '—', speedKlass);
+  set('frames', (stats.frames_sent || 0).toLocaleString());
+  const drops = stats.frames_dropped || 0;
+  set('dropped', drops.toLocaleString(), drops === 0 ? 'good' : drops < 100 ? 'warn' : 'bad');
+  set('dur', stats.duration || '00:00:00:00');
+  const totalRecon = stats.total_reconnects_this_session || 0;
+  set('recon', totalRecon.toString(), totalRecon === 0 ? 'good' : totalRecon < 5 ? 'warn' : 'bad');
+  // Last error - show wide row if present
+  const errCell = document.getElementById(`tile-stat-cell-err-${idx}`);
+  if (errCell) {
+    if (stats.error) {
+      errCell.style.display = '';
+      const errEl = document.getElementById(`tile-stat-err-${idx}`);
+      if (errEl) errEl.textContent = String(stats.error).slice(0, 200);
+    } else {
+      errCell.style.display = 'none';
+    }
   }
 }
 
@@ -1387,6 +1571,10 @@ function renderTile(idx, data) {
   const errEl = document.getElementById(`tile-err-${idx}`);
   errEl.textContent = stats.error ? String(stats.error).slice(0, 60) : '';
 
+  // alpha.50: populate the expandable stats panel when it's open.
+  // No-op cost when collapsed (checked inside renderStatsPanel).
+  renderStatsPanel(idx, snap);
+
   // Reflect server state in dropdowns. setAudioDropdown is safe to
   // call every poll; the dest-type dropdown is here too so a state
   // change from another tab is reflected.
@@ -1543,6 +1731,16 @@ async function bootstrap() {
   pollSystemHealth();
   setInterval(pollSystemHealth, SYS_HEALTH_INTERVAL_MS);
 
+  // alpha.50: wire the system pill to open the shared drawer
+  // (system-drawer.js). Same component the single-view uses.
+  const sysPillEl = document.getElementById('sys-pill');
+  if (sysPillEl && typeof window.createSystemDrawer === 'function') {
+    window.createSystemDrawer({
+      anchorEl: sysPillEl,
+      getLogUrl: () => '/api/i/0/log',
+    });
+  }
+
   // alpha.45: audio meters per tile. 4Hz polls of /api/i/N/audio-levels
   // (alpha.31 endpoint). Graceful 404 fallback on older backends keeps
   // meters in a muted "idle" state rather than erroring. The meters
@@ -1553,6 +1751,10 @@ async function bootstrap() {
     updateMeter(idx, -120, -120, -120, -120, true); // initial paint
   }
   setInterval(pollAudioLevels, 250); // 4Hz
+
+  // alpha.50: restore per-tile stats-panel expand preference from
+  // localStorage so the operator's chosen layout survives reloads.
+  applyStatsPanelPersistedState();
 
   setInterval(pollAllTiles, POLL_INTERVAL_MS);
   setInterval(refreshPreviews, PREVIEW_INTERVAL_MS);
