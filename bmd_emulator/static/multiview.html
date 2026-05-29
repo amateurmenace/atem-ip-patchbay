@@ -314,17 +314,91 @@
   .preview-overlay {
     position: absolute;
     left: 0; right: 0; bottom: 0;
-    padding: 3px 6px;
-    background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 100%);
-    font-size: 9px;
-    color: rgba(255,255,255,0.85);
+    padding: 4px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%);
+    font-size: 10px;
+    color: rgba(255,255,255,0.92);
     display: flex;
     justify-content: space-between;
     gap: 6px;
     pointer-events: none;
+    font-variant-numeric: tabular-nums;
   }
   .preview-overlay .err {
     color: var(--bad);
+  }
+  /* VU meters — top-right corner of the preview. Two thin vertical
+     bars (L, R) with peak hold. Canvas-rendered at 4Hz from
+     /api/i/N/audio-levels. */
+  .tile-meters {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    gap: 3px;
+    padding: 4px;
+    background: rgba(0,0,0,0.45);
+    border-radius: 4px;
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+  }
+  .tile-meters canvas {
+    display: block;
+    width: 8px;
+    height: 56px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.05);
+  }
+  .tile-meters .meter-readout {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 3px;
+    font-size: 9px;
+    color: rgba(255,255,255,0.7);
+    background: rgba(0,0,0,0.5);
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom-audio sub-row: appears when audio_mode == 'custom'.
+     Compact: device dropdown + L/R Dante channel pickers. */
+  .audio-custom-row {
+    display: none;
+    grid-template-columns: 38px 1fr;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 0;
+  }
+  .audio-custom-row.show { display: grid; }
+  .audio-custom-row .control-fields {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+  .audio-custom-row input[type=number] {
+    flex: 0 0 38px;
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 5px;
+    font-size: 11px;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+  .audio-custom-row .channel-pair {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .audio-custom-row .channel-pair span {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
   }
 
   /* Compact 2-row controls strip below the preview. No scrollbars —
@@ -546,15 +620,24 @@ function buildTile(idx) {
       )
     ),
     // Preview — fills remaining vertical space, JPEG inserted by
-    // refreshPreviews when status is Streaming.
+    // refreshPreviews when status is Streaming. Overlays:
+    //   - top-right VU meters (L/R) polled at 4Hz
+    //   - bottom strip with source + bitrate + fps + frames
     el('div', { class: 'preview', id: `tile-preview-${idx}` },
       el('div', { class: 'preview-placeholder' }, 'no signal'),
+      el('div', { class: 'tile-meters', id: `tile-meters-${idx}` },
+        el('canvas', { id: `tile-meter-l-${idx}`, width: 8, height: 56, title: 'Left channel level' }),
+        el('canvas', { id: `tile-meter-r-${idx}`, width: 8, height: 56, title: 'Right channel level' }),
+        el('span', { class: 'meter-readout', id: `tile-meter-readout-${idx}` }, '—')
+      ),
       el('div', { class: 'preview-overlay' },
-        el('span', { id: `tile-info-${idx}` }, ''),
+        el('span', { id: `tile-info-${idx}`, title: '' }, ''),
         el('span', { id: `tile-err-${idx}`, class: 'err' }, '')
       )
     ),
     // Compact controls — 2 rows: source/audio and dest type/config.
+    // Audio Custom mode unfolds a sub-row below row 1 with the
+    // device picker + L/R channel pickers (Dante VSC routing).
     el('div', { class: 'tile-controls' },
       el('div', { class: 'control-row' },
         el('label', { class: 'control-label' }, 'SRC'),
@@ -562,9 +645,28 @@ function buildTile(idx) {
           el('select', { id: `tile-src-${idx}`, class: 'src-sel', onchange: (e) => onSourceChange(idx, e.target.value) },
             el('option', { value: '__none__' }, '— pick source —')
           ),
-          el('select', { id: `tile-audio-${idx}`, class: 'audio-sel', onchange: (e) => onAudioChange(idx, e.target.value) },
+          el('select', { id: `tile-audio-${idx}`, class: 'audio-sel', onchange: (e) => onAudioChange(idx, e.target.value), title: 'Audio mode — Auto uses the source\'s own audio, Custom routes a specific AVF/dshow device, Silent emits no audio' },
             el('option', { value: 'auto' }, 'Auto audio'),
+            el('option', { value: 'custom' }, 'Custom…'),
             el('option', { value: 'silent' }, 'Silent')
+          )
+        )
+      ),
+      // Custom-audio sub-row — appears when audio_mode == 'custom'.
+      // Backend's apply_settings honors av_audio_name + L/R pan
+      // (Session 4 alpha.4 Dante routing). Hidden by .audio-custom-row
+      // CSS unless `.show` is added.
+      el('div', { class: 'audio-custom-row', id: `tile-audio-custom-${idx}` },
+        el('label', { class: 'control-label' }, 'AUD'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-audiodev-${idx}`, onchange: (e) => onAudioDeviceChange(idx, e.target.value), title: 'Audio capture device (Dante VSC, USB mic, etc.)' },
+            el('option', { value: '__none__' }, '— pick audio device —')
+          ),
+          el('div', { class: 'channel-pair', title: 'L/R Dante channel numbers (1-indexed) — pan filter routes these source channels to the stereo output' },
+            el('span', {}, 'L'),
+            el('input', { type: 'number', id: `tile-pan-l-${idx}`, min: 1, max: 64, value: 1, onchange: (e) => onPanChange(idx, 'l', e.target.value) }),
+            el('span', {}, 'R'),
+            el('input', { type: 'number', id: `tile-pan-r-${idx}`, min: 1, max: 64, value: 2, onchange: (e) => onPanChange(idx, 'r', e.target.value) })
           )
         )
       ),
@@ -584,6 +686,142 @@ function buildTile(idx) {
     )
   );
   return tile;
+}
+
+// -------------------------------------------------------------------
+// Audio meter rendering (VU bars per tile)
+// -------------------------------------------------------------------
+
+// Per-tile meter state: peak-hold value + decay timestamp for both
+// channels. Peak hold = 1.5s decay matching broadcast convention.
+const meterState = {};
+
+function dbToHeight(db) {
+  // Map dB to 0-1 fill where -60 dB = 0 (silent), 0 dB = 1 (full).
+  // Anything below -60 is treated as silence.
+  if (!Number.isFinite(db) || db < -60) return 0;
+  if (db >= 0) return 1;
+  return (db + 60) / 60;
+}
+
+function drawMeter(canvas, rmsDb, peakDb) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  // Background scale ticks every 6 dB (for orientation).
+  const rmsHeight = dbToHeight(rmsDb) * h;
+  // Gradient — fills from bottom up. Top portion red (>=−6 dB),
+  // middle yellow (−18 to −6), bottom green (−60 to −18).
+  const grad = ctx.createLinearGradient(0, h, 0, 0);
+  grad.addColorStop(0, '#5fd06b');
+  grad.addColorStop(0.7, '#5fd06b');
+  grad.addColorStop(0.7, '#f0b84f');
+  grad.addColorStop(0.9, '#f0b84f');
+  grad.addColorStop(0.9, '#e85c5c');
+  grad.addColorStop(1.0, '#e85c5c');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, h - rmsHeight, w, rmsHeight);
+  // Peak hold marker (thin white line)
+  if (Number.isFinite(peakDb)) {
+    const peakY = h - dbToHeight(peakDb) * h;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(0, Math.max(0, peakY - 1), w, 2);
+  }
+}
+
+function updateMeter(idx, rmsL, rmsR, peakL, peakR, idle) {
+  const state = (meterState[idx] = meterState[idx] || {
+    holdL: -120, holdR: -120, holdLAt: 0, holdRAt: 0,
+  });
+  const now = performance.now();
+  // 1.5s peak hold with linear decay. New peak resets the hold; old
+  // peak decays smoothly toward the current RMS.
+  if (peakL > state.holdL) { state.holdL = peakL; state.holdLAt = now; }
+  else {
+    const dec = (now - state.holdLAt) / 1500;
+    if (dec > 0) state.holdL = Math.max(rmsL, state.holdL - dec * 60);
+  }
+  if (peakR > state.holdR) { state.holdR = peakR; state.holdRAt = now; }
+  else {
+    const dec = (now - state.holdRAt) / 1500;
+    if (dec > 0) state.holdR = Math.max(rmsR, state.holdR - dec * 60);
+  }
+  // Idle → fade to silence so meters don't lie when no audio is flowing.
+  const effRmsL = idle ? -120 : rmsL;
+  const effRmsR = idle ? -120 : rmsR;
+  drawMeter(document.getElementById(`tile-meter-l-${idx}`), effRmsL, idle ? -120 : state.holdL);
+  drawMeter(document.getElementById(`tile-meter-r-${idx}`), effRmsR, idle ? -120 : state.holdR);
+  const readout = document.getElementById(`tile-meter-readout-${idx}`);
+  if (readout) {
+    if (idle) readout.textContent = '—';
+    else {
+      const peak = Math.max(rmsL, rmsR);
+      readout.textContent = Number.isFinite(peak) ? `${peak.toFixed(0)} dB` : '—';
+    }
+  }
+}
+
+async function pollAudioLevels() {
+  // Fan out per-tile fetches. /api/i/N/audio-levels was added in
+  // alpha.31 — on older backends it 404s, which we treat as "idle"
+  // so the meters degrade gracefully (gray) instead of erroring.
+  await Promise.all(TILES.map(async (idx) => {
+    try {
+      const data = await fetchJson(`/api/i/${idx}/audio-levels`);
+      const idleSecs = Math.max(0, (data.server_time || 0) - (data.updated_at || 0));
+      const idle = !data.meters_enabled || idleSecs > 0.7;
+      updateMeter(idx, data.rms_l, data.rms_r, data.peak_l, data.peak_r, idle);
+    } catch (e) {
+      // Backend doesn't have the endpoint — idle the meter
+      updateMeter(idx, -120, -120, -120, -120, true);
+    }
+  }));
+}
+
+// -------------------------------------------------------------------
+// Custom-audio handlers
+// -------------------------------------------------------------------
+
+function populateAudioDeviceDropdown(idx) {
+  const sel = document.getElementById(`tile-audiodev-${idx}`);
+  if (!sel) return;
+  const cur = tileState[idx]?.snapshot?.av_audio_name;
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '__none__' }, '— pick audio device —'));
+  for (const d of (knownDevices.audio || [])) {
+    const opt = el('option', { value: d.name }, d.name);
+    if (cur === d.name) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function toggleAudioCustomRow(idx, show) {
+  const row = document.getElementById(`tile-audio-custom-${idx}`);
+  if (!row) return;
+  if (show) {
+    row.classList.add('show');
+    populateAudioDeviceDropdown(idx);
+    const snap = tileState[idx]?.snapshot;
+    const lEl = document.getElementById(`tile-pan-l-${idx}`);
+    const rEl = document.getElementById(`tile-pan-r-${idx}`);
+    if (lEl && snap?.audio_pan_l) lEl.value = snap.audio_pan_l;
+    if (rEl && snap?.audio_pan_r) rEl.value = snap.audio_pan_r;
+  } else {
+    row.classList.remove('show');
+  }
+}
+
+async function onAudioDeviceChange(idx, name) {
+  if (name === '__none__') return;
+  await applySettings(idx, { audio_mode: 'custom', av_audio_name: name });
+}
+
+async function onPanChange(idx, which, value) {
+  const v = Math.max(1, Math.min(64, parseInt(value, 10) || 1));
+  const payload = which === 'l' ? { audio_pan_l: v } : { audio_pan_r: v };
+  await applySettings(idx, payload);
 }
 
 function renderDestFields(idx) {
@@ -830,6 +1068,9 @@ function setAudioDropdown(idx) {
   if (!sel) return;
   const cur = tileState[idx]?.snapshot?.audio_mode || 'auto';
   for (const opt of sel.options) opt.selected = (opt.value === cur);
+  // Show the Custom-audio sub-row (device picker + L/R channel inputs)
+  // when the operator picked Custom mode. Hidden for Auto/Silent.
+  toggleAudioCustomRow(idx, cur === 'custom');
 }
 
 // -------------------------------------------------------------------
@@ -1095,23 +1336,47 @@ function renderTile(idx, data) {
   pill.className = 'pill ' + klass;
   pill.textContent = statusPillText(snap);
 
-  // Preview overlay — source label on left, error text on right.
+  // Preview overlay — source + bitrate/fps/frames on left, error on right.
+  // Tooltip on hover shows extended stats: duration, frames dropped,
+  // reconnect history, speed, codec. Broadcast operators rely on these
+  // for go/no-go decisions; surface them without cluttering the tile.
   const info = document.getElementById(`tile-info-${idx}`);
-  const bitrate = snap?.stats?.bitrate || 0;
-  const fps = snap?.stats?.fps || 0;
+  const stats = snap?.stats || {};
+  const bitrate = stats.bitrate || 0;
+  const fps = stats.fps || 0;
+  const framesSent = stats.frames_sent || 0;
+  const framesDropped = stats.frames_dropped || 0;
+  const duration = stats.duration || '00:00:00:00';
+  const speed = stats.speed || 0;
+  const totalReconnects = stats.total_reconnects_this_session || 0;
   const srcSummary = describeSource(snap);
+  const fmtFrames = (n) => n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
   if (klass === 'streaming') {
-    info.textContent = `${srcSummary} · ${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps`;
+    info.textContent = `${srcSummary} · ${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps · ${fmtFrames(framesSent)} fr`;
   } else if (klass === 'connecting') {
     info.textContent = `${srcSummary} · connecting…`;
   } else if (klass === 'reconnecting') {
-    info.textContent = `${srcSummary} · attempt ${snap.stats.reconnect_attempt}/${snap?.auto_reconnect_max_attempts || 12}`;
+    info.textContent = `${srcSummary} · attempt ${stats.reconnect_attempt || 0}/${snap?.auto_reconnect_max_attempts || 12} · ${stats.reconnect_next_secs || 0}s`;
   } else {
     info.textContent = srcSummary;
   }
+  // Extended-stats tooltip on the info line.
+  const tooltipLines = [
+    `Status: ${stats.status || 'Idle'}`,
+    `Bitrate: ${(bitrate / 1000).toFixed(2)} Mbps`,
+    `FPS: ${fps.toFixed(2)}`,
+    `Frames sent: ${framesSent.toLocaleString()}`,
+    `Frames dropped: ${framesDropped.toLocaleString()}`,
+    `Duration: ${duration}`,
+    `Speed: ${speed.toFixed(2)}x`,
+  ];
+  if (totalReconnects > 0) tooltipLines.push(`Reconnects this session: ${totalReconnects}`);
+  if (snap?.video_codec) tooltipLines.push(`Codec: ${snap.video_codec}`);
+  if (snap?.video_encoder) tooltipLines.push(`Encoder: ${snap.video_encoder}`);
+  info.title = tooltipLines.join('\n');
 
   const errEl = document.getElementById(`tile-err-${idx}`);
-  errEl.textContent = snap?.stats?.error ? String(snap.stats.error).slice(0, 60) : '';
+  errEl.textContent = stats.error ? String(stats.error).slice(0, 60) : '';
 
   // Reflect server state in dropdowns. setAudioDropdown is safe to
   // call every poll; the dest-type dropdown is here too so a state
@@ -1139,6 +1404,9 @@ function renderTile(idx, data) {
   const controlIds = [
     `tile-src-${idx}`,
     `tile-audio-${idx}`,
+    `tile-audiodev-${idx}`,
+    `tile-pan-l-${idx}`,
+    `tile-pan-r-${idx}`,
     `tile-desttype-${idx}`,
     `tile-dl-${idx}`,
     `tile-mode-${idx}`,
@@ -1265,6 +1533,17 @@ async function bootstrap() {
   // for the full interval before the first real reading.
   pollSystemHealth();
   setInterval(pollSystemHealth, SYS_HEALTH_INTERVAL_MS);
+
+  // alpha.45: audio meters per tile. 4Hz polls of /api/i/N/audio-levels
+  // (alpha.31 endpoint). Graceful 404 fallback on older backends keeps
+  // meters in a muted "idle" state rather than erroring. The meters
+  // are useful even when not streaming — operators can verify the
+  // chosen audio device is producing levels via the Audio Mixer's
+  // built-in monitor path.
+  for (const idx of TILES) {
+    updateMeter(idx, -120, -120, -120, -120, true); // initial paint
+  }
+  setInterval(pollAudioLevels, 250); // 4Hz
 
   setInterval(pollAllTiles, POLL_INTERVAL_MS);
   setInterval(refreshPreviews, PREVIEW_INTERVAL_MS);
