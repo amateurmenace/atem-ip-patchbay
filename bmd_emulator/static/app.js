@@ -2114,19 +2114,13 @@ function bind() {
     setInterval(pollSystemHealth, 2000);
   }
 
-  // alpha.42/53 — Hide intro persistence. localStorage key
-  // 'atemPatchbay_heroHidden' (also read by the inline <script> in
-  // index.html's <head> to apply the data attribute before paint and
-  // avoid a flash). The topbar #intro-toggle-btn is always visible
-  // and flips its own text + title between Hide/Show based on the
-  // current state. The in-hero × button stays as a quick dismiss
-  // when the operator is reading the hero.
+  // alpha.55 — Hide About is session-only (no localStorage persist).
+  // App always launches with the About section visible; operator can
+  // hide it for the current session via the topbar toggle or the
+  // in-hero × button, but next reload/relaunch starts visible again.
+  // Inline <head> script clears any old persisted flag.
   function setHeroHidden(hidden) {
     document.documentElement.dataset.heroHidden = hidden ? 'true' : 'false';
-    try {
-      if (hidden) localStorage.setItem('atemPatchbay_heroHidden', '1');
-      else localStorage.removeItem('atemPatchbay_heroHidden');
-    } catch (e) { /* private mode etc */ }
     // Re-sync the toggle button's label so the operator sees the
     // action that will happen on next click.
     syncIntroToggleLabel();
@@ -2134,8 +2128,8 @@ function bind() {
   function syncIntroToggleLabel() {
     if (!els.introToggleBtn) return;
     const hidden = document.documentElement.dataset.heroHidden === 'true';
-    els.introToggleBtn.textContent = hidden ? '▴ Show intro' : '▼ Hide intro';
-    els.introToggleBtn.title = hidden ? 'Show the intro / About text' : 'Hide the intro section';
+    els.introToggleBtn.textContent = hidden ? '▴ Show about' : '▼ Hide about';
+    els.introToggleBtn.title = hidden ? 'Show the About section' : 'Hide the About section';
   }
   if (els.heroHideBtn) {
     els.heroHideBtn.addEventListener('click', () => setHeroHidden(true));
