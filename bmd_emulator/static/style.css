@@ -2636,3 +2636,43 @@ pre {
 html[data-hero-hidden="true"] .show-intro-btn { display: inline-flex; align-items: center; gap: 4px; }
 html[data-hero-hidden="true"] .hero { display: none; }
 
+/* alpha.48 — VU meter overlay on the single-view preview frame.
+   Mirrors the multiview tile pattern: thin vertical canvases top-right
+   with a dB readout below. pollAudioLevels in app.js renders to the
+   same data as the existing Audio Mixer card canvases, so there's no
+   double poll — just an additional render target. */
+.preview-meters {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 3px;
+  padding: 5px;
+  background: rgba(0,0,0,0.55);
+  border-radius: 4px;
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+  z-index: 4;
+}
+.preview-meters canvas {
+  display: block;
+  width: 9px;
+  height: 78px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.05);
+}
+.preview-meter-readout {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  font-size: 10px;
+  color: rgba(255,255,255,0.78);
+  background: rgba(0,0,0,0.55);
+  padding: 2px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+

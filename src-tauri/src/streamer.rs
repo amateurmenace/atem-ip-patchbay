@@ -2043,9 +2043,19 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
     // handle_log_line. length=0.25 gives 4Hz updates which matches
     // the UI's polling cadence — bumping faster would generate
     // stderr spam without UI benefit. direct=1 disables ametadata's
-    // internal buffering so the lines arrive promptly. Skip when
-    // the destination is DeckLink (raw output, no encoder pipeline).
-    if snap.meters_enabled && !snap.is_decklink() {
+    // internal buffering so the lines arrive promptly.
+    //
+    // alpha.48: dropped the original `!is_decklink()` gate. The old
+    // logic assumed astats was tied to the encoder pipeline ("raw
+    // output, no encoder pipeline" comment) — but astats is a FILTER,
+    // not an encoder concern. The audio chain runs filters → output
+    // regardless of whether the output is libx264-encoded or raw
+    // PCM to DeckLink. Operator confirmed NDI → DeckLink audio works
+    // end-to-end via the alpha.42 TCP bridge; gating off the meters
+    // here meant the multiview VU bars stayed muted-gray even when
+    // real audio was flowing, which read as "meters are broken"
+    // (and triggered the alpha.48 bug report).
+    if snap.meters_enabled {
         chain.push("astats=metadata=1:reset=1:length=0.25".into());
         chain.push("ametadata=mode=print:direct=1".into());
     }
