@@ -151,7 +151,20 @@ impl AudioBridge {
     /// present the video (operator-confirmed: NDI→ATEM was black with the
     /// bridge; video appeared the instant audio was set to Silent). So
     /// callers pass `false` for SRT/RTMP (audio PTS from sample count,
-    /// 0-based, aligned with the video) and `true` only for DeckLink.
+    /// 0-based, aligned with the video) and -- as of alpha.60 -- `true`
+    /// only for DeckLink.
+    ///
+    /// alpha.64: that DeckLink `true` turned out to be wrong too. The same
+    /// mismatch (wallclock audio vs 0-based frame-counted video) that
+    /// blacked out the ATEM instead THROTTLES the decklink muxer -- the
+    /// audio races ahead, the muxer stalls, and video is starved to
+    /// ~2.4fps (Session 19 hardware test; reproduced standalone: raw audio
+    /// + wallclock = 2 frames in 322s, no wallclock = 360 frames in 12s).
+    /// The DeckLink drift it was meant to fix is only ~2-3 samples/sec
+    /// (~50ppm @ 48kHz), which build_audio_filter's aresample=async=1000
+    /// absorbs on its own. So EVERY caller now passes `false`; the param is
+    /// retained for documentation and in case a future codec/destination
+    /// genuinely needs wallclock input timing.
     pub fn ffmpeg_input_args(&self, use_wallclock: bool) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         if use_wallclock {
