@@ -187,17 +187,24 @@
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     grid-template-rows: repeat(2, 1fr);
     gap: 8px;
     padding: 8px;
     height: calc(100vh - 43px);
   }
+  /* Medium widths: 2 columns x 3 rows keeps the pickers usable. */
+  @media (max-width: 1200px) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+    }
+  }
   /* Below 800px width, stack vertically so the controls still fit. */
   @media (max-width: 800px) {
     .grid {
       grid-template-columns: 1fr;
-      grid-template-rows: repeat(4, 1fr);
+      grid-template-rows: repeat(6, 1fr);
     }
   }
 
@@ -627,7 +634,7 @@
 <script>
 "use strict";
 
-const TILE_COUNT = 4;
+const TILE_COUNT = 6;
 const TILES = Array.from({ length: TILE_COUNT }, (_, i) => i);
 const POLL_INTERVAL_MS = 1000;
 const PREVIEW_INTERVAL_MS = 500;

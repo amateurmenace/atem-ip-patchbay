@@ -28,23 +28,30 @@ use std::sync::Arc;
 
 /// Number of tiles in this Tauri process. Originally 1 (alpha.16);
 /// bumped to 8 in alpha.40 for the broadcast-multiview rework;
-/// dropped to 4 in alpha.41 after a UX + reliability review.
+/// dropped to 4 in alpha.41 after a UX + reliability review; raised
+/// to 6 in alpha.62 once the Phase A spike validated 6 concurrent
+/// DeckLink outputs on the operator's rig (the broadcast goal:
+/// 6 NDI sources → 6 DeckLink SDI outputs).
 ///
-/// Why 4 not 8: a 2x2 grid at 1600x900 gives each tile ~750x420 —
-/// comfortable controls + a big preview. 4x2 at 8 tiles squeezes
-/// each to ~400x450 with cramped pickers. Decklink-driver concurrency
-/// is also well-understood at 4 (matches typical multi-output decoder
-/// appliance scenarios); 8 was the unverified bet the Phase A spike
-/// was originally meant to validate. Operators who need more channels
-/// can launch a second instance via the existing `--instance-name`
-/// CLI flag (Session 11 alpha.16 pattern). Bumping 4→8 later is
-/// trivial; shrinking 8→4 after operators rely on the slots is not.
+/// Why 6: it's the operator's stated channel count, and the Phase A
+/// `tools/decklink-spike` confirmed 6 simultaneous `decklink_enc`
+/// FFmpeg outputs hold for a full 180s with zero stalls/drops on the
+/// real hardware — single-process Option A holds. A 3x2 grid gives
+/// each tile a comfortable ~470x500 at the rig's resolution. (The one
+/// spike anomaly was an FFmpeg access-violation when *closing* a
+/// real-SDI DeckLink output — a teardown-only crash that recovers on
+/// the next Start; tracked separately, not a per-tile-count concern.)
+/// Operators who need still more channels can launch a second instance
+/// via the existing `--instance-name` flag (Session 11 alpha.16).
 ///
 /// Per-tile resource footprint: ~one EncoderState + one Streamer +
 /// one Preview struct (a few KB each) when idle. At full saturation:
-/// 4 FFmpeg children + 4 NDI/OMT receivers + 4 watchdogs. ~800 MB-
-/// 1 GB RSS at 1080p59.94 across 4 tiles on the operator's test rig.
-pub const TILE_COUNT: usize = 4;
+/// 6 FFmpeg children + 6 NDI/OMT receivers + 6 watchdogs. For the
+/// NDI→DeckLink path (raw frames in, wrapped_avframe out — no encode)
+/// CPU stays light; the real ceilings are NDI receive bandwidth (NIC)
+/// and memory bandwidth. Expect ~1.2-1.6 GB RSS at 1080p across 6
+/// tiles, extrapolating the ~800 MB-1 GB measured across 4.
+pub const TILE_COUNT: usize = 6;
 
 /// One tile slot — a complete self-contained pipeline. Every field
 /// is Arc'd so axum handlers can grab them by reference without
