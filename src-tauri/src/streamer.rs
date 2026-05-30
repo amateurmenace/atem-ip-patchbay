@@ -718,6 +718,19 @@ impl Streamer {
         // capture.stop() joins the receiver thread, and joining while
         // holding `inner` would freeze every future stop()/recovery call if
         // a capture thread were back-pressured (the Dante-on-NDI hang).
+        //
+        // alpha.63: a DeckLink destination is the exception. FFmpeg's
+        // graceful EOF teardown crashes there — 0xC0000005 (access
+        // violation) in the decklink muxer's av_write_trailer /
+        // DisableVideoOutput on real-SDI outputs (codec-independent:
+        // wrapped_avframe AND v210 both crash; the NDI Machine virtual
+        // outputs close clean). A DeckLink output is LOCAL hardware with
+        // no network session to close cleanly — unlike SRT→ATEM where
+        // the graceful close is load-bearing to avoid the per-key
+        // receiver lockout — so we force-kill FFmpeg below before
+        // stdin-EOF can drive the crashing trailer. The device releases
+        // on process death and re-claims on the next Start (verified).
+        let is_decklink = self.state.snapshot().is_decklink();
         let (ndi_cap, omt_cap) = {
             let mut inner = self.inner.lock().await;
             inner.stop_requested = true;
@@ -744,6 +757,23 @@ impl Streamer {
                     "OMT output stopping: had {} active connection(s)",
                     sender.connection_count()
                 );
+            }
+
+            // alpha.63: DeckLink destination — force-kill FFmpeg now,
+            // BEFORE the capture-stop below closes stdin and triggers
+            // the crashing decklink trailer write. start_kill() is
+            // non-blocking and run_one_attempt stays the sole reaper of
+            // inner.child (same pattern as the timeout fallback below),
+            // so there's no wait()/take() race. The graceful-wait loop
+            // then sees is_running() flip false within ~ms.
+            if is_decklink {
+                if let Some(child) = inner.child.as_mut() {
+                    log::info!(
+                        "Stopping DeckLink-output FFmpeg via force-kill \
+                         (skips the crashing decklink av_write_trailer)"
+                    );
+                    let _ = child.start_kill();
+                }
             }
 
             (inner.ndi_capture.take(), inner.omt_capture.take())
