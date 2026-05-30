@@ -3739,6 +3739,117 @@ workaround while alpha.60 builds: Audio Mixer = Silent.**
    OMT-out audio non-raw; pipe/relay custom audio; Net Utility "Saving
    forever".
 
+### Session 19 wins (alpha.61 through alpha.65, 2026-05-29/30)
+
+Started as "verify alpha.60," cleared that gate, then drove the
+Session-16 broadcast-multiview headline all the way to a 6-channel
+NDI→DeckLink patchbay that is production-ready for VIDEO AND AUDIO.
+Five tagged alphas, all CI-green + installed + hardware-verified on the
+Broadcast Pix Windows rig.
+
+1. **alpha.61 — NDI-start watchdog (Session 19 priority #2).** The probe
+   loop in `NdiCapture::start_and_probe_format` only checked its deadline
+   at the top of the loop, but `receiver.capture_video(500ms)` can block
+   indefinitely on a wedged SDK → froze `start()` → froze the whole
+   instance (Responding=false, all /api/* time out, reboot-class; the
+   reconnect supervisor made it worse, blocking a fresh worker per retry
+   until the pool drained). Fix: build NDI+Receiver on the caller thread
+   (local allocs, no network wait), run the blocking probe + capture-
+   thread spin-up on a throwaway `ndi-probe` thread bounded by
+   `recv_timeout(format_timeout + 3s)`; on timeout return an error and
+   detach the stuck thread. New free fn `probe_and_spawn`; public
+   signature unchanged. Mirrors the existing `join_with_timeout` pattern.
+
+2. **alpha.62 — 6-channel broadcast multiview (the headline).** The
+   multiview was already ~90% built at TILE_COUNT=4 (alpha.40-57) and
+   fully per-tile-isolated, so 6 channels = two constants + a CSS grid:
+   `fleet.rs` TILE_COUNT 4→6 + `multiview.html` TILE_COUNT 4→6 + grid
+   2x2→3x2. The **Phase A `decklink-spike`** (finally run on the rig)
+   validated 6 concurrent `decklink_enc` outputs holding a full 180s with
+   zero stalls → single-process Option A holds; the spike's blunt
+   "FAIL→N-processes" auto-verdict was a misread (the only failures were
+   teardown crashes, not runtime). 4 concurrent NDI→DeckLink at 30fps with
+   CPU only ~12% → ample headroom for 6+.
+
+3. **alpha.63 — DeckLink Stop crash fix.** FFmpeg access-violates
+   (0xC0000005) in the decklink muxer's `av_write_trailer` when CLOSING a
+   real-SDI output — codec-independent (wrapped_avframe AND v210 both
+   crash), only real-SDI paths (the NDI-Machine virtual outputs close
+   clean), teardown-only (never mid-run). Fix: in `stop()`, when
+   `snap.is_decklink()`, force-kill FFmpeg up front (before stdin-EOF
+   drives the crashing trailer) — safe because a DeckLink output is local
+   hardware with no network session to close cleanly (unlike SRT→ATEM
+   where alpha.59's graceful close is load-bearing). Verified: real-SDI
+   Stop returns in 0s, no wedge, device re-claims instantly — even on a
+   FROZEN ffmpeg (0% CPU).
+
+4. **alpha.64 + alpha.65 — the DeckLink AUDIO arc (throttle → freeze →
+   fixed).** The full 6-stream hardware test caught what 30s spot-checks
+   couldn't. With Audio=Auto, NDI→DeckLink VIDEO collapsed to ~2.4fps;
+   bisected with Audio=Silent → instant 30fps. **alpha.64** removed the
+   audio bridge's `-use_wallclock_as_timestamps 1` (alpha.49's drift
+   remedy) → fixed the throttle, but a 10-min drift watch found it had
+   traded the throttle for a HARD FREEZE at ~2:44 (FFmpeg blocked at 0%
+   CPU, both streams stuck, status falsely "Streaming"; silent ran clean
+   5+ min → audio-specific). **alpha.65** root-caused both: the frame-
+   counted `-r 30` video PTS assumes EXACTLY nominal fps, but the NDI
+   source isn't, so the video timeline diverges from the audio's whichever
+   way audio is stamped (wallclock audio = throttle; sample-count audio =
+   freeze). Fix: `-use_wallclock_as_timestamps 1` on BOTH the rawvideo
+   pipe AND the audio bridge for DeckLink so they share one real-time
+   timeline; aresample=async absorbs the residual ~2-3 samples/sec card-
+   clock drift. Throttle-avoidance validated standalone (piped wallclock-
+   both = 446 frames in 15s); freeze-avoidance verified in-app:
+   REMOTEENGINEERING + Auto audio → real SDI ran 30fps with live varying
+   program audio for 6.7 min, frames climbing steadily past the old ~4934
+   freeze point to 12860, no freeze. SRT/ATEM path untouched.
+
+### Open issues from Session 19
+
+- **Stall detector reads cumulative fps, missed the freeze.** The
+  alpha.41/57 stall detectors compare the cumulative fps stat (which
+  stayed >0.5 even with frames frozen) instead of an instantaneous frame-
+  delta, so the alpha.64 freeze sat undetected for 10 min. Fix to
+  instantaneous frame-delta so any future freeze auto-recovers (force-kill
+  → supervisor reconnect). Top Session 20 reliability item.
+- **2 of 4 NDI-Machine VIRTUAL outputs 400-on-start.** 'NDI Machine' and
+  'NDI Machine 3' reject /start with an empty-body 400 even solo;
+  'NDI Machine 2/4' + all real-SDI outputs work. Quirk of those virtual
+  DeckLink→NDI devices; real broadcast SDI path unaffected. Low priority.
+- **/start blocks on the NDI probe** (~1-3s solo, up to 15s under
+  6-concurrent contention) so a sequential-start driver hits client
+  timeouts (the streams start anyway). Consider spawning the probe async.
+- **App log not exposed via API.** The NDI audio-drain/bridge telemetry
+  (log::info) goes to a file/stdout not reachable via /api/log (which is
+  just FFmpeg stderr) and wasn't capturable via stderr-redirect on the
+  release build. Add an app-log endpoint or route key telemetry into the
+  LOG_TAIL — would have made the alpha.64 freeze diagnosis far faster.
+- **TILE_COUNT is 6, not 8.** Bumped 4→6 for the operator's stated 6-output
+  goal (3x2 grid). Bump to 8 (4x2) if they need more channels.
+- **Windows release CI flake (innoextract).** The NDI SDK install step
+  flaked once (alpha.62) — `gh run rerun --failed` cleared it, then the
+  Windows .exe needed a manual `gh release upload --clobber` (the publish
+  job had already run). Recurring; harden the choco-innoextract step.
+- **Carryovers** (none blocking): pre-show checks panel, OMT-out audio for
+  non-raw sources, pipe/relay custom audio, NSIS pre-install taskkill.
+
+### Session 20 priorities
+
+1. **Operator runs the real 6-camera show** on the rig (6 NDI → 6 DeckLink
+   SDI, video+audio) — the field proof now that every piece is verified.
+2. **Stall detector → instantaneous frame-delta** (open #1) so any freeze
+   auto-recovers instead of sitting undetected.
+3. **App-log endpoint** for faster in-app diagnosis (open #4).
+4. **Bump TILE_COUNT to 8** if the operator wants >6 channels.
+5. Carryovers (pre-show panel, OMT-out audio, pipe/relay custom audio,
+   NSIS taskkill, Net Utility "Saving forever").
+
+### Session 19 also includes CLAUDE.md catch-up + commit
+
+This entry is the catch-up. Session 20 picks up from a 6-channel
+NDI→DeckLink patchbay that is video+audio hardware-verified (alpha.65),
+with the stall-detector fix as the top reliability follow-up.
+
 ### Session 18 also includes CLAUDE.md catch-up + commit
 
 This entry is the catch-up. Session 19 picks up from alpha.59
@@ -4137,6 +4248,39 @@ Key implementation gotchas:
   SRT/RTMP use sample-count PTS aligned with the video. Restores NDI
   video + audio to the ATEM. Webcams/test-pattern were never affected
   (no bridge).
+- `v0.2.0-alpha.61` (commit `273ced2`): Session 19 — hard wall-clock
+  watchdog around `NdiCapture::start_and_probe_format`. The blocking
+  first-frame probe runs on a throwaway `ndi-probe` thread bounded by
+  `recv_timeout(format_timeout + 3s)`; a wedged `capture_video` can no
+  longer freeze the instance (returns an error + detaches the stuck
+  thread). New free fn `probe_and_spawn`; public signature unchanged.
+- `v0.2.0-alpha.62` (commit `4c38021`): Session 19 — enable the 6-channel
+  broadcast multiview. `fleet.rs` TILE_COUNT 4→6 + `multiview.html`
+  TILE_COUNT 4→6 + grid 2x2→3x2. The whole per-tile multiview was already
+  built at 4; the Phase A `decklink-spike` validated 6 concurrent decklink
+  outputs (180s clean) on the rig first. Windows .exe needed a manual
+  rerun + `gh release upload --clobber` after an innoextract CI flake.
+- `v0.2.0-alpha.63` (commit `ea5b098`): Session 19 — force-kill FFmpeg on
+  Stop for DeckLink. The decklink muxer's `av_write_trailer` access-
+  violates (0xC0000005) when closing a real-SDI output (codec-independent;
+  NDI-Machine virtual outputs close clean; teardown-only). `stop()` force-
+  kills when `is_decklink()` before stdin-EOF drives the crashing trailer
+  — safe (local hardware, no lockout). Recovers even a frozen ffmpeg in 0s.
+- `v0.2.0-alpha.64` (commit `a952cac`): Session 19 — dropped the audio
+  bridge wallclock for ALL destinations to fix the NDI→DeckLink video
+  THROTTLE (wallclock audio raced ahead of the frame-counted video,
+  stalling the muxer to ~2.4fps). Fixed the throttle but exposed a hard
+  FREEZE at ~2:44 (sample-count audio still diverges). Superseded by 65.
+- `v0.2.0-alpha.65` (commit `44c0296`): Session 19 — `-use_wallclock_as_
+  timestamps 1` on BOTH the rawvideo pipe AND the audio bridge for
+  DeckLink, so they share one real-time timeline (root cause: the frame-
+  counted `-r 30` video PTS assumed exactly nominal fps; the NDI source
+  isn't). Fixes BOTH the throttle and the freeze. Throttle-avoidance
+  validated standalone (446 frames/15s wallclock-both vs 2 frames/322s
+  audio-only-wallclock); freeze-avoidance verified in-app (6.7 min clean,
+  30fps + live program audio, frames past the old ~4934 freeze point to
+  12860). SRT/ATEM unchanged. **NDI→DeckLink is now full video+audio
+  broadcast-ready.**
 
 ### v0.2.0 UI / UX scope (queued)
 
