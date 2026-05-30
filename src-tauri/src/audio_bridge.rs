@@ -162,9 +162,16 @@ impl AudioBridge {
     /// + wallclock = 2 frames in 322s, no wallclock = 360 frames in 12s).
     /// The DeckLink drift it was meant to fix is only ~2-3 samples/sec
     /// (~50ppm @ 48kHz), which build_audio_filter's aresample=async=1000
-    /// absorbs on its own. So EVERY caller now passes `false`; the param is
-    /// retained for documentation and in case a future codec/destination
-    /// genuinely needs wallclock input timing.
+    /// absorbs on its own -- OR SO alpha.64 thought.
+    ///
+    /// alpha.65: dropping wallclock fixed the throttle but caused a hard
+    /// FREEZE at ~2:44 -- sample-count audio STILL diverges from the frame-
+    /// counted video (the NDI source isn't exactly 30fps/48kHz). The real
+    /// fix: keep wallclock on the DeckLink audio AND add it to the rawvideo
+    /// pipe input (build_ffmpeg_cmd_for_ndi) so BOTH inputs share one real-
+    /// time timeline. So callers pass `true` for DeckLink again and `false`
+    /// for SRT/RTMP (whose AAC encoder handles a/v sync; wallclock there
+    /// breaks the MPEG-TS PCR). `use_wallclock` stays caller-controlled.
     pub fn ffmpeg_input_args(&self, use_wallclock: bool) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         if use_wallclock {

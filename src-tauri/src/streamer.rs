@@ -1051,13 +1051,30 @@ impl Streamer {
     ) -> Vec<String> {
         let size = format!("{}x{}", fmt.width, fmt.height);
         let fps = fmt.fps().to_string();
-        let mut input_args: Vec<String> = vec![
+        let mut input_args: Vec<String> = Vec::new();
+        // alpha.65: for DeckLink, wallclock-stamp the rawvideo pipe input
+        // too (the audio bridge below gets the same) so video + audio
+        // share ONE real-time timeline. The frame-counted `-r` PTS assumes
+        // EXACTLY the nominal fps, but the NDI source isn't exactly nominal,
+        // so that video timeline drifts from the audio's -- which threw the
+        // decklink muxer into a ~2.4fps throttle with wallclock audio
+        // (pre-alpha.64) and a hard FREEZE at ~2:44 with sample-count audio
+        // (alpha.64). Putting BOTH inputs on wallclock aligns them (throttle-
+        // avoidance verified standalone: piped wallclock-both = 446 frames in
+        // 15s / 1.02x); aresample=async absorbs input-vs-DeckLink-clock drift.
+        // SRT/RTMP keep frame-counted video -- their AAC encoder handles a/v
+        // sync, and wallclock there breaks the MPEG-TS PCR (alpha.60).
+        if plan.protocol == "decklink" {
+            input_args.push("-use_wallclock_as_timestamps".into());
+            input_args.push("1".into());
+        }
+        input_args.extend([
             "-f".into(), "rawvideo".into(),
             "-pix_fmt".into(), fmt.ffmpeg_pix_fmt.into(),
             "-s".into(), size,
             "-r".into(), fps,
             "-i".into(), "pipe:0".into(),
-        ];
+        ]);
 
         let snap = self.state.snapshot();
         let custom_audio_name = if snap.audio_mode == "custom" && !snap.av_audio_name.is_empty() {
@@ -1118,21 +1135,18 @@ impl Streamer {
                 "NDI audio -> FFmpeg via TCP bridge on port {}",
                 bridge.port()
             );
-            // alpha.64: NO wallclock audio timestamps for ANY destination.
-            // alpha.60 already dropped them for SRT/MPEG-TS (wallclock put the
-            // audio on a real-time timeline vs the 0-based rawvideo, breaking
-            // the program PCR so the ATEM showed black). DeckLink KEPT them
-            // (the alpha.49 clock-drift remedy) -- but that wallclock is
-            // exactly what throttles the decklink output: the wallclock audio
-            // races ahead of the frame-counted video and the muxer stalls,
-            // starving the output to ~2.4fps (Session 19 hardware test;
-            // reproduced standalone -- raw audio + wallclock = 2 frames in
-            // 322s, no wallclock = 360 frames in 12s). The real NDI-vs-DeckLink
-            // drift is only ~2-3 samples/sec (~50ppm at 48kHz), far inside the
-            // aresample=async=1000 correction in build_audio_filter, so the
-            // resampler alone handles drift and wallclock is both unnecessary
-            // and harmful. Sample-count PTS keeps audio aligned with the video.
-            input_args.extend(bridge.ffmpeg_input_args(false));
+            // alpha.65: wallclock audio for DeckLink AGAIN -- but now PAIRED
+            // with wallclock on the rawvideo pipe input above, so both inputs
+            // share one real-time timeline. (alpha.64 dropped audio wallclock
+            // to kill the ~2.4fps throttle, but that just traded it for a hard
+            // FREEZE at ~2:44: sample-count audio still diverges from frame-
+            // counted video because the NDI source isn't exactly 30fps/48kHz.
+            // The real fix is to put BOTH on wallclock, not neither.) SRT/RTMP
+            // still pass false: their audio stays sample-count / 0-based,
+            // aligned with the frame-counted video, the AAC encoder handles
+            // a/v sync, and wallclock there breaks the MPEG-TS PCR so the ATEM
+            // goes black (alpha.60).
+            input_args.extend(bridge.ffmpeg_input_args(plan.protocol == "decklink"));
         } else {
             input_args.extend([
                 "-f".into(), "lavfi".into(),
@@ -2161,14 +2175,12 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
     // by dropping audio frames entirely → operator sees audio "work
     // for a couple minutes then die"). aresample=async=1000 inserts
     // up to 1000 samples/sec of correction continuously, absorbing
-    // the drift without audible artifacts. (alpha.64: this resampler is
-    // now the SOLE drift remedy. alpha.49 also stamped the bridge audio
-    // with `-use_wallclock_as_timestamps 1`, but on DeckLink that
-    // wallclock raced the audio ahead of the frame-counted video and
-    // throttled the decklink muxer to ~2.4fps -- it's been removed, see
-    // audio_bridge.rs::ffmpeg_input_args. The real ~2-3 samples/sec drift
-    // is far inside async=1000's correction range, so aresample suffices
-    // on its own.)
+    // the drift without audible artifacts. (alpha.64 briefly dropped the
+    // paired `-use_wallclock_as_timestamps 1` thinking aresample could solo
+    // the drift; that killed a throttle but caused a ~2:44 FREEZE, so
+    // alpha.65 restored wallclock -- on BOTH the rawvideo pipe AND the audio
+    // bridge so they share one real-time timeline. aresample still absorbs
+    // the residual input-vs-DeckLink-clock drift on top.)
     //
     // Only applied for DeckLink because ATEM/SRT destinations have
     // an encoder + container that handles a/v sync via the encoder's
