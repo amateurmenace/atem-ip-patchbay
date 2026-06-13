@@ -47,14 +47,13 @@ use tokio::sync::mpsc;
 const FRAME_CHANNEL_CAPACITY: usize = 64;
 
 /// Audio chunk buffer size. NDI delivers audio in batches of ~10ms
-/// at 48kHz stereo (~960 samples per channel = ~7.5 KB per chunk).
-/// alpha.69: bumped 128 -> 512 (~5s headroom). The Session-20 long-run
-/// capture showed escalating audio silence gaps (7s @ 6min -> 47s @ 14min)
-/// caused by the audio delivery into FFmpeg stalling; a deeper buffer
-/// absorbs transient back-pressure before `try_send` has to drop chunks
-/// (a dropped chunk = a gap FFmpeg fills with silence). Still bounded so
-/// a truly stuck consumer can't grow memory without limit.
-const AUDIO_CHANNEL_CAPACITY: usize = 512;
+/// at 48kHz stereo. alpha.69 bumped this 128 -> 512 to chase the audio-
+/// silence bug, but the long-run capture proved that made it WORSE (285s
+/// of silence vs 94s). The capture telemetry shows audio reaches the
+/// bridge fine (audio_sent steady, zero drops), so the stall is downstream
+/// and a deeper queue just gave it more to mangle. Reverted to 128 in
+/// alpha.70.
+const AUDIO_CHANNEL_CAPACITY: usize = 128;
 
 /// One JPEG preview snapshot per N captured frames. At 30 FPS source
 /// rate a stride of 15 -> ~2 FPS preview, which is plenty for the
@@ -420,6 +419,13 @@ fn run_capture_loop(
     let mut window_errors: u32 = 0;
     let mut window_audio_sent: u32 = 0;
     let mut window_audio_dropped: u32 = 0;
+    // alpha.70: accumulate the LEVEL of the audio we receive from the NDI
+    // SDK so the telemetry shows whether captured content is real audio or
+    // silence. audio_sent counts chunks, not loudness — this distinguishes
+    // "receiver handed us silence" (drop is upstream) from "real audio that
+    // dies downstream in the bridge/FFmpeg."
+    let mut window_audio_sumsq: f64 = 0.0;
+    let mut window_audio_samples: u64 = 0;
     let mut window_start = Instant::now();
     while !stop.load(Ordering::Acquire) {
         match receiver.capture_video(Duration::from_millis(500)) {
@@ -473,10 +479,19 @@ fn run_capture_loop(
             loop {
                 match receiver.capture_audio_timeout(Duration::from_millis(0)) {
                     Ok(Some(af)) => match build_audio_chunk(&af) {
-                        Some(chunk) => match atx.try_send(chunk) {
-                            Ok(()) => window_audio_sent += 1,
-                            Err(_) => window_audio_dropped += 1,
-                        },
+                        Some(chunk) => {
+                            // alpha.70: sum-of-squares of the received samples
+                            // (before try_send moves the chunk) to report the
+                            // actual captured audio level per second.
+                            for &s in &chunk.samples {
+                                window_audio_sumsq += (s as f64) * (s as f64);
+                            }
+                            window_audio_samples += chunk.samples.len() as u64;
+                            match atx.try_send(chunk) {
+                                Ok(()) => window_audio_sent += 1,
+                                Err(_) => window_audio_dropped += 1,
+                            }
+                        }
                         None => window_audio_dropped += 1,
                     },
                     Ok(None) => break, // queue empty
@@ -490,21 +505,34 @@ fn run_capture_loop(
 
         let now = Instant::now();
         if now.duration_since(window_start) >= Duration::from_secs(1) {
+            // alpha.70: RMS of captured audio in dBFS. Real program audio
+            // sits around -20..-45 dB; < -70 dB means the NDI receiver gave
+            // us silence, so the audio dies UPSTREAM of the bridge. Paired
+            // with audio_sent>0 this pinpoints where the audio is lost.
+            let audio_rms_db = if window_audio_samples > 0 {
+                let mean = window_audio_sumsq / window_audio_samples as f64;
+                if mean > 0.0 { 10.0 * mean.log10() } else { -120.0 }
+            } else {
+                -120.0
+            };
             log::info!(
                 "NDI capture 1s: sent={} empty={} errors={} ch_cap_remaining={} \
-                 audio_sent={} audio_dropped={}",
+                 audio_sent={} audio_dropped={} audio_rms_db={:.1}",
                 window_frames,
                 window_empty,
                 window_errors,
                 tx.capacity(),
                 window_audio_sent,
                 window_audio_dropped,
+                audio_rms_db,
             );
             window_frames = 0;
             window_empty = 0;
             window_errors = 0;
             window_audio_sent = 0;
             window_audio_dropped = 0;
+            window_audio_sumsq = 0.0;
+            window_audio_samples = 0;
             window_start = now;
         }
     }
