@@ -152,6 +152,7 @@ const els = {
   // SRT advanced
   srtMode:          $('#srt-mode'),
   srtLatency:       $('#srt-latency'),
+  srtLatencyTop:    $('#srt-latency-top'),
   srtListenPort:    $('#srt-listen-port'),
   srtListenerOnly:  $$('.srt-listener-only'),
   streamidOverride: $('#streamid-override'),
@@ -1367,7 +1368,11 @@ function render(snap) {
   // inside the net-diag dashboard now.
 
   if (document.activeElement !== els.srtMode) els.srtMode.value = snap.srt_mode || 'caller';
-  if (document.activeElement !== els.srtLatency) els.srtLatency.value = Math.round((snap.srt_latency_us || 500000) / 1000);
+  {
+    const latMs = Math.round((snap.srt_latency_us || 200000) / 1000);
+    if (document.activeElement !== els.srtLatency) els.srtLatency.value = latMs;
+    if (els.srtLatencyTop && document.activeElement !== els.srtLatencyTop) els.srtLatencyTop.value = latMs;
+  }
   if (document.activeElement !== els.srtListenPort) els.srtListenPort.value = snap.srt_listen_port || 9710;
   if (document.activeElement !== els.streamidOverride) els.streamidOverride.value = snap.streamid_override || '';
   if (els.streamidLegacy && document.activeElement !== els.streamidLegacy) els.streamidLegacy.checked = !!snap.streamid_legacy;
@@ -2257,9 +2262,20 @@ function bind() {
     applySrtModeVisibility(els.srtMode.value);
     applySettings({ srt_mode: els.srtMode.value });
   });
-  els.srtLatency.addEventListener('change', () => {
-    const ms = parseInt(els.srtLatency.value, 10);
-    if (!isNaN(ms)) applySettings({ srt_latency_us: ms * 1000 });
+  // alpha.68: latency is also a prominent control (presets + input) above
+  // Advanced. Both inputs write the same setting and mirror each other.
+  const setLatencyMs = (ms) => {
+    if (isNaN(ms) || ms < 20) return;
+    if (els.srtLatency) els.srtLatency.value = ms;
+    if (els.srtLatencyTop) els.srtLatencyTop.value = ms;
+    applySettings({ srt_latency_us: ms * 1000 });
+  };
+  els.srtLatency.addEventListener('change', () => setLatencyMs(parseInt(els.srtLatency.value, 10)));
+  if (els.srtLatencyTop) {
+    els.srtLatencyTop.addEventListener('change', () => setLatencyMs(parseInt(els.srtLatencyTop.value, 10)));
+  }
+  document.querySelectorAll('.lat-preset').forEach((btn) => {
+    btn.addEventListener('click', () => setLatencyMs(parseInt(btn.dataset.ms, 10)));
   });
   els.srtListenPort.addEventListener('change', () => {
     const p = parseInt(els.srtListenPort.value, 10);

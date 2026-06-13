@@ -667,6 +667,23 @@
             </details>
           </div>
 
+          <!-- alpha.68: SRT latency promoted out of Advanced to a prominent,
+               always-visible control. It's the single biggest knob for
+               stream stability over the internet (packet-recovery buffer).
+               Mirrors the #srt-latency field still inside Advanced. -->
+          <div class="dest-latency srt-only">
+            <div class="dest-latency-head">
+              <span class="dest-latency-label">SRT Latency</span>
+              <span class="dest-latency-help">Packet-recovery buffer. Low = least delay; <strong>raise it if the stream drops or audio cuts out</strong> on a lossy / internet path.</span>
+            </div>
+            <div class="latency-row">
+              <button type="button" class="lat-preset" data-ms="200">200&nbsp;ms<small>LAN / solid link</small></button>
+              <button type="button" class="lat-preset" data-ms="1000">1000&nbsp;ms<small>internet</small></button>
+              <button type="button" class="lat-preset" data-ms="2000">2000&nbsp;ms<small>lossy / unstable</small></button>
+              <span class="lat-custom"><input id="srt-latency-top" type="number" min="20" max="8000" /> ms</span>
+            </div>
+          </div>
+
           <details class="dest-advanced">
             <summary>Advanced (encoder, audio quality, mode, streamid, label)</summary>
             <div class="advanced-body">
