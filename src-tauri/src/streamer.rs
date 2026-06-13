@@ -2237,24 +2237,33 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
         chain.push("volume=0".into());
     }
 
-    // alpha.49 / alpha.65 / alpha.72: aresample=async clock-drift compensation.
-    // DeckLink ONLY. The genlocked DeckLink output pins the pipeline to exactly
-    // 1.0x, so the receiver-wallclock the bridge stamps against is honest and
-    // aresample just smooths the residual ~50 ppm crystal drift -- verified
-    // stable to 6.7 min (alpha.65). It does NOT insert silence there because
-    // there is no sub-realtime gap to fill.
+    // alpha.49 / alpha.65 / alpha.66 / alpha.73: aresample=async clock-drift
+    // compensation, paired with wallclock (see pipe_wallclock). Applied for
+    // DeckLink AND the NDI -> SRT/RTMP audio-bridge path.
     //
-    // alpha.72: aresample is NO LONGER applied on the NDI -> SRT/RTMP path.
-    // alpha.66 added it there and it was the CAUSE of the "audio dies after a
-    // few minutes" bug: SRT free-runs slightly sub-realtime (NDI 29.97 fps
-    // forced to CFR -r 30 + encode/mux overhead), so the wallclock-stamped
-    // audio develops an ever-growing forward gap that aresample=async FILLS
-    // with escalating silence. Dropping it (while KEEPING wallclock for a/v
-    // sync -- see pipe_wallclock) lets the real audio samples flow continuously,
-    // synced to video, with no async filler inventing silence. Custom-device
-    // audio (Dante via dshow/avf) keeps the alpha.14 path untouched -- that
-    // input carries the device's own real timestamps.
-    if snap.is_decklink() {
+    // alpha.73 is a REVERT of alpha.72. alpha.72 dropped aresample on the SRT
+    // path (trying to stop the alpha.66 "audio dies over minutes" silence),
+    // but the operator's ATEM test showed that ALSO killed VIDEO entirely on
+    // Auto (no video at the ATEM; video only on Silent). So aresample is
+    // LOAD-BEARING for the ATEM to present the muxed program at all under
+    // wallclock -- it is not merely a silence filler. Restoring it returns the
+    // SRT path to the known alpha.66/70 state: video OK + audio present (the
+    // audio still degrades to silence over many minutes -- the ORIGINAL, still-
+    // open bug -- but that is strictly better than no video).
+    //
+    // The real root (pipeline runs slightly sub-realtime feeding the ATEM two
+    // independently-clocked live inputs) is NOT fixable by toggling wallclock/
+    // aresample -- every combination just moves the failure (no-video / 1s-mute
+    // / minutes-silence). It needs a root-cause pass (accurate fractional fps
+    // and/or re-clocking audio to the video) tested against the real ATEM, OR
+    // the reliable workaround: Custom/Dante audio (own device timestamps,
+    // bypasses the bridge). Custom-device audio keeps the alpha.14 path
+    // untouched here -- that input carries the device's own real timestamps.
+    let ndi_bridge_to_net = snap.source_id == "ndi"
+        && !snap.is_decklink()
+        && snap.audio_mode != "custom"
+        && snap.audio_mode != "silent";
+    if snap.is_decklink() || ndi_bridge_to_net {
         chain.push("aresample=async=1000:first_pts=0".into());
     }
 
