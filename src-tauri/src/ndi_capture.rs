@@ -48,9 +48,13 @@ const FRAME_CHANNEL_CAPACITY: usize = 64;
 
 /// Audio chunk buffer size. NDI delivers audio in batches of ~10ms
 /// at 48kHz stereo (~960 samples per channel = ~7.5 KB per chunk).
-/// 128 chunks ≈ 1.3 seconds of headroom — plenty to absorb OMT
-/// consumer hiccups without growing memory unbounded.
-const AUDIO_CHANNEL_CAPACITY: usize = 128;
+/// alpha.69: bumped 128 -> 512 (~5s headroom). The Session-20 long-run
+/// capture showed escalating audio silence gaps (7s @ 6min -> 47s @ 14min)
+/// caused by the audio delivery into FFmpeg stalling; a deeper buffer
+/// absorbs transient back-pressure before `try_send` has to drop chunks
+/// (a dropped chunk = a gap FFmpeg fills with silence). Still bounded so
+/// a truly stuck consumer can't grow memory without limit.
+const AUDIO_CHANNEL_CAPACITY: usize = 512;
 
 /// One JPEG preview snapshot per N captured frames. At 30 FPS source
 /// rate a stride of 15 -> ~2 FPS preview, which is plenty for the

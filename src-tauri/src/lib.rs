@@ -206,10 +206,22 @@ pub fn run() {
             focus_main_window,
         ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
+            // alpha.69: initialize logging in RELEASE too. Previously this
+            // was gated on `cfg!(debug_assertions)`, so the SHIPPED build
+            // registered no logger at all and every log::info/warn (incl.
+            // the NDI capture's per-second `audio_sent/audio_dropped`
+            // telemetry that diagnoses audio drops) went nowhere — invisible
+            // on a GUI-subsystem release exe with no console. Add a LogDir
+            // file target so the app log persists to disk (app log dir /
+            // patchbay.log) and is finally readable post-incident.
+            {
+                use tauri_plugin_log::{Target, TargetKind};
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        .target(Target::new(TargetKind::LogDir {
+                            file_name: Some("patchbay".into()),
+                        }))
                         .build(),
                 )?;
             }
