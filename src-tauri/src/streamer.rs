@@ -39,6 +39,13 @@ pub struct StreamPlan {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// alpha.75: true for NTSC fractional modes (29.97/59.94/23.98), where
+    /// `fps` is the ROUNDED integer (30/60/24). When set, the encoder emits the
+    /// EXACT rate as `<fps>000/1001` for `-r` instead of the rounded integer —
+    /// forcing CFR 30 on a 29.97 source pinned the encoder just under realtime
+    /// (never reached 1.0x) and starved the wallclock audio into aresample
+    /// silence. False for integer modes + the DeckLink path.
+    pub fps_fractional: bool,
     pub video_bitrate: u64,
     pub audio_bitrate: u64,
     pub keyframe_seconds: u32,
@@ -912,6 +919,9 @@ impl Streamer {
             width,
             height,
             fps,
+            // NTSC fractional modes (e.g. "1080p29.97") carry a '.' in the
+            // mode string; integer modes ("1080p30") don't.
+            fps_fractional: snap.video_mode.contains('.'),
             video_bitrate: cfg.bitrate,
             audio_bitrate,
             keyframe_seconds: cfg.keyframe_interval,
@@ -1004,6 +1014,10 @@ impl Streamer {
             width: mode.width,
             height: mode.height,
             fps,
+            // DeckLink output uses build_decklink_output_cmd (raw
+            // wrapped_avframe), not build_encoder_section's -r, so the
+            // fractional flag is irrelevant here.
+            fps_fractional: false,
             // No encode happens for DeckLink — these fields are zero
             // to make any accidental encoder-side use surface as an
             // obvious "uninitialized" symptom.
@@ -1050,7 +1064,10 @@ impl Streamer {
         audio_bridge: Option<&crate::audio_bridge::AudioBridge>,
     ) -> Vec<String> {
         let size = format!("{}x{}", fmt.width, fmt.height);
-        let fps = fmt.fps().to_string();
+        // alpha.75: exact source rate for the input -r (NDI is 29.97 =
+        // 30000/1001, not the rounded 30) so the input timeline matches the
+        // exact output rate. fmt carries the precise fraction; fps() rounds.
+        let fps = format!("{}/{}", fmt.fps_num, fmt.fps_den);
 
         let snap = self.state.snapshot();
         let custom_audio_name = if snap.audio_mode == "custom" && !snap.av_audio_name.is_empty() {
@@ -2375,7 +2392,17 @@ fn build_encoder_section(plan: &StreamPlan, encoder: &str) -> Vec<String> {
     let bitrate = plan.video_bitrate.to_string();
     let bitrate_kbps = (plan.video_bitrate / 1000).to_string();
     let gop = plan.gop().to_string();
-    let fps = plan.fps.to_string();
+    // alpha.75: emit the EXACT fractional rate for NTSC modes
+    // (29.97/59.94/23.98 => <fps>000/1001) instead of the rounded integer.
+    // Forcing CFR 30 on a 29.97 source capped the encoder at ~0.999x (it
+    // "never reached 1.0x") and left the wallclock audio perpetually behind ->
+    // aresample silence. The exact rate matches the source AND the ATEM's
+    // configured mode. Integer modes (fps_fractional=false) are unchanged.
+    let fps = if plan.fps_fractional {
+        format!("{}000/1001", plan.fps)
+    } else {
+        plan.fps.to_string()
+    };
     let mut cmd: Vec<String> = Vec::new();
 
     match encoder {
