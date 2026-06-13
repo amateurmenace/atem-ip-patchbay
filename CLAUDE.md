@@ -3833,7 +3833,107 @@ Broadcast Pix Windows rig.
 - **Carryovers** (none blocking): pre-show checks panel, OMT-out audio for
   non-raw sources, pipe/relay custom audio, NSIS pre-install taskkill.
 
-### Session 20 priorities
+### Session 20 wins (alpha.66 through alpha.70, 2026-06-12/13)
+
+Session-long firefight on the operator's headline complaint: **NDI source →
+REMOTE SRT → ATEM, the audio dies after ~2-10 min (plays fine, then choppy,
+then silent), and the stream freezes on long runs.** Five tagged alphas.
+**The audio-dies bug is NOT yet fixed** but is now DEFINITIVELY localized
+after eliminating every other suspect; alpha.70 ships the deciding
+diagnostic. The drop/freeze side IS addressed.
+
+**The drops/freeze (addressed):**
+- **alpha.66** (`639a945`): mirrored alpha.65's DeckLink wallclock+aresample
+  onto the SRT NDI path (wallclock on BOTH the rawvideo pipe + audio bridge,
+  aresample=async) + switched the stall detector from cumulative-`fps` to an
+  instantaneous `frames_sent` delta (Session-19 open #1 — cumulative fps
+  stayed >0.5 and missed freezes). `ATEM_DISABLE_NDI_WALLCLOCK` escape hatch.
+- **alpha.67** (`92bfdd7`): lockout-aware reconnect backoff for ATEM SRT.
+  The SRT link drops on a lossy path → the stall detector force-kills FFmpeg
+  → the ATEM holds the per-key receiver slot ~15s after an abrupt disconnect
+  → the old 1-2s backoff hammered the locked slot = "Conversion failed!"
+  churn (measured: reconnect counter 6→12 in ~40s around one drop).
+  `backoff_secs_atem_srt`: 15/30/45s instead of 1/2/4.
+- **alpha.68** (`b8ce337`): SRT latency default 500ms→200ms + **prominent
+  latency control** (presets 200/1000/2000ms) pulled out of the buried
+  Advanced `<details>`. A/B PROVED latency fixes the drops PER-PATH: 500ms
+  dropped every ~2min to 173.76.193.167, 2000ms = ZERO drops. Audio default
+  confirmed already "auto" (the "silent" the operator saw was leftover
+  persisted tile state from my env-var testing).
+
+**The audio-dies bug (localized, NOT fixed):**
+- A 2-min loopback capture showed the patchbay output CLEAN → I WRONGLY
+  concluded "network not pipeline." Wrong: the failure is at ~2-14 min; a
+  2-min capture is too short.
+- A **15-min** loopback capture PROVED the patchbay produces ESCALATING
+  audio SILENCE gaps (alpha.66 run: 7s@6min, 32s@8.8min, 47s@14min — packets
+  all present, CONTENT is digital silence). It IS the pipeline.
+- **Source eliminated**: operator streamed a SECOND unrelated NDI source
+  (a YouTube video via NDI screen capture = guaranteed continuous audio) →
+  died IDENTICALLY. Two sources, same death → it's the patchbay's NDI-audio
+  path, not the source.
+- **Timestamps eliminated**: sample-count (`ATEM_DISABLE_NDI_WALLCLOCK=1`,
+  no aresample) ALSO fails (178s start-silence + choppy). Network eliminated
+  (loopback fails). ATEM eliminated (operator confirmed it meters+routes
+  audio fine when it arrives).
+- **alpha.69** (`53901ee`): found the logger was gated on
+  `cfg!(debug_assertions)` so the RELEASE exe had NO logger (every
+  log::info/warn went nowhere; stdout/stderr redirect = 0 bytes on the GUI
+  exe) — the wall blocking all in-app diagnosis. Enabled a LogDir file
+  target in release (`patchbay.log`). ALSO bumped the audio buffers
+  (128→512 + `-thread_queue_size 1024`) as a fix attempt — the 15-min
+  capture proved that made it WORSE (285s silence vs 94s).
+- With logging on, the per-second NDI telemetry shows the capture→`audio_tx`
+  hop is FLAWLESS during the failure: `audio_sent` steady (~47/s
+  REMOTEENGINEERING, ~100/s STUDIO-A-BPIX), `audio_dropped=0`, no bridge
+  errors. So the audio is lost AFTER capture (bridge→FFmpeg or inside
+  FFmpeg) OR the chunks arrive already-silent.
+- **alpha.70** (`4decc84`): added `audio_rms_db` (the RMS/dBFS of the
+  captured chunks, measured before `try_send`) to the per-second telemetry
+  — the one missing data point — and reverted the alpha.69 buffer bump.
+
+**Operator workaround NOW:** Audio Mixer → Custom → Dante device bypasses
+the NDI-audio bridge entirely.
+
+### Open issues from Session 20
+
+1. **THE AUDIO BUG — not fixed; alpha.70 is the deciding diagnostic.**
+   Install alpha.70, run NDI→SRT (STUDIO-A-BPIX YouTube screen-cap repros in
+   ~2-3 min), let it fail, then read `patchbay.log` at
+   `C:\Users\Broadcast Pix\AppData\Local\org.weirdmachine.atem-ip-patchbay\logs\patchbay.log`
+   for `audio_rms_db` DURING a gap:
+   - **< -70dB while `audio_sent`>0** → the grafton-ndi RECEIVER is handing
+     us silence after a few min → fix is UPSTREAM in NDI audio capture (the
+     `capture_audio_timeout(0)` per-video-frame drain in
+     `ndi_capture.rs::run_capture_loop`, receiver config, or an SDK quirk;
+     consider a dedicated blocking audio-capture thread decoupled from the
+     video loop).
+   - **~ -20..-45dB (real) while the output is silent** → chunks are good but
+     die DOWNSTREAM → instrument/fix the bridge writer→socket→FFmpeg hop (add
+     bytes-written/sec telemetry to `audio_bridge.rs`) or FFmpeg's
+     two-live-input handling.
+2. **patchbay.log rotates fast (~137 lines ≈ 2.3 min)** and loses history —
+   catch telemetry live / during a gap. Consider a bigger rotation size or a
+   ring-buffer `/api/applog` endpoint (Session-19 #4).
+3. **Multiview tile confusion**: the operator's LIVE stream may be on a
+   different tile/key than the test tile (Session 20: their stream was tile 0
+   / key `rmlj-`, my tests were tile 1 / key `6xoh-`). Always scan all tiles.
+   Two streams to the SAME ATEM key conflict.
+4. **Latency is per-path**: 200ms default is fine for solid links; lossy
+   internet paths need 1000-2000ms (now one click via the alpha.68 control).
+5. The alpha.66 frame-delta stall detector + alpha.67 backoff are in but
+   unverified under a real multi-hour remote-SRT run.
+
+### Session 21 priorities
+
+1. **Read `audio_rms_db` from a fresh alpha.70 repro → pick the fix direction
+   (upstream NDI-receiver vs downstream bridge) → FIX THE AUDIO BUG.** THE
+   priority. See Open issue #1 for the decision tree + likely fixes.
+2. Verify the drop/freeze fixes hold under a real long remote-SRT run.
+3. The Session-19-era 6-NDI→DeckLink show + carry-overs below, once audio is
+   closed.
+
+### Session 20 priorities (set at END OF SESSION 19 — mostly deferred by the audio firefight above; still valid carry-overs)
 
 1. **Operator runs the real 6-camera show** on the rig (6 NDI → 6 DeckLink
    SDI, video+audio) — the field proof now that every piece is verified.
@@ -4281,6 +4381,25 @@ Key implementation gotchas:
   30fps + live program audio, frames past the old ~4934 freeze point to
   12860). SRT/ATEM unchanged. **NDI→DeckLink is now full video+audio
   broadcast-ready.**
+- `v0.2.0-alpha.66` (commit `639a945`): Session 20 — SRT NDI wallclock+
+  aresample drift fix (mirror of alpha.65 DeckLink) + frame-delta stall
+  detector (was cumulative-fps). Did NOT fix the operator's audio-dies bug.
+- `v0.2.0-alpha.67` (commit `92bfdd7`): Session 20 — lockout-aware reconnect
+  backoff for ATEM SRT (`backoff_secs_atem_srt` 15/30/45s) to stop the
+  "Conversion failed!" churn against the still-held per-key receiver slot.
+- `v0.2.0-alpha.68` (commit `b8ce337`): Session 20 — SRT latency default
+  500→200ms + prominent latency control with presets (pulled out of
+  Advanced). A/B proved latency is the per-path fix for the link DROPS.
+- `v0.2.0-alpha.69` (commit `53901ee`): Session 20 — enable release logging
+  (was `cfg!(debug_assertions)`-only → the shipped exe had NO logger) with a
+  LogDir `patchbay.log` target. Audio buffer bump (128→512 +
+  `-thread_queue_size 1024`) — proven WORSE (285s silence vs 94s), reverted
+  in alpha.70.
+- `v0.2.0-alpha.70` (commit `4decc84`): Session 20 — `audio_rms_db`
+  capture-content telemetry to split the audio bug into upstream-of-bridge
+  (NDI receiver hands us silence) vs downstream (real audio dies in
+  bridge→FFmpeg). Reverted the alpha.69 buffers. THE deciding diagnostic;
+  audio-dies bug STILL OPEN.
 
 ### v0.2.0 UI / UX scope (queued)
 
