@@ -3999,6 +3999,27 @@ config back to its original (REMOTEENGINEERING, auto, atem,
 at the loopback `srt://127.0.0.1:9999`. (Operator's LIVE tile 0 / key `rmlj-`
 was never touched.)
 
+**alpha.72 (commit `1ab80fc`) — the operator-ATEM correction to alpha.71.**
+After restoring the exe, the operator tested alpha.71 against the REAL ATEM and
+reported: audio plays ~1s then STOPS while video continues. Loopback couldn't
+have caught this — a dumb `-c copy` capture has no a/v-sync enforcement, so
+alpha.71 looked perfect there (continuous audio, monotonic PTS) yet the ATEM
+muted audio almost immediately. ffprobe on the alpha.71 loopback capture DID
+show audio drifting ~0.28s behind video over 37s — the ATEM drops audio once
+that offset exceeds its sync window. The two field data points settle it:
+alpha.66 (wallclock+aresample) kept audio IN SYNC at the ATEM (only flaw:
+content→silence over minutes); alpha.71 (no-wallclock+aresample) MUTES at ~1s.
+=> **wallclock is REQUIRED for ATEM a/v sync; the silence was aresample, not
+wallclock.** alpha.72 = KEEP wallclock on the NDI→SRT bridge path
+(`pipe_wallclock = decklink || using_bridge`) + DROP aresample on SRT
+(DeckLink-only now). My alpha.71 (remove wallclock) over-trusted the loopback
+harness — lesson saved to [[ndi-srt-atem-audio-has-two-distinct-failures]].
+**Pending: operator A/B test of alpha.72 against the ATEM** (CI building at
+time of writing). If audio still degrades, next lever is the 29.97-vs-CFR-30
+frame-rate rounding (use the exact fractional fps to kill the residual drift
+at its root) — deliberately held out of alpha.72 to keep the wallclock/aresample
+A/B clean and not risk the working video path.
+
 ### Session 21 priorities
 
 1. ~~**Read `audio_rms_db` … FIX THE AUDIO BUG.**~~ DONE in alpha.71 (commit
@@ -4487,7 +4508,15 @@ Key implementation gotchas:
   symmetric 0-based PTS + keep `aresample` (decoupled the wallclock/aresample
   pairing, removed the dead `ATEM_DISABLE_NDI_WALLCLOCK` hatch). Validated in a
   standalone FFmpeg harness (40 silence regions/45s WITH wallclock, 0 WITHOUT).
-  On-rig long-run verify pending.
+  **SUPERSEDED by alpha.72**: removing wallclock killed the loopback silence but
+  the real ATEM then MUTED audio at ~1s (loopback has no a/v-sync enforcement,
+  so it couldn't show this). The silence was aresample, not wallclock.
+- `v0.2.0-alpha.72` (commit `1ab80fc`): Session 21 — operator-ATEM correction to
+  alpha.71. KEEP wallclock on the NDI→SRT bridge path (audio+video on one real
+  clock → ATEM-synced, no mute — the alpha.66 behavior that DID stay in sync) +
+  DROP `aresample` on SRT (the actual silence-fill culprit; now DeckLink-only).
+  `pipe_wallclock = decklink || using_bridge`. DeckLink + custom/silent audio
+  unchanged. Pending operator A/B test against the real ATEM.
 
 ### v0.2.0 UI / UX scope (queued)
 
