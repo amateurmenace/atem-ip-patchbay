@@ -4031,6 +4031,59 @@ A/B clean and not risk the working video path.
 3. The Session-19-era 6-NDI→DeckLink show + carry-overs below, once audio is
    closed.
 
+### Session 22 wins (alpha.76, 2026-06-13) — GPU route DISPROVEN; muxer-interleave fix instead
+
+Session 22 was handed the Session-21 plan to fix the NDI→SRT→ATEM "audio dies
+after a few minutes" bug by moving the video work onto the GPU (CUDA upload →
+scale_cuda → NVENC) to hit a true ~1.0x encoder speed. **The on-rig measurement
+disproved that premise** before any GPU code was written, and shipped a much
+cheaper, better-targeted fix.
+
+**STEP 1 — measured on the rig** (drove the API on 127.0.0.1:8090, tile 1,
+REMOTEENGINEERING native 1080p → local SRT loopback, hevc_nvenc; tile 0 /
+operator's live ATEM URL never touched):
+- audio=auto: speed 0.965x, fps 29, video channel backs up (ch_cap_remaining
+  60→1) — BUT the **streaming FFmpeg uses 0.6% of 48 cores ≈ 0.3 of ONE core
+  (~97% idle).** The sub-realtime is NOT CPU/swscale-bound, so a GPU scale/convert
+  offload cannot lift it.
+- Controlled, same source+listener: **audio=SILENT → channel stays EMPTY (64),
+  0.985x; audio=AUTO → channel backs up, 0.965x.** The throttle is the
+  audio-bridge ↔ mpegts-muxer interleave (bursty audio, gap_ms up to ~310ms),
+  not the video path.
+- Standalone control: the app's exact video flags (wallclock + -r 30000/1001) on
+  a realtime source → nul held 1.0x — the flags don't self-throttle.
+- Confound: REMOTEENGINEERING is a remote feed with VARIABLE delivery (sent
+  25–35 fps) and quiet/variable audio (rms −26..−61 dB), so pipeline speed tracks
+  the source (clean ≈0.99x, jittery 0.92–0.965x) and -50dB silencedetect flags
+  genuine quiet passages. The dominant trigger is the NDI source's own jittery
+  sub-realtime delivery; the audio-bridge/muxer interleave amplifies it.
+
+**STEP 2 — bundled FFmpeg.** The Windows sidecar is OUR custom build-ffmpeg.yml
+ffmpeg n8.1.1 (the "gyan full_build" note is stale since the alpha.34 swap). It has
+--enable-nvenc, cuda hwaccel, cuvid/nvdec, hwupload_cuda — but **NO scale_cuda and
+NO scale_npp** (no --enable-cuda-llvm/--enable-libnpp). Smoke test:
+`hwupload_cuda,scale_cuda=…` → "Error parsing filterchain"; control
+`format=nv12,hwupload_cuda → hevc_nvenc` = 5.35x. So the GPU path can't even run
+without a CI FFmpeg rebuild — and it wouldn't have helped anyway. Recorded to
+memory ([[ndi-srt-audio-fix-is-NOT-gpu-pipeline-route]]) so it isn't re-chased.
+
+**alpha.76 (this commit) — the fix the measurement pointed to.** Add
+`-max_interleave_delta 0` to the SRT/mpegts output in `build_ffmpeg_cmd`
+(FFmpeg's default is 10s of interleave buffering; 0 = flush each packet as ready
+instead of holding video to wait for the lagging bursty audio). In the controlled
+A/B this lifted Auto from 0.965x/backing-up to 1.06x/empty-channel. It does NOT
+touch the load-bearing wallclock (-use_wallclock_as_timestamps) or aresample=async
+(both required for ATEM a/v sync + video — see build_audio_filter alpha.73 comment).
+No-op for single-stream outputs; reversible. Operator chose this route after the
+GPU disproof (AskUserQuestion).
+
+**PENDING — the deciding test is the operator's ATEM, not loopback** (loopback has
+no a/v-sync enforcement). Install alpha.76, NDI source + Audio Mixer = Auto, >10
+min: does audio stay present + in sync past the old 2–10 min failure? If the muxer
+flag alone isn't enough, the next non-GPU lever is re-clocking/genlocking the NDI
+audio to the video frame rate (lock samples-per-frame) so the two live clocks
+can't drift. Working production fallback remains Custom/Dante audio.
+
 ### Session 20 priorities (set at END OF SESSION 19 — mostly deferred by the audio firefight above; still valid carry-overs)
 
 1. **Operator runs the real 6-camera show** on the rig (6 NDI → 6 DeckLink

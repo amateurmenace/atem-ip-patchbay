@@ -1439,6 +1439,38 @@ impl Streamer {
                     "-f".into(), "mpegts".into(),
                     "-mpegts_flags".into(), "+resend_headers".into(),
                     "-flush_packets".into(), "1".into(),
+                    // alpha.76: disable the mpegts muxer's interleave buffering
+                    // (FFmpeg's max_interleave_delta default is 10000000us = 10s).
+                    //
+                    // Session 22 measured the long-open NDI->SRT->ATEM "audio
+                    // dies after a few minutes" bug ON THE RIG and DISPROVED the
+                    // earlier CPU/GPU theory: the streaming FFmpeg uses ~0.3 of a
+                    // 48-core CPU (idle) -- swscale/scale are NOT the bottleneck.
+                    // The throttle is HERE, in the muxer. With audio=Silent the
+                    // video channel never backs up (ch_cap_remaining stays 64) and
+                    // speed holds ~0.985x; with the NDI audio bridge on (Auto), the
+                    // bridge delivers audio in bursts (gap_ms up to ~310ms) and the
+                    // mpegts muxer buffers video up to max_interleave_delta trying
+                    // to re-interleave it in order -- that buffering back-pressures
+                    // the rawvideo pipe read, the channel fills (64 -> 1), and the
+                    // pipeline drops sub-realtime (0.965x). The slightly-slow output
+                    // then lets the realtime wallclock+aresample audio accumulate a
+                    // deficit until the ATEM drops it after minutes.
+                    //
+                    // 0 = no interleave buffering: the muxer flushes each packet as
+                    // it is ready instead of holding video to wait for lagging
+                    // audio. In the controlled A/B this lifted Auto from
+                    // 0.965x/backing-up to 1.06x/empty channel. It does NOT touch
+                    // the load-bearing wallclock (-use_wallclock_as_timestamps) or
+                    // aresample=async (both required for ATEM a/v sync + video --
+                    // see build_audio_filter alpha.73). No-op for single-stream
+                    // outputs (nothing to interleave). Reversible.
+                    //
+                    // Throughput verified on a local SRT loopback; ATEM a/v-sync /
+                    // presentation can only be confirmed on the real ATEM (loopback
+                    // has no a/v-sync enforcement) -- operator A/B with Auto audio,
+                    // native NDI source, >10 min is the deciding test.
+                    "-max_interleave_delta".into(), "0".into(),
                 ]);
             }
             "rtmp" => {
