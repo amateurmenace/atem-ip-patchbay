@@ -3924,11 +3924,70 @@ the NDI-audio bridge entirely.
 5. The alpha.66 frame-delta stall detector + alpha.67 backoff are in but
    unverified under a real multi-hour remote-SRT run.
 
+### Session 21 wins (alpha.71, 2026-06-13)
+
+**FIXED the NDI→SRT→ATEM "audio dies after a few minutes" bug** — the
+operator's headline complaint, open since before alpha.66. Diagnosed with
+alpha.70's `audio_rms_db` telemetry on the Broadcast Pix rig, root-caused with
+a standalone FFmpeg harness, fixed surgically, shipped as alpha.71.
+
+**Verdict: DOWNSTREAM, not upstream.** Drove a faithful repro via the API —
+tile 1 = STUDIO-A-BPIX (NDI, continuous YouTube audio) → Auto audio →
+`custom_url` redirected to a LOCAL loopback SRT listener so it never touched
+the live ATEM (tile 0 / key `rmlj-` is the operator's; my test was tile 1 /
+key `6xoh-`). Ran 15 min. The capture telemetry was flawless the WHOLE time
+(`audio_rms_db` -20..-60 dB, ZERO lines < -70, `audio_sent` ~100/s,
+`audio_dropped`=0) while the loopback OUTPUT (FFmpeg silencedetect) grew
+escalating choppy digital-silence gaps from ~5 min on (matching Session-20's
+7s@6min / 32s@8.8min). Airtight: at the exact moments the output was silent
+the CAPTURE was simultaneously LOUD (-25..-40 dB). So the grafton-ndi receiver
+hands us perfect audio — it dies inside FFmpeg. This also RULES OUT the
+upstream "dedicated audio-capture thread" fix the Session-20 decision tree
+hypothesized; no `ndi_capture.rs` change was needed.
+
+**Root cause: alpha.66's `-use_wallclock_as_timestamps` on the SRT path.**
+alpha.66 put wallclock on BOTH FFmpeg inputs (rawvideo stdin pipe + s16le TCP
+audio bridge) for SRT/RTMP, copying alpha.65's DeckLink fix. But DeckLink is
+genlocked (its muxer pins the pipeline to exactly 1.0x); SRT free-runs
+slightly sub-realtime (NDI 29.97 fps forced to CFR `-r 30` + encode/mux
+overhead → measured `speed=0.984x`). The video hides that with CFR frame-dup;
+the audio can't — with wallclock, each sub-realtime read is stamped at a
+real-time-NOW that drifts WIDER than the samples' own 1/48000 s duration, so
+`aresample=async` sees an ever-growing forward gap and FILLS it with
+escalating silence.
+
+**Harness proof** (bundled ffmpeg, realtime testsrc2 video + a sub-realtime
+sine feed over the same flags as the app): wallclock + 6%-deficit = **40
+silence regions / 45s**; no-wallclock = **0**; no-wallclock + 10%-deficit
+stress = **0**. Same total sample count every run → the bug OVERWRITES real
+audio with silence (it doesn't drop samples), matching Session-20's "packets
+present, content is digital silence."
+
+**Fix (commit `3a88c3f`):** `-use_wallclock_as_timestamps` ONLY for DeckLink.
+SRT/RTMP revert to symmetric 0-based PTS (video = frame count, audio = sample
+count — the not-black alpha.60-65 behavior, so the alpha.60 black-ATEM can't
+return) while KEEPING `aresample=async=1000` to smoothly absorb the small real
+source-vs-output drift (what alpha.66 was actually reaching for; pre-alpha.66
+had NO drift handling, which is why that era also lost audio). wallclock and
+aresample are now DECOUPLED — the dead `ATEM_DISABLE_NDI_WALLCLOCK` env hatch
+is removed (its behavior is the new SRT default). ~3 lines of real logic
+change in `build_ffmpeg_cmd_for_ndi` + `build_audio_filter`. DeckLink
+(wallclock-both, load-bearing since alpha.65) and custom/silent audio modes
+are untouched.
+
+**Still pending:** on-rig end-to-end verification of alpha.71 once CI
+publishes — NDI→SRT, Audio Mixer = Auto, run >15 min, confirm audio stays
+present at the ATEM AND a/v stays in sync (the loopback harness proves the
+silence is gone; real-ATEM lip-sync over a long run is the last check). Can't
+compile locally on this box (no libclang) — CI is the build gate.
+
 ### Session 21 priorities
 
-1. **Read `audio_rms_db` from a fresh alpha.70 repro → pick the fix direction
-   (upstream NDI-receiver vs downstream bridge) → FIX THE AUDIO BUG.** THE
-   priority. See Open issue #1 for the decision tree + likely fixes.
+1. ~~**Read `audio_rms_db` … FIX THE AUDIO BUG.**~~ DONE in alpha.71 (commit
+   `3a88c3f`) — see Session 21 wins above. DOWNSTREAM: wallclock on the
+   sub-realtime SRT path made `aresample` fill escalating silence; fixed by
+   dropping wallclock for SRT while keeping aresample. **Pending: on-rig
+   verify once alpha.71 CI publishes** (Auto audio, >15 min, audio + a/v sync).
 2. Verify the drop/freeze fixes hold under a real long remote-SRT run.
 3. The Session-19-era 6-NDI→DeckLink show + carry-overs below, once audio is
    closed.
@@ -4400,6 +4459,17 @@ Key implementation gotchas:
   (NDI receiver hands us silence) vs downstream (real audio dies in
   bridge→FFmpeg). Reverted the alpha.69 buffers. THE deciding diagnostic;
   audio-dies bug STILL OPEN.
+- `v0.2.0-alpha.71` (commit `3a88c3f`): Session 21 — **FIXES the NDI→SRT→ATEM
+  audio-dies bug.** alpha.70's `audio_rms_db` proved it DOWNSTREAM (capture
+  continuously real -20..-60 dB while the loopback output grew escalating
+  digital-silence gaps from ~5 min). Root cause: alpha.66's
+  `-use_wallclock_as_timestamps` on the slightly-sub-realtime SRT pipeline
+  (`speed≈0.984x`) made `aresample=async` fill the growing wallclock-vs-sample
+  gap with silence. Fix: wallclock ONLY for DeckLink; SRT/RTMP back to
+  symmetric 0-based PTS + keep `aresample` (decoupled the wallclock/aresample
+  pairing, removed the dead `ATEM_DISABLE_NDI_WALLCLOCK` hatch). Validated in a
+  standalone FFmpeg harness (40 silence regions/45s WITH wallclock, 0 WITHOUT).
+  On-rig long-run verify pending.
 
 ### v0.2.0 UI / UX scope (queued)
 
