@@ -1837,7 +1837,18 @@ impl Streamer {
         self.state.stats_in_place(|s| {
             s.total_reconnects_this_session = s.total_reconnects_this_session.saturating_add(1);
         });
-        let delay_secs = backoff_secs(*attempt);
+        // alpha.67: an ATEM SRT destination holds the per-key receiver slot
+        // for ~15s after an abrupt disconnect, so reconnecting on the normal
+        // 1-2s ladder just churns "Conversion failed!" against a locked slot.
+        // Wait the slot out instead. DeckLink (local card) and RTMP have no
+        // such hold and keep the fast ladder.
+        let atem_srt =
+            !snap.is_decklink() && snap.current_protocol.eq_ignore_ascii_case("srt");
+        let delay_secs = if atem_srt {
+            backoff_secs_atem_srt(*attempt)
+        } else {
+            backoff_secs(*attempt)
+        };
         if !self
             .backoff_with_cancel(delay_secs, *attempt, snap.auto_reconnect_max_attempts)
             .await
@@ -2056,6 +2067,31 @@ fn backoff_secs(next_attempt: u32) -> u32 {
         5 => 8,
         6 => 16,
         7 => 32,
+        _ => 60,
+    }
+}
+
+/// alpha.67: reconnect backoff for an ATEM SRT destination.
+///
+/// The BMD ATEM holds the per-key SRT receiver slot for ~15s (observed on
+/// the Broadcast Pix rig) after a connection ends abruptly — and a stream
+/// that froze and got force-killed, or that libsrt tore down on a network
+/// timeout, ALWAYS ends abruptly (even FFmpeg's own close logs "Error
+/// writing trailer" because the link is already dead). Reconnecting before
+/// the slot releases earns an immediate "Conversion failed!" / I/O error,
+/// and hammering it at the normal 1-2s cadence re-arms the hold — turning
+/// ONE transient drop into a multi-attempt churn of dead air (Session-20
+/// capture: reconnect counter 6->12 in ~40s around a single freeze, which
+/// is exactly the "sound died" the operator hears). So the first reconnect
+/// waits out the lockout window, then escalates. Only ATEM SRT needs this:
+/// DeckLink is a local card (no receiver slot) and RTMP has no equivalent
+/// per-key hold, so both keep the fast `backoff_secs` ladder above.
+fn backoff_secs_atem_srt(next_attempt: u32) -> u32 {
+    match next_attempt {
+        0 | 1 => 0, // first start — no prior session to clear
+        2 => 15,    // first reconnect — wait out the ~15s receiver-slot hold
+        3 => 30,
+        4 => 45,
         _ => 60,
     }
 }
