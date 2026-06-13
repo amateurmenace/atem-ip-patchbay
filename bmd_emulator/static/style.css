@@ -1599,6 +1599,49 @@ button.big { padding: 14px 18px; font-size: 14px; }
   background: var(--panel);
 }
 
+/* alpha.68: prominent SRT-latency control (presets + custom input). */
+.dest-latency {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.dest-latency-head {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-bottom: 8px;
+}
+.dest-latency-label {
+  font-weight: 700; font-size: 12px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.dest-latency-help { font-size: 11px; color: var(--muted); line-height: 1.35; }
+.dest-latency-help strong { color: var(--text); }
+.latency-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.lat-preset {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 6px 14px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  cursor: pointer; font-size: 13px; font-weight: 600; line-height: 1.1;
+}
+.lat-preset small {
+  font-size: 9px; font-weight: 400; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+.lat-preset:hover { border-color: var(--accent); background: var(--panel-2); }
+.lat-custom {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--muted); margin-left: 2px;
+}
+.lat-custom input {
+  width: 72px; padding: 5px 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--text); font-size: 13px;
+}
+
 .advanced-body {
   display: flex; flex-direction: column; gap: 10px;
   padding: 8px 0;

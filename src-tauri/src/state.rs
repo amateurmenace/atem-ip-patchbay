@@ -363,7 +363,13 @@ impl EncoderState {
                 passphrase: String::new(),
                 custom_url: String::new(),
                 srt_mode: "caller".into(),
-                srt_latency_us: 500_000,
+                // alpha.68: operator-requested 200ms default (low-latency
+                // starting point). Good links tolerate it fine; lossy
+                // internet paths want more headroom (measured: a remote-ATEM
+                // path dropped every ~2min at 500ms, rock-solid at 2000ms) --
+                // the prominent Latency control + presets let operators raise
+                // it per-path without hunting through Advanced.
+                srt_latency_us: 200_000,
                 srt_listen_port: 9710,
                 streamid_override: String::new(),
                 streamid_legacy: false,
