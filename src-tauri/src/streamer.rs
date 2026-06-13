@@ -1059,46 +1059,37 @@ impl Streamer {
             None
         };
 
-        // Will the NDI audio TCP bridge actually feed FFmpeg? The bridge
-        // is allocated only for Auto mode (not Custom, not Silent), so a
-        // Some(bridge) here together with no custom device means the bridge
-        // IS the audio input. Mutually exclusive by construction:
-        // custom_audio_name is Some only when audio_mode == "custom", which
-        // is exactly when the bridge is NOT created.
-        let using_bridge = custom_audio_name.is_none() && audio_bridge.is_some();
-
-        // alpha.66: clock-drift fix for the REMOTE SRT/RTMP path.
+        // alpha.71: -use_wallclock_as_timestamps ONLY for DeckLink, never for
+        // SRT/RTMP. This is the fix for the operator's "audio plays a few
+        // minutes then goes choppy then silent" report.
         //
-        // The NDI feed reaches FFmpeg as TWO independent inputs — rawvideo
-        // over the stdin pipe and s16le over the TCP audio bridge. alpha.65
-        // put BOTH on a shared wallclock timeline for DeckLink so they can't
-        // drift apart, and that path has been audio-stable. SRT/RTMP were
-        // deliberately left frame-counted (video) + sample-counted (audio)
-        // after the alpha.60 black-ATEM scare — which means the SRT path has
-        // had NO drift correction at all. Over ~8-10 min the two nominal-rate
-        // counters diverge (the NDI source isn't exactly 30.000fps/48000.000Hz,
-        // and any frame-drop under back-pressure breaks the samples-per-frame
-        // ratio) until FFmpeg's a/v sync logic drops audio and then goes
-        // silent — the exact failure alpha.49 documented, just never fixed on
-        // this path. Taken further it stalls the whole pipeline (the
-        // multi-hour freeze).
+        // History: alpha.66 put BOTH FFmpeg inputs (rawvideo stdin pipe + the
+        // s16le TCP audio bridge) on wallclock for SRT/RTMP too, copying what
+        // alpha.65 proved for DeckLink. That was wrong for SRT and CAUSED the
+        // bug it was meant to fix.
         //
-        // The alpha.60 black-out was the ASYMMETRY: wallclock audio (~1.7e9
-        // epoch PTS) vs 0-based frame-counted video — a ~54-year gap that
-        // wrecked the MPEG-TS PCR so the ATEM couldn't present video. Putting
-        // BOTH inputs on wallclock removes the asymmetry — exactly what
-        // alpha.65 proved for the (pickier) decklink muxer, and what every
-        // hardware encoder does feeding live capture into MPEG-TS/SRT (a USB
-        // webcam to ATEM already works this way). Paired with aresample=async
-        // in build_audio_filter, the residual source-vs-receiver drift is
-        // absorbed continuously. ATEM_DISABLE_NDI_WALLCLOCK reverts SRT/RTMP
-        // to the old sample-count path as a safety valve; DeckLink keeps
-        // wallclock unconditionally (load-bearing there since alpha.65).
-        let pipe_wallclock = if plan.protocol == "decklink" {
-            true
-        } else {
-            using_bridge && std::env::var("ATEM_DISABLE_NDI_WALLCLOCK").is_err()
-        };
+        // Why SRT differs from DeckLink: a DeckLink output is genlocked -- its
+        // muxer consumes frames at the card's hardware clock, pinning the whole
+        // pipeline to exactly 1.0x realtime, so wallclock-stamped reads stay
+        // honest. SRT/RTMP free-run: the NDI source is 29.97 fps but we force
+        // CFR -r 30, and with encode/mux overhead the pipeline settles a hair
+        // under realtime (measured speed ~= 0.984x). The video hides that by
+        // duplicating CFR frames; the AUDIO cannot. With wallclock, each
+        // sub-realtime read gets a real-time-NOW stamp that drifts WIDER than
+        // the samples' own 1/48000 s duration, so aresample=async sees an
+        // ever-growing forward gap and fills it with escalating silence.
+        // Reproduced decisively in a standalone FFmpeg harness: realtime video
+        // + a 6% sub-realtime audio feed gave 40 silence regions / 45s WITH
+        // wallclock and 0 WITHOUT.
+        //
+        // The fix reverts SRT/RTMP to symmetric 0-based PTS (video = frame
+        // count, audio = sample count) -- the same not-black behavior
+        // alpha.60-65 shipped -- while KEEPING aresample=async in
+        // build_audio_filter to smoothly correct the small real drift (what
+        // alpha.66 was actually reaching for). Symmetric 0-based PTS means no
+        // asymmetry, so the alpha.60 black-ATEM cannot return. DeckLink keeps
+        // wallclock unconditionally (load-bearing since alpha.65).
+        let pipe_wallclock = plan.protocol == "decklink";
 
         let mut input_args: Vec<String> = Vec::new();
         if pipe_wallclock {
@@ -1166,15 +1157,14 @@ impl Streamer {
                 bridge.port()
             );
             // The audio bridge shares the SAME wallclock decision as the
-            // rawvideo pipe above (pipe_wallclock): both DeckLink and the
-            // alpha.66 SRT/RTMP fix want both inputs on one real-time
-            // timeline so they can't drift apart. History: sample-count
-            // audio vs frame-counted video diverges over minutes — a
-            // ~2.4fps throttle then a hard freeze on DeckLink (alpha.64/65),
-            // and audio drop-out then freeze on SRT (alpha.66). The remedy
-            // is wallclock-on-BOTH + aresample=async, not one or neither.
-            // Only the ATEM_DISABLE_NDI_WALLCLOCK escape hatch passes false
-            // here (SRT/RTMP revert to the pre-alpha.66 sample-count path).
+            // rawvideo pipe above (pipe_wallclock): true ONLY for DeckLink
+            // (genlocked, 1.0x -- wallclock keeps both inputs on the card's
+            // real-time clock). For SRT/RTMP pipe_wallclock is false (alpha.71)
+            // -- with wallclock there, aresample filled the slightly-sub-
+            // realtime read gap with escalating silence (the "audio dies after
+            // a few minutes" bug). Both inputs then run on symmetric 0-based
+            // PTS and aresample=async (build_audio_filter) absorbs the small
+            // real drift. See the pipe_wallclock comment above for the full why.
             input_args.extend(bridge.ffmpeg_input_args(pipe_wallclock));
         } else {
             input_args.extend([
@@ -2251,34 +2241,30 @@ fn build_audio_filter(snap: &Snapshot) -> Option<String> {
         chain.push("volume=0".into());
     }
 
-    // alpha.49 / alpha.66: clock-drift compensation. NDI's source clock
-    // (iPhone, vMix, etc.) and the local output clock (the DeckLink card,
-    // or the receiver wallclock the bridge stamps against) are different
-    // crystals; even ~50 ppm accumulates over 5-10 min until FFmpeg's a/v
-    // sync logic drops audio and then goes silent (operator: "audio works
-    // for a few minutes then dies"). aresample=async=1000 inserts up to
-    // 1000 samples/sec of correction continuously, absorbing the drift
-    // without artifacts — paired with the wallclock timestamps now on BOTH
-    // the rawvideo pipe AND the audio bridge (build_ffmpeg_cmd_for_ndi) so
-    // the resampler has a real reference to correct against.
+    // alpha.49 / alpha.66 / alpha.71: clock-drift compensation. NDI's source
+    // clock (iPhone, vMix, etc.) and the local output clock are different
+    // crystals; that plus the 29.97-vs-CFR-30 mismatch makes the two input
+    // timelines drift until FFmpeg's a/v sync logic pushes audio out of sync
+    // (operator: "audio works for a few minutes then dies"). aresample=async
+    // =1000 continuously resamples up to 1000 samples/sec to absorb that drift
+    // smoothly, with no inserted silence.
     //
     // Applies to:
-    //   - DeckLink (alpha.49/65): always.
-    //   - NDI -> SRT/RTMP via the audio bridge (alpha.66): the path that
-    //     was dropping audio at 8-10 min because it had NO drift handling.
-    //     The original alpha.49 note ("ATEM/SRT's encoder handles a/v sync,
-    //     resampler unnecessary") was wrong for two SEPARATE-input clocks —
-    //     the AAC encoder happily encodes drifting audio right up until the
-    //     muxer drops it. Gated to the bridge case (Auto audio, not Custom/
-    //     Silent) and skipped under ATEM_DISABLE_NDI_WALLCLOCK so it stays
-    //     paired with the wallclock decision above.
+    //   - DeckLink (alpha.49/65): always (paired with wallclock; the genlocked
+    //     output pins the pipeline to 1.0x so wallclock is honest there).
+    //   - NDI -> SRT/RTMP via the audio bridge (alpha.66): the path that was
+    //     dropping audio. alpha.71 NOTE: aresample STAYS, but the wallclock it
+    //     used to be paired with is now OFF for SRT/RTMP (see pipe_wallclock in
+    //     build_ffmpeg_cmd_for_ndi). With wallclock, aresample FILLED the
+    //     sub-realtime read gap with escalating silence; on symmetric 0-based
+    //     PTS it does its intended job -- smoothing the small real drift. The
+    //     two are now decoupled (no longer gated on a wallclock env var).
     // Custom-device audio (Dante via dshow/avf) keeps the alpha.14 path
-    // untouched — that input carries the device's own real timestamps.
+    // untouched -- that input carries the device's own real timestamps.
     let ndi_bridge_to_net = snap.source_id == "ndi"
         && !snap.is_decklink()
         && snap.audio_mode != "custom"
-        && snap.audio_mode != "silent"
-        && std::env::var("ATEM_DISABLE_NDI_WALLCLOCK").is_err();
+        && snap.audio_mode != "silent";
     if snap.is_decklink() || ndi_bridge_to_net {
         chain.push("aresample=async=1000:first_pts=0".into());
     }
