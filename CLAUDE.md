@@ -3975,11 +3975,29 @@ change in `build_ffmpeg_cmd_for_ndi` + `build_audio_filter`. DeckLink
 (wallclock-both, load-bearing since alpha.65) and custom/silent audio modes
 are untouched.
 
-**Still pending:** on-rig end-to-end verification of alpha.71 once CI
-publishes — NDI→SRT, Audio Mixer = Auto, run >15 min, confirm audio stays
-present at the ATEM AND a/v stays in sync (the loopback harness proves the
-silence is gone; real-ATEM lip-sync over a long run is the last check). Can't
-compile locally on this box (no libclang) — CI is the build gate.
+**Verification status:** CI GREEN on both platforms (build gate — can't
+compile locally, no libclang); the installed alpha.71 binary was confirmed
+emitting the FIXED FFmpeg command (`use_wallclock_as_timestamps` occurrences =
+0, down from 2; `aresample=async` retained); and it streamed NDI→bridge→
+hevc_nvenc→SRT healthily for ~15s (real audio -16 dB) before — unrelated to
+the fix — **Windows Defender quarantined the unsigned exe as a
+`Trojan:Win32/Bearfoos.A!ml` ML FALSE POSITIVE** (confirmed via
+`Get-MpThreatDetection`; the exe just vanished, no WER entry, no panic). This
+account is NOT admin, so the exe can't be restored/excluded from a Claude
+session (`Add-MpPreference` + `MpCmdRun -Restore` both 0x80070005). See
+[[defender-quarantines-unsigned-windows-build]].
+
+**STILL PENDING (needs operator):** (1) restore the exe — Windows Security →
+Protection history → Allow/Restore the Bearfoos item, and add a folder
+exclusion for the install dir so it sticks; (2) then the 15-min real-NDI→SRT
+long-run with Audio Mixer = Auto to confirm audio stays present + a/v in sync
+on the live ATEM. The standalone FFmpeg harness already PROVED the silence is
+gone (40 regions/45s with wallclock → 0 without, identical ffmpeg+flags), so
+this is final confirmation, not the primary proof. Also restore tile 1's test
+config back to its original (REMOTEENGINEERING, auto, atem,
+`srt://173.76.193.167:1935`, key `6xoh-76yk-ry`) — Session 21 left it pointed
+at the loopback `srt://127.0.0.1:9999`. (Operator's LIVE tile 0 / key `rmlj-`
+was never touched.)
 
 ### Session 21 priorities
 
