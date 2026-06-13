@@ -63,11 +63,13 @@ impl AudioBridge {
     pub async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
-        // Buffer 128 chunks ≈ 2-3 seconds of audio depending on chunk
-        // size. Enough to absorb a brief FFmpeg startup stall without
-        // dropping samples; not so much that a stuck FFmpeg piles up
-        // unbounded memory.
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(128);
+        // alpha.69: buffer 512 chunks (~10s) up from 128. The Session-20
+        // long-run capture showed escalating audio silence gaps from the
+        // delivery into FFmpeg stalling; a deeper bridge queue rides out
+        // transient FFmpeg read-stalls before the writer's blocking send
+        // back-pressures the capture into dropping (a drop = a silence gap).
+        // Still bounded so a genuinely stuck FFmpeg can't pile up memory.
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(512);
 
         tokio::spawn(async move {
             // FFmpeg connects exactly once — when the input is opened
@@ -179,6 +181,12 @@ impl AudioBridge {
             args.push("1".into());
         }
         args.extend([
+            // alpha.69: deeper input thread queue so FFmpeg buffers bursty
+            // TCP audio instead of back-pressuring the bridge (which would
+            // force the capture to drop chunks -> silence gaps). Pairs with
+            // the larger bridge + capture channels.
+            "-thread_queue_size".into(),
+            "1024".into(),
             "-f".into(),
             "s16le".into(),
             "-ar".into(),
