@@ -1,5 +1,17 @@
 atem-net-diag — ATEM network diagnostic tool
-v0.2.2  ·  arm64 macOS
+v0.2.8  ·  arm64 macOS
+
+SINCE v0.2.2 (v0.2.3 – v0.2.8)
+------------------------------
+* Capture-visibility heuristic now keys on the ATEM's IP (fires
+  correctly on the streamer's own Mac, a peer Mac with or without a
+  SPAN port, and the ATEM's own Mac); ?force_visibility=1 previews
+  the banner.
+* Pre-show readiness check panel in the dashboard.
+* UDM API key is entered inside the dashboard (no env var needed) and
+  survives password-manager browser extensions.
+* Filter + pin specific switches and ports; per-switch pin.
+* Config-form save/apply fixes and UX feedback.
 
 WHAT'S NEW IN v0.2.2 (Session 8 — mirror-mode wizard)
 -----------------------------------------------------
