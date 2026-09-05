@@ -9,9 +9,14 @@
 //! Other source types (AVF webcam, pipe / RTSP, SRT/RTMP relay) need
 //! FFmpeg-tee plumbing to expose raw frames; that lands in alpha.10.
 //!
-//! Audio over OMT is also alpha.10 — libomt's audio Send API has its
-//! own quirks (timestamp alignment with video) and we want to design
-//! that integration deliberately rather than retrofitting.
+//! alpha.12 adds `feed_audio_frame` — OMT audio publishing for NDI
+//! sources. libomt doesn't expose audio-specific setters on its
+//! `OmtMediaFrame` (only video setters); we reach through
+//! `as_raw_mut()` to set the C struct's `SampleRate`, `Channels`,
+//! `SamplesPerChannel` fields directly. The audio codec is FPA1
+//! (32-bit floating point planar) which is the only audio codec OMT
+//! defines, so the layout matches grafton-ndi's planar `AudioFrame`
+//! bytes exactly — no re-interleaving needed.
 //!
 //! Like omt_runtime + omt_capture, this whole module compiles to a
 //! no-op when the `omt` cargo feature is off — `start_for_format`
@@ -134,6 +139,72 @@ impl OmtSender {
             // SAFETY: data borrow outlives the OMT_Send call below.
             // libomt copies internally before returning.
             frame.set_data(data.as_ptr() as *mut std::ffi::c_void, data.len() as i32);
+            let rc = inner.send.send(&mut frame);
+            Ok(rc)
+        }
+    }
+
+    /// Feed one chunk of OMT audio. `samples` is planar 32-bit
+    /// floating point PCM (channel-major: all of ch0's samples, then
+    /// all of ch1's, ...). `num_channels` and `sample_rate` describe
+    /// the chunk's layout. Length of `samples` must equal
+    /// `num_channels * (samples.len() / num_channels)`, i.e. the
+    /// caller has already laid out exactly N channels of M samples.
+    ///
+    /// Returns the libomt send return code (negative on error). When
+    /// the `omt` feature is off, returns an error instead of a no-op
+    /// so misuse is loud.
+    pub fn feed_audio_frame(
+        &self,
+        samples: &[f32],
+        num_channels: i32,
+        sample_rate: i32,
+    ) -> Result<i32> {
+        #[cfg(not(feature = "omt"))]
+        {
+            let _ = (samples, num_channels, sample_rate);
+            Err(anyhow!("OMT support not compiled in"))
+        }
+
+        #[cfg(feature = "omt")]
+        {
+            use libomt::{OmtCodec, OmtFrameType, OmtMediaFrame};
+            if num_channels <= 0 {
+                return Err(anyhow!("num_channels must be > 0 (got {num_channels})"));
+            }
+            let total = samples.len() as i32;
+            if total % num_channels != 0 {
+                return Err(anyhow!(
+                    "samples.len() ({total}) is not a multiple of num_channels ({num_channels})"
+                ));
+            }
+            let samples_per_channel = total / num_channels;
+            if samples_per_channel == 0 {
+                return Err(anyhow!("empty audio chunk"));
+            }
+            let inner = self.inner.lock().unwrap();
+            let mut frame = OmtMediaFrame::new();
+            frame.set_type(OmtFrameType::Audio);
+            // FPA1 = the only audio codec OMT defines (32-bit floating
+            // point planar). libomt's enum maps to the C
+            // OMTCodec_FPA1 constant.
+            frame.set_codec(OmtCodec::Fpa1);
+            // libomt 0.1.3 has no audio-specific setters — reach
+            // through to the C struct directly. Field names follow
+            // bindgen's PascalCase preservation of the libomt.h
+            // OMTMediaFrame definition (verified against the
+            // vendor/libomt/libomt.h source).
+            let raw = frame.as_raw_mut();
+            unsafe {
+                (*raw).SampleRate = sample_rate;
+                (*raw).Channels = num_channels;
+                (*raw).SamplesPerChannel = samples_per_channel;
+            }
+            // DataLength = SamplesPerChannel * Channels * 4 bytes,
+            // which equals samples.len() * 4 since the planar buffer
+            // is already laid out contiguously.
+            let len_bytes = (samples.len() * std::mem::size_of::<f32>()) as i32;
+            frame.set_data(samples.as_ptr() as *mut std::ffi::c_void, len_bytes);
             let rc = inner.send.send(&mut frame);
             Ok(rc)
         }

@@ -1,0 +1,833 @@
+# Self-built FFmpeg+DeckLink sidecar builder.
+#
+# Builds FFmpeg from upstream sources on Mac arm64 + Windows x64
+# with `--enable-decklink` (plus the existing gpl/srt/x264/x265/HW-
+# encoder feature set we used to get from jellyfin-ffmpeg / gyan.dev's
+# full_build). Uploads the result as Release assets in a private
+# prerelease so release.yml can pull them via `gh release download`
+# on subsequent main-app releases.
+#
+# WHY THIS EXISTS: see ci/ffmpeg-pins.env. tl;dr: no prebuilt
+# Windows FFmpeg ships `--enable-decklink` because the Blackmagic
+# SDK can't be redistributed. We mirror the SDK to a private repo
+# (manual, one-time) and build our own FFmpeg against it. Result is
+# linked dynamically — end users still install BMD Desktop Video
+# themselves to get the runtime driver.
+#
+# TRIGGER:
+# - `workflow_dispatch` — manual rebuild, e.g. after editing this
+#   workflow itself or testing a configure-flag change without
+#   bumping the pins.
+# - `push` to any BRANCH with `paths: ci/ffmpeg-pins.env` filter —
+#   auto-rebuild when version pins change.
+#
+# Why explicit branches filter: a `push` trigger with only `paths`
+# also fires on TAG pushes (the paths filter compares against the
+# tag's commit diff, which is non-empty for any new alpha tag the
+# main app ships). Without branches:['**'], every `v*` tag the main
+# app ships re-triggers a 30-45 min FFmpeg+DeckLink rebuild AND
+# clobbers the sidecar release assets — racing release.yml's Mac
+# `gh release download` step. The alpha.38 Mac build hit exactly
+# this race and failed at HTTP 404 because the asset upload was
+# mid-flight when the download attempted. branches:['**'] limits the
+# auto-trigger to actual pin/workflow changes on any branch and
+# excludes tag pushes entirely; release.yml's tag-pushed runs now
+# always download a stable already-uploaded sidecar.
+#
+# SETUP REQUIRED before first dispatch will succeed:
+# - amateurmenace/bmd-decklink-sdk-mirror PRIVATE repo with the
+#   DeckLink SDK ${BMD_SDK_VERSION} zip uploaded as a release
+#   asset on tag v${BMD_SDK_VERSION} (see docs/SETUP-FFMPEG-CI.md).
+# - `BMD_SDK_PAT` secret on THIS repo — fine-grained PAT scoped
+#   read-only to the mirror repo's contents (releases + metadata).
+
+name: Build FFmpeg+DeckLink sidecar
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'ci/ffmpeg-pins.env'
+      - '.github/workflows/build-ffmpeg.yml'
+
+permissions:
+  contents: write   # for gh release create / upload back to this repo
+
+jobs:
+
+  # ---------------------------------------------------------------
+  # Read the pins file once and expose the values as outputs so
+  # both build jobs see the same numbers. Also computes the target
+  # release tag (used by both build + upload steps).
+  # ---------------------------------------------------------------
+  resolve-pins:
+    name: Resolve FFmpeg + SDK pins
+    runs-on: ubuntu-latest
+    outputs:
+      ffmpeg_version: ${{ steps.read.outputs.ffmpeg_version }}
+      bmd_sdk_version: ${{ steps.read.outputs.bmd_sdk_version }}
+      build_revision: ${{ steps.read.outputs.build_revision }}
+      release_tag: ${{ steps.read.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify BMD_SDK_PAT secret is configured
+        env:
+          HAS_PAT: ${{ secrets.BMD_SDK_PAT != '' }}
+        run: |
+          if [ "$HAS_PAT" != "true" ]; then
+            cat <<'EOF'
+          ============================================================
+            BMD_SDK_PAT secret is NOT configured.
+
+            Initial setup is required before this workflow can build
+            FFmpeg with --enable-decklink. The Blackmagic DeckLink
+            SDK has to be downloaded manually (EULA acceptance),
+            uploaded to a private mirror repo, and a fine-grained
+            PAT generated.
+
+            One-time setup steps: docs/SETUP-FFMPEG-CI.md
+
+            Until BMD_SDK_PAT is set, this workflow will fail at
+            this precondition step and the main app release pipeline
+            keeps using the existing jellyfin / gyan.dev FFmpeg
+            (which lacks --enable-decklink). No degradation; just
+            no DeckLink-output support in shipped installers.
+          ============================================================
+          EOF
+            exit 1
+          fi
+          echo "BMD_SDK_PAT is set; continuing."
+      - id: read
+        run: |
+          set -e
+          set -a
+          source ci/ffmpeg-pins.env
+          set +a
+          if [ -z "$FFMPEG_VERSION" ] || [ -z "$BMD_SDK_VERSION" ] || [ -z "$BUILD_REVISION" ]; then
+            echo "::error::ci/ffmpeg-pins.env missing one of FFMPEG_VERSION / BMD_SDK_VERSION / BUILD_REVISION"
+            exit 1
+          fi
+          # Strip the leading "n" off FFmpeg's tag for use in the release-tag (purely cosmetic; matches FFmpeg's release-tarball naming)
+          FFMPEG_VERSION_TRIM="${FFMPEG_VERSION#n}"
+          RELEASE_TAG="ffmpeg-decklink-${FFMPEG_VERSION_TRIM}-bmd${BMD_SDK_VERSION}-rev${BUILD_REVISION}"
+          echo "ffmpeg_version=${FFMPEG_VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "bmd_sdk_version=${BMD_SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_revision=${BUILD_REVISION}"   >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}"         >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: ${RELEASE_TAG}"
+
+  # ---------------------------------------------------------------
+  # macOS arm64 — native build on macos-14 runner.
+  # ~20-25 min cold; final artifact is ~30 MB tarball'd.
+  # ---------------------------------------------------------------
+  build-ffmpeg-macos:
+    name: Build FFmpeg (macOS arm64)
+    needs: resolve-pins
+    runs-on: macos-14
+    env:
+      FFMPEG_VERSION: ${{ needs.resolve-pins.outputs.ffmpeg_version }}
+      BMD_SDK_VERSION: ${{ needs.resolve-pins.outputs.bmd_sdk_version }}
+      RELEASE_TAG: ${{ needs.resolve-pins.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Homebrew build deps
+        run: |
+          # Match jellyfin-ffmpeg's feature set for the Mac sidecar:
+          # x264 + x265 (libx codecs), srt (transport for ATEM/SRT —
+          # Homebrew's package is `srt`, not `libsrt`), nasm/yasm
+          # (assembler), pkg-config (configure helper).
+          # VideoToolbox is built-in to macOS frameworks — no brew dep
+          # for that, just --enable-videotoolbox at configure time.
+          brew update >/dev/null
+          brew install nasm yasm pkg-config x264 x265 srt
+          echo "brew versions:"
+          brew list --versions nasm yasm x264 x265 srt
+
+      - name: Download BMD DeckLink SDK from private mirror
+        env:
+          GH_TOKEN: ${{ secrets.BMD_SDK_PAT }}
+        run: |
+          set -e
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::BMD_SDK_PAT secret not configured — see docs/SETUP-FFMPEG-CI.md"
+            exit 1
+          fi
+          mkdir -p /tmp/bmd-sdk
+          # The mirror repo's release tag matches the SDK version
+          # (e.g. v14.4); asset is the zip BMD ships unchanged.
+          gh release download "v${BMD_SDK_VERSION}" \
+            --repo amateurmenace/bmd-decklink-sdk-mirror \
+            --pattern '*.zip' \
+            --dir /tmp/bmd-sdk
+          ls -lh /tmp/bmd-sdk/
+          # Unpack — BMD ships a single zip; the layout is
+          # "Blackmagic DeckLink SDK <ver>/Mac/include/*.h" etc.
+          unzip -q /tmp/bmd-sdk/*.zip -d /tmp/bmd-sdk/extracted
+          SDK_SRC=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "Blackmagic*SDK*" | head -1)
+          if [ -z "$SDK_SRC" ]; then
+            SDK_SRC=$(find /tmp/bmd-sdk/extracted -maxdepth 2 -type d -name "*DeckLink*SDK*" | head -1)
+          fi
+          if [ -z "$SDK_SRC" ]; then
+            echo "::error::Could not locate SDK root inside zip"
+            find /tmp/bmd-sdk/extracted -maxdepth 3 -type d
+            exit 1
+          fi
+          # Move to a no-spaces path. The original BMD ships the SDK
+          # at "Blackmagic DeckLink SDK X.Y/" — spaces break FFmpeg's
+          # configure script (the --extra-cflags arg gets word-split
+          # by the time it reaches the compiler-test invocation, so
+          # the compiler test gets garbage and fails with "gcc is
+          # unable to create an executable file" even though gcc is
+          # perfectly fine).
+          SDK_ROOT="/tmp/bmd-sdk/sdk-root"
+          mv "$SDK_SRC" "$SDK_ROOT"
+          echo "BMD_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          ls -la "$SDK_ROOT/Mac/include/" | head -10
+
+      - name: Clone FFmpeg sources at ${{ env.FFMPEG_VERSION }}
+        run: |
+          set -e
+          git clone --depth 1 --branch "${FFMPEG_VERSION}" \
+            https://git.ffmpeg.org/ffmpeg.git /tmp/ffmpeg-src
+          (cd /tmp/ffmpeg-src && git log --oneline -1)
+
+      - name: Configure + build FFmpeg (Mac arm64)
+        run: |
+          set -e
+          cd /tmp/ffmpeg-src
+          # macOS COM shim: BMD's Mac SDK doesn't ship IID_IUnknown
+          # as a top-level constant — it lives only in
+          # Examples/Mac/platform.h as a macro that calls
+          # CFUUIDGetUUIDBytes(IUnknownUUID). FFmpeg's
+          # libavdevice/decklink_*.cpp references IID_IUnknown
+          # directly in its QueryInterface implementation, so without
+          # the macro it errors with "undeclared identifier".
+          # Write a small shim header next to the SDK headers and
+          # -include it via extra-cxxflags so every decklink_*.cpp
+          # sees the macro definition globally.
+          cat > "${BMD_SDK_ROOT}/Mac/include/atem_decklink_shim.h" <<'SHIM'
+          // alpha.31 CI shim — bridges BMD Mac SDK to FFmpeg's
+          // expectation of IID_IUnknown as a free symbol.
+          #pragma once
+          #include <CoreFoundation/CFPlugInCOM.h>
+          #ifndef IID_IUnknown
+          #define IID_IUnknown CFUUIDGetUUIDBytes(IUnknownUUID)
+          #endif
+          SHIM
+          ./configure \
+            --prefix=/tmp/ffmpeg-install \
+            --pkg-config-flags=--static \
+            --extra-cflags="-I${BMD_SDK_ROOT}/Mac/include" \
+            --extra-cxxflags="-I${BMD_SDK_ROOT}/Mac/include -include atem_decklink_shim.h" \
+            --extra-ldflags="-framework CoreFoundation" \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-nonfree \
+            --enable-decklink \
+            --enable-videotoolbox \
+            --enable-libsrt \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-protocol=srt \
+            --enable-protocol=tcp \
+            --enable-protocol=udp \
+            --enable-protocol=rtmp \
+            --enable-protocol=file \
+            --enable-protocol=pipe \
+            --enable-muxer=mpegts \
+            --enable-muxer=flv \
+            --enable-muxer=decklink \
+            --disable-doc \
+            --disable-debug \
+            --disable-htmlpages \
+            --disable-manpages \
+            --disable-podpages \
+            --disable-txtpages
+          echo "===== configure complete ====="
+          make -j$(sysctl -n hw.ncpu)
+          ls -lh ffmpeg
+
+      - name: Sanity-check the built FFmpeg
+        run: |
+          set -e
+          cd /tmp/ffmpeg-src
+          ./ffmpeg -version | head -5
+          echo "===== muxers (decklink + mpegts required) ====="
+          ./ffmpeg -hide_banner -muxers | grep -E '\s(decklink|mpegts|flv)\s' | sort
+          ./ffmpeg -hide_banner -muxers | grep -qE '\sdecklink\s' || { echo "::error::decklink muxer missing"; exit 1; }
+          ./ffmpeg -hide_banner -muxers | grep -qE '\smpegts\s' || { echo "::error::mpegts muxer missing"; exit 1; }
+          echo "===== encoders (libx264 + h264_videotoolbox required) ====="
+          ./ffmpeg -hide_banner -encoders | grep -E 'libx264|libx265|h264_videotoolbox|hevc_videotoolbox'
+          ./ffmpeg -hide_banner -encoders | grep -qE 'h264_videotoolbox' || { echo "::error::h264_videotoolbox missing"; exit 1; }
+          ./ffmpeg -hide_banner -encoders | grep -qE 'libx264' || { echo "::error::libx264 missing"; exit 1; }
+          echo "===== protocols (srt required) ====="
+          ./ffmpeg -hide_banner -protocols | grep -E 'srt|tcp|udp|rtmp'
+          ./ffmpeg -hide_banner -protocols | grep -qE '^\s*srt\s*$' || { echo "::error::srt protocol missing"; exit 1; }
+          # Strip debug symbols to keep the artifact tight.
+          strip ./ffmpeg
+          ls -lh ./ffmpeg
+
+      - name: Bundle Homebrew dylibs for portability
+        run: |
+          set -e
+          # alpha.35: the freshly-built ffmpeg links dynamically
+          # against Homebrew's libsrt + libx264 + libx265 (and their
+          # transitive deps like libssl / libcrypto / libz). On this
+          # runner those live under /opt/homebrew/...; on end-user
+          # machines they don't exist at that path, so dyld fails to
+          # load ffmpeg with "Library not loaded: /opt/homebrew/opt/
+          # srt/lib/libsrt.1.5.dylib" before main() even runs.
+          #
+          # alpha.34 shipped without this step. release.yml's Mac
+          # `ffmpeg -version` sanity check on its release runner
+          # (which doesn't brew install the build deps) failed at
+          # dyld, and the publish-release gate blocked the whole
+          # alpha.34 release. The artifact tarball was correct, the
+          # binary itself was correct, but neither could run anywhere
+          # except this build-ffmpeg.yml runner.
+          #
+          # Fix: copy each /opt/homebrew (or /usr/local) dylib
+          # referenced by ffmpeg — or by any transitively loaded dylib
+          # — next to ffmpeg, and rewrite the load-command references
+          # to @executable_path/<basename> so dyld resolves them
+          # relative to ffmpeg's own directory.
+          #
+          # This is the standard "portable Mach-O bundle" pattern that
+          # tools like dylibbundler, macdylibbundler, and Python's
+          # delocate-wheel use. We hand-roll it because the dep surface
+          # is small + we want the audit log.
+          OUT=/tmp/ffmpeg-out
+          mkdir -p "$OUT"
+          cp /tmp/ffmpeg-src/ffmpeg "$OUT/ffmpeg"
+          chmod u+w "$OUT/ffmpeg"
+
+          # Iteratively walk the dependency graph until no
+          # /opt/homebrew (or /usr/local) references remain in any
+          # Mach-O in $OUT. Each pass processes every binary currently
+          # in $OUT; newly-bundled dylibs are picked up next outer
+          # iteration. Hard-cap at 10 passes as a safety net in case
+          # the graph somehow doesn't converge.
+          pass=0
+          while true; do
+            pass=$((pass+1))
+            added=0
+            echo "===== Pass $pass ====="
+            for bin in "$OUT"/*; do
+              file "$bin" 2>/dev/null | grep -qE 'Mach-O' || continue
+              # otool -L emits "<path> (compatibility version ...)"
+              # lines; line 1 is the binary's own name (executables)
+              # or path (dylibs), so skip with NR>1. Filter to
+              # non-system absolute paths only — system libraries
+              # under /usr/lib/system and /System/ are macOS-
+              # guaranteed-present, leave alone.
+              deps=$(otool -L "$bin" 2>/dev/null | \
+                awk 'NR>1 && ($1 ~ /^\/opt\/homebrew/ || $1 ~ /^\/usr\/local\//) {print $1}')
+              for dep in $deps; do
+                depname=$(basename "$dep")
+                target="$OUT/$depname"
+                if [ ! -f "$target" ]; then
+                  echo "  bundling $dep -> $target"
+                  # BSD cp follows symlinks by default so $target
+                  # gets the actual dylib bytes, not a symlink chain.
+                  cp "$dep" "$target"
+                  chmod u+w "$target"
+                  # Set the bundled dylib's own LC_ID_DYLIB to its
+                  # @executable_path-relative form. Cosmetic for
+                  # runtime (dyld consults LC_LOAD_DYLIB in the
+                  # loader, not LC_ID_DYLIB on the loadee) but
+                  # matches what dylibbundler does and makes
+                  # otool output consistent.
+                  install_name_tool -id "@executable_path/$depname" "$target"
+                  added=1
+                fi
+                # Rewrite the reference. Idempotent on later passes
+                # — install_name_tool -change is a no-op if the
+                # current value already matches.
+                install_name_tool -change "$dep" "@executable_path/$depname" "$bin"
+              done
+            done
+            [ $added -eq 0 ] && break
+            if [ $pass -gt 10 ]; then
+              echo "::error::dylib graph did not converge after 10 passes"
+              exit 1
+            fi
+          done
+
+          echo "===== Final non-system reference audit ====="
+          fail=0
+          for bin in "$OUT"/*; do
+            file "$bin" 2>/dev/null | grep -qE 'Mach-O' || continue
+            if otool -L "$bin" 2>/dev/null | grep -qE '^\s+/(opt/homebrew|usr/local)/'; then
+              echo "::error::$bin still references non-system paths after bundling:"
+              otool -L "$bin" | grep -E '^\s+/(opt/homebrew|usr/local)/'
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || exit 1
+
+          echo "===== Bundled output ====="
+          ls -lh "$OUT/"
+
+          # Smoke-test: invoke the bundled ffmpeg with a stripped env
+          # so dyld can ONLY find dylibs via the embedded load
+          # commands (no DYLD_FALLBACK_LIBRARY_PATH leakage from the
+          # runner). If @executable_path resolution is wrong, this
+          # fails loud.
+          echo "===== Bundled ffmpeg launch test (clean env) ====="
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -version | head -3
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -hide_banner -protocols 2>/dev/null | grep -qE '^\s*srt\s*$' \
+            || { echo "::error::bundled ffmpeg lost srt protocol"; exit 1; }
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$OUT/ffmpeg" -hide_banner -muxers 2>/dev/null | grep -qE '\sdecklink\s' \
+            || { echo "::error::bundled ffmpeg lost decklink muxer"; exit 1; }
+          echo "✓ Bundled ffmpeg launches cleanly with @executable_path-resolved dylibs"
+
+      - name: Tarball + checksum the artifact
+        run: |
+          set -e
+          OUT=/tmp/ffmpeg-out
+          mkdir -p /tmp/out
+          # alpha.35: tar -C $OUT . produces a flat archive (./ffmpeg
+          # + ./*.dylib at the root, no top-level directory). release
+          # .yml extracts directly into src-tauri/sidecar/ so the
+          # bundled dylibs end up alongside ffmpeg where the embedded
+          # @executable_path load commands expect them. Pre-alpha.35
+          # this step tarballed just ./ffmpeg with no dylibs.
+          tar -czf "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" -C "$OUT" .
+          (cd /tmp/out && shasum -a 256 "ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" > "ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz.sha256")
+          ls -lh /tmp/out/
+          echo "===== Tarball contents ====="
+          tar -tzf "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz"
+
+      - name: Publish to private sidecar release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Create the release if it doesn't exist yet (first build
+          # for these pins). --prerelease keeps it out of the
+          # "Latest" detection so end users see the main-app releases
+          # at the top of the page. The Mac + Windows jobs both
+          # upload to the same release.
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --title "FFmpeg+DeckLink sidecar — ${RELEASE_TAG}" \
+              --notes "Self-built FFmpeg ${FFMPEG_VERSION} linked against Blackmagic DeckLink SDK ${BMD_SDK_VERSION}. CI artifact for release.yml; not for end-user download. See ci/ffmpeg-pins.env." \
+              --prerelease \
+              --draft=false
+          fi
+          gh release upload "${RELEASE_TAG}" \
+            "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz" \
+            "/tmp/out/ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz.sha256" \
+            --clobber
+          echo "Uploaded Mac arm64 FFmpeg to release ${RELEASE_TAG}"
+
+  # ---------------------------------------------------------------
+  # Windows x64 — MSYS2/MinGW build on windows-latest.
+  # ~35-45 min cold; final artifact is ~80 MB zip'd.
+  # ---------------------------------------------------------------
+  build-ffmpeg-windows:
+    name: Build FFmpeg (Windows x64)
+    needs: resolve-pins
+    runs-on: windows-latest
+    env:
+      FFMPEG_VERSION: ${{ needs.resolve-pins.outputs.ffmpeg_version }}
+      BMD_SDK_VERSION: ${{ needs.resolve-pins.outputs.bmd_sdk_version }}
+      RELEASE_TAG: ${{ needs.resolve-pins.outputs.release_tag }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2/MinGW64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            diffutils
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-yasm
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-srt
+            mingw-w64-x86_64-x264
+            mingw-w64-x86_64-x265
+
+      - name: Install nv-codec-headers (NVIDIA NVENC support)
+        run: |
+          set -e
+          # nv-codec-headers exposes NVENC + NVDEC headers without
+          # requiring CUDA on the build host. FFmpeg links at runtime
+          # against the user's installed NVIDIA driver. Pin to n12.x
+          # (current LTS as of 2026); newer FFmpeg may require newer
+          # headers — bump on FFmpeg upgrades.
+          git clone --depth 1 --branch n12.2.72.0 \
+            https://github.com/FFmpeg/nv-codec-headers.git \
+            /tmp/nv-codec-headers
+          cd /tmp/nv-codec-headers
+          make PREFIX=/mingw64 install
+
+      - name: Download BMD DeckLink SDK from private mirror
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BMD_SDK_PAT }}
+        run: |
+          # Runs in pwsh (not MSYS2) because the runner's gh CLI lives
+          # in the PowerShell PATH, not inside MSYS2's environment.
+          # We download + extract here, then export the SDK path to
+          # GITHUB_ENV so the MSYS2-shelled configure step picks it up.
+          if (-not $env:GH_TOKEN) {
+            Write-Host "::error::BMD_SDK_PAT secret not configured — see docs/SETUP-FFMPEG-CI.md"
+            exit 1
+          }
+          $sdkDir = "$env:RUNNER_TEMP\bmd-sdk"
+          New-Item -ItemType Directory -Force -Path $sdkDir | Out-Null
+          gh release download "v$env:BMD_SDK_VERSION" `
+            --repo amateurmenace/bmd-decklink-sdk-mirror `
+            --pattern '*.zip' `
+            --dir $sdkDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::gh release download failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+          Get-ChildItem $sdkDir | Format-Table Name, Length
+          $extract = "$sdkDir\extracted"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $zip = Get-ChildItem $sdkDir -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) {
+            Write-Host "::error::SDK zip not found in $sdkDir"
+            exit 1
+          }
+          Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
+          $sdkSrc = Get-ChildItem -Path $extract -Directory -Recurse -Depth 2 `
+            | Where-Object { $_.Name -like 'Blackmagic*SDK*' -or $_.Name -like '*DeckLink*SDK*' } `
+            | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkSrc) {
+            Write-Host "::error::Could not locate SDK root inside zip"
+            Get-ChildItem -Path $extract -Recurse -Depth 2 -Directory | Format-Table FullName
+            exit 1
+          }
+          # Rename to a no-spaces path. The original "Blackmagic
+          # DeckLink SDK X.Y/" name has spaces that break FFmpeg's
+          # configure script when passed via --extra-cflags (the
+          # arg gets word-split by the time it reaches the compiler
+          # test, so we see "gcc is unable to create an executable
+          # file" even though the toolchain is healthy).
+          $sdkRoot = "$env:RUNNER_TEMP\bmd-sdk\sdk-root"
+          Move-Item -Path $sdkSrc -Destination $sdkRoot -Force
+          # Convert to MSYS2-style forward-slash path so the
+          # configure step in MSYS2 can use it directly.
+          $sdkRootMsys = $sdkRoot -replace '\\', '/' -replace '^C:', '/c' -replace '^D:', '/d'
+          Write-Host "BMD_SDK_ROOT=$sdkRootMsys"
+          "BMD_SDK_ROOT=$sdkRootMsys" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem -Path "$sdkRoot\Win\include" | Select-Object -First 10 | Format-Table Name, Length
+
+      - name: Set up MSVC dev environment (for MIDL's cl.exe preprocessor)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Compile BMD .idl files to .h via MIDL (Windows SDK)
+        shell: pwsh
+        run: |
+          # SDK 16 ships Win/include/ with ONLY .idl files (Interface
+          # Definition Language) — no pre-generated DeckLinkAPI.h.
+          # FFmpeg's configure requires the .h, so we compile the
+          # BMD IDLs ourselves.
+          #
+          # We use Microsoft's MIDL (the official MS IDL compiler
+          # bundled with the Windows SDK) instead of MinGW's widl
+          # because BMD's .idl files use MIDL-specific extensions
+          # and rely on MIDL's implicit cross-file type resolution
+          # that widl doesn't replicate. After 5 widl iterations
+          # surfaced increasingly esoteric incompatibilities, the
+          # pragmatic move is to use the compiler BMD actually
+          # designed their IDLs for.
+          #
+          # GitHub Actions Windows runners pre-install the Windows
+          # SDK, so MIDL is already on the runner — no chocolatey
+          # install needed.
+
+          # Translate the MSYS2-style BMD_SDK_ROOT back to Windows
+          # path. PowerShell needs C:\ form, not /c/.
+          $sdkMsys = "$env:BMD_SDK_ROOT"
+          $sdkWin = $sdkMsys -replace '^/c/', 'C:\' -replace '^/d/', 'D:\' -replace '/', '\'
+          $incDir = "$sdkWin\Win\include"
+          Push-Location $incDir
+
+          # Find MIDL.exe. Walks the Windows Kits tree to pick the
+          # latest available x64 MIDL on the runner.
+          $midl = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' `
+            -Filter 'midl.exe' -Recurse -ErrorAction SilentlyContinue `
+            | Where-Object { $_.FullName -match '\\x64\\' } `
+            | Sort-Object FullName -Descending `
+            | Select-Object -First 1
+          if (-not $midl) {
+            Write-Host "::error::MIDL.exe not found in Windows Kits — runner image changed?"
+            Get-ChildItem 'C:\Program Files (x86)\Windows Kits' -Directory -ErrorAction SilentlyContinue | Format-Table FullName
+            exit 1
+          }
+          Write-Host "Using MIDL: $($midl.FullName)"
+
+          # Find the matching SDK Include directory. unknwn.idl can
+          # live under shared/, um/, or winrt/ depending on the SDK
+          # version. Walk all version directories and grab the first
+          # that has it in any subdir.
+          $sdkVersion = ($midl.FullName -split '\\bin\\')[1].Split('\')[0]
+          $sdkIncBase = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          Write-Host "Available SDK Include versions:"
+          Get-ChildItem $sdkIncBase -Directory -ErrorAction SilentlyContinue | Format-Table Name
+          $sdkIncRoot = $null
+          foreach ($candidate in @($sdkVersion) + (Get-ChildItem $sdkIncBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { $_.Name })) {
+            $candPath = Join-Path $sdkIncBase $candidate
+            if (-not (Test-Path $candPath)) { continue }
+            $found = Get-ChildItem -Path $candPath -Filter 'unknwn.idl' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              $sdkIncRoot = $candPath
+              Write-Host "Found unknwn.idl at: $($found.FullName)"
+              break
+            }
+          }
+          if (-not $sdkIncRoot) {
+            Write-Host "::warning::unknwn.idl not found in any SDK version Include dir — MIDL may still succeed via its built-in path resolution"
+            # Fall back to the version matching MIDL.exe; MIDL itself
+            # often knows where to find its own standard headers
+            # without an explicit /I.
+            $sdkIncRoot = Join-Path $sdkIncBase $sdkVersion
+          }
+          Write-Host "Using SDK Include: $sdkIncRoot"
+
+          # Invoke MIDL on the main DeckLinkAPI.idl. /h emits header
+          # named explicitly; /I gives include paths for unknwn.idl
+          # etc. /env x64 + /target NT60 keep MIDL targeting modern
+          # Windows. /Oicf is the optimized stub style FFmpeg's
+          # build assumes. /no_warn quiets the noise from BMD's
+          # legacy MIDL pragmas.
+          $sharedInc = Join-Path $sdkIncRoot 'shared'
+          $umInc = Join-Path $sdkIncRoot 'um'
+
+          # Process every .idl. MIDL handles cross-references between
+          # them implicitly (it's what BMD designed for).
+          $allIdls = Get-ChildItem -Filter '*.idl' | Sort-Object Name
+          Write-Host "=== Compiling $($allIdls.Count) .idl file(s) via MIDL ==="
+          foreach ($idl in $allIdls) {
+            Write-Host "midl: $($idl.Name)"
+            $hOut = $idl.BaseName + '.h'
+            & $midl.FullName /nologo /h $hOut /I $incDir /I $sharedInc /I $umInc `
+              /env x64 /target NT61 $idl.Name 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::MIDL failed for $($idl.Name) (continuing)"
+            }
+          }
+
+          Write-Host "=== Generated .h files ==="
+          Get-ChildItem -Filter '*.h' | Select-Object -First 20 | Format-Table Name, Length
+
+          if (-not (Test-Path 'DeckLinkAPI.h')) {
+            Write-Host "::error::DeckLinkAPI.h was not generated by MIDL"
+            exit 1
+          }
+          $linecount = (Get-Content 'DeckLinkAPI.h' | Measure-Object -Line).Lines
+          Write-Host "DeckLinkAPI.h: $linecount lines"
+
+          # Stub the v-version headers FFmpeg #includes individually.
+          # BMD's auxiliary .idl files (DeckLinkAPI_v*.idl etc.) are
+          # designed to be IMPORTED by DeckLinkAPI.idl, not compiled
+          # standalone — so MIDL emits all their content into the
+          # master DeckLinkAPI.h. FFmpeg's decklink_common.cpp does
+          # `#include "DeckLinkAPI_v14_2_1.h"` expecting BMD's Linux-
+          # SDK style of one-header-per-version. On Linux they ship
+          # those files; on Windows SDK 16 they don't.
+          #
+          # Workaround: for every .idl that didn't produce a .h, write
+          # a stub .h that pulls in the master DeckLinkAPI.h. The
+          # types are already there (because the .idls were import'd
+          # into DeckLinkAPI.idl), they just need to be findable
+          # under the per-version filename.
+          Write-Host "=== Stubbing missing v-headers ==="
+          foreach ($idl in (Get-ChildItem -Filter '*.idl')) {
+            $expectedH = $idl.BaseName + '.h'
+            if (-not (Test-Path $expectedH)) {
+              Write-Host "  stub: $expectedH (-> DeckLinkAPI.h)"
+              # Build the stub as an array of lines + Set-Content
+              # (avoids YAML+PowerShell here-string indentation pitfalls).
+              $stub = @(
+                "/* alpha.31 CI stub: BMD Win SDK 16 ships only " + $idl.Name + ". */",
+                "#pragma once",
+                '#include "DeckLinkAPI.h"'
+              )
+              Set-Content -Path $expectedH -Value $stub -Encoding UTF8
+            }
+          }
+          Get-ChildItem -Filter '*.h' | Format-Table Name, Length
+          Pop-Location
+          # Per-IDL MIDL failures on auxiliary files are expected
+          # (they have cross-references that don't resolve when
+          # compiled in isolation). What matters is that the main
+          # DeckLinkAPI.h was produced — FFmpeg's require_headers
+          # check needs only that file, and our stubs cover the
+          # individual v-header #includes. Explicitly succeed.
+          exit 0
+
+      - name: Clone FFmpeg sources at ${{ env.FFMPEG_VERSION }}
+        run: |
+          set -e
+          git clone --depth 1 --branch "${FFMPEG_VERSION}" \
+            https://git.ffmpeg.org/ffmpeg.git /tmp/ffmpeg-src
+          (cd /tmp/ffmpeg-src && git log --oneline -1)
+
+      - name: Configure + build FFmpeg (Win x64)
+        run: |
+          set -e
+          cd /tmp/ffmpeg-src
+          # Note: --enable-decklink on Windows compiles
+          # libavdevice/decklink_*.cpp against the SDK headers.
+          # FFmpeg's COM dispatch shim (DeckLinkAPIDispatch.cpp from
+          # the SDK) is included via the include path. No .lib file
+          # is needed at link time — the runtime DeckLinkAPI.dll
+          # ships with Blackmagic Desktop Video on the end user's
+          # machine and is resolved via CoCreateInstance.
+          #
+          # --enable-nvenc requires nv-codec-headers (installed above).
+          # QSV (libvpl) + AMF deferred to BUILD_REVISION=2 — first-
+          # pass focuses on parity with the existing feature set
+          # (libx264/265 + libsrt + nvenc) plus DeckLink.
+          ./configure \
+            --prefix=/tmp/ffmpeg-install \
+            --arch=x86_64 \
+            --target-os=mingw64 \
+            --pkg-config-flags=--static \
+            --extra-cflags="-I${BMD_SDK_ROOT}/Win/include" \
+            --extra-cxxflags="-I${BMD_SDK_ROOT}/Win/include" \
+            --extra-libs="-lpthread -lm -lz -lstdc++" \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-nonfree \
+            --enable-decklink \
+            --enable-libsrt \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-nvenc \
+            --enable-d3d11va \
+            --enable-dxva2 \
+            --enable-mediafoundation \
+            --enable-protocol=srt \
+            --enable-protocol=tcp \
+            --enable-protocol=udp \
+            --enable-protocol=rtmp \
+            --enable-protocol=file \
+            --enable-protocol=pipe \
+            --enable-muxer=mpegts \
+            --enable-muxer=flv \
+            --enable-muxer=decklink \
+            --disable-doc \
+            --disable-debug \
+            --disable-htmlpages \
+            --disable-manpages \
+            --disable-podpages \
+            --disable-txtpages
+          echo "===== configure complete ====="
+          make -j$(nproc)
+          ls -lh ffmpeg.exe
+
+      - name: Sanity-check the built FFmpeg
+        run: |
+          set -e
+          cd /tmp/ffmpeg-src
+          ./ffmpeg.exe -version | head -5
+          echo "===== muxers (decklink + mpegts required) ====="
+          ./ffmpeg.exe -hide_banner -muxers | grep -E '\s(decklink|mpegts|flv)\s' | sort
+          ./ffmpeg.exe -hide_banner -muxers | grep -qE '\sdecklink\s' || { echo "::error::decklink muxer missing"; exit 1; }
+          ./ffmpeg.exe -hide_banner -muxers | grep -qE '\smpegts\s' || { echo "::error::mpegts muxer missing"; exit 1; }
+          echo "===== encoders (libx264 + h264_nvenc required) ====="
+          ./ffmpeg.exe -hide_banner -encoders | grep -E 'libx264|libx265|h264_nvenc|hevc_nvenc'
+          ./ffmpeg.exe -hide_banner -encoders | grep -qE 'h264_nvenc' || { echo "::error::h264_nvenc missing"; exit 1; }
+          ./ffmpeg.exe -hide_banner -encoders | grep -qE 'libx264' || { echo "::error::libx264 missing"; exit 1; }
+          echo "===== protocols (srt required) ====="
+          ./ffmpeg.exe -hide_banner -protocols | grep -E 'srt|tcp|udp|rtmp'
+          ./ffmpeg.exe -hide_banner -protocols | grep -qE '^\s*srt\s*$' || { echo "::error::srt protocol missing"; exit 1; }
+          strip ./ffmpeg.exe
+          ls -lh ./ffmpeg.exe
+
+      - name: Bundle DLLs required by the static-ish MinGW build
+        run: |
+          set -e
+          # MSYS2 builds aren't fully static against the MinGW
+          # runtime — ffmpeg.exe will load a handful of MinGW DLLs
+          # at startup (libgcc_s_seh-1.dll, libstdc++-6.dll,
+          # libwinpthread-1.dll). Bundle them next to ffmpeg.exe so
+          # the Windows installer's resources\sidecar\ dir has
+          # everything the .exe needs to launch on a clean machine.
+          # This is what gyan.dev's "full_build" does too.
+          OUT=/tmp/ffmpeg-out
+          mkdir -p "$OUT"
+          cp /tmp/ffmpeg-src/ffmpeg.exe "$OUT/"
+          # Use ldd against the .exe to find every non-system DLL,
+          # then copy from /mingw64/bin/.
+          for dll in $(ldd /tmp/ffmpeg-src/ffmpeg.exe | grep -i 'mingw64' | awk '{print $3}'); do
+            if [ -f "$dll" ]; then
+              cp -v "$dll" "$OUT/"
+            fi
+          done
+          ls -lh "$OUT/"
+
+      - name: Zip + checksum the artifact
+        run: |
+          set -e
+          cd /tmp/ffmpeg-out
+          ZIP_NAME="ffmpeg-${FFMPEG_VERSION}-windows-x64.zip"
+          # Use zip (MSYS2 has it) — produces a portable archive
+          # PowerShell's Expand-Archive can read on the consumer side.
+          zip -r "/tmp/${ZIP_NAME}" .
+          (cd /tmp && sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256")
+          ls -lh /tmp/ffmpeg-${FFMPEG_VERSION}-windows-x64.zip*
+
+      - name: Publish to private sidecar release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # pwsh (not MSYS2) because gh CLI is in the runner's
+          # PowerShell PATH. We need to translate the MSYS2 /tmp/...
+          # path back to a Windows path for gh release upload.
+          $msysTmp = "$env:RUNNER_TEMP\msys64\tmp"
+          # The zip + sha lived at /tmp inside MSYS2, which maps to
+          # the MSYS2 install dir's tmp. setup-msys2 documents this
+          # under RUNNER_TEMP\msys64\tmp.
+          $zipPath = "$msysTmp\ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip"
+          $shaPath = "$msysTmp\ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip.sha256"
+          if (-not (Test-Path $zipPath)) {
+            # Fallback: try the literal /tmp via cygpath -w
+            $zipPath = & cygpath -w "/tmp/ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip" 2>$null
+            $shaPath = & cygpath -w "/tmp/ffmpeg-$env:FFMPEG_VERSION-windows-x64.zip.sha256" 2>$null
+          }
+          if (-not (Test-Path $zipPath)) {
+            Write-Host "::error::could not locate built FFmpeg zip"
+            Get-ChildItem $msysTmp -ErrorAction SilentlyContinue | Format-Table Name
+            exit 1
+          }
+          Write-Host "Uploading $zipPath"
+          # gh release create is idempotent via the view-first check;
+          # if the Mac job got there first we just upload to it.
+          gh release view "$env:RELEASE_TAG" --repo amateurmenace/atem-ip-patchbay > $null 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:RELEASE_TAG" `
+              --repo amateurmenace/atem-ip-patchbay `
+              --title "FFmpeg+DeckLink sidecar — $env:RELEASE_TAG" `
+              --notes "Self-built FFmpeg $env:FFMPEG_VERSION linked against Blackmagic DeckLink SDK $env:BMD_SDK_VERSION. CI artifact for release.yml; not for end-user download. See ci/ffmpeg-pins.env." `
+              --prerelease
+          }
+          gh release upload "$env:RELEASE_TAG" `
+            --repo amateurmenace/atem-ip-patchbay `
+            $zipPath $shaPath `
+            --clobber
+          Write-Host "Uploaded Windows x64 FFmpeg to release $env:RELEASE_TAG"

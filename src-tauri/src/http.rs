@@ -16,15 +16,76 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::fleet::EncoderFleet;
 use crate::preview::Preview;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
 
+/// Shared application state handed to every Axum route. Holds the
+/// EncoderFleet (the new multi-tile abstraction added in alpha.15)
+/// AND tile-0 aliases of its components for backward compatibility
+/// with the existing handler bodies — every handler today reads
+/// `state.encoder`, `state.streamer`, `state.preview` as if they
+/// were singletons, which they effectively still are when only
+/// tile 0 is active.
+///
+/// Future commits will progressively rewrite handlers to take a
+/// `Path(idx): Path<u8>` and use `state.fleet.tile(idx)` directly
+/// — at which point the legacy fields can be removed. For now the
+/// dual representation keeps the diff small and the existing UI
+/// flow unchanged.
 #[derive(Clone)]
 pub struct HttpAppState {
+    pub fleet: Arc<EncoderFleet>,
     pub encoder: Arc<EncoderState>,
     pub streamer: Arc<Streamer>,
     pub preview: Arc<Preview>,
+    /// Index of the tile this State is scoped to. alpha.41 added
+    /// for state_persist::save_tile — apply_settings needs to know
+    /// which file to write after a successful update.
+    pub tile_idx: u8,
+    /// Per-instance state directory, shared across all tiles in
+    /// this Tauri process. Tile-N state files live at
+    /// <state_dir>/multiview-tile-N.json. Wrapped in Arc so the
+    /// per-mount clone is cheap; the underlying path never changes
+    /// during process lifetime.
+    pub state_dir: Arc<std::path::PathBuf>,
+}
+
+impl HttpAppState {
+    /// Construct from a freshly-built fleet — populates the legacy
+    /// tile-0-alias fields automatically. Panics if the fleet has
+    /// zero tiles (which the fleet constructor guarantees never
+    /// happens — TILE_COUNT is a compile-time const ≥ 1).
+    pub fn from_fleet(
+        fleet: Arc<EncoderFleet>,
+        state_dir: Arc<std::path::PathBuf>,
+    ) -> Self {
+        Self::for_tile(&fleet, 0, state_dir).expect("fleet must always have at least tile 0")
+    }
+
+    /// Construct a per-tile HttpAppState — the `encoder` / `streamer`
+    /// / `preview` fields point at THIS tile's components, not
+    /// tile 0's. Used by the router to mount a copy of the API sub-
+    /// router under `/api/i/N` for each tile, each mount carrying
+    /// its own State so handlers automatically dispatch to the
+    /// right tile without needing to read a path parameter.
+    /// Returns None if `idx` is out of range.
+    pub fn for_tile(
+        fleet: &Arc<EncoderFleet>,
+        idx: u8,
+        state_dir: Arc<std::path::PathBuf>,
+    ) -> Option<Self> {
+        let tile = fleet.tile(idx)?;
+        Some(HttpAppState {
+            encoder: tile.encoder.clone(),
+            streamer: tile.streamer.clone(),
+            preview: tile.preview.clone(),
+            fleet: fleet.clone(),
+            tile_idx: idx,
+            state_dir,
+        })
+    }
 }
 
 /// Bind a TCP listener on the requested port, walking forward up to nine
@@ -50,10 +111,65 @@ pub async fn bind_with_walk(start_port: u16) -> Result<(u16, TcpListener)> {
     ))
 }
 
-/// Build the Axum router that drives the existing JS UI. `static_dir`
-/// is the on-disk path to `bmd_emulator/static/` (or its bundled
-/// equivalent inside the .app's Resources/).
-pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
+/// Build the per-tile API sub-router. Routes register at paths
+/// WITHOUT the `/api/` prefix (e.g. `/state`, `/start`) so the
+/// outer router can mount this sub-tree under either `/api/i/N`
+/// (per-tile, with that tile's HttpAppState baked in via
+/// `.with_state(...)`) or `/api` (alias for tile 0).
+///
+/// Returns `Router<HttpAppState>` — state is unset; caller calls
+/// `.with_state(tile_state)` per mount.
+fn tile_api_routes() -> Router<HttpAppState> {
+    Router::new()
+        .route("/state", get(api_state))
+        .route("/audio-levels", get(api_audio_levels))
+        .route("/lan-ip", get(api_lan_ip))
+        .route("/lan-ips", get(api_lan_ips))
+        .route("/preview", get(api_preview))
+        .route("/preview/start", post(api_preview_start))
+        .route("/preview/stop", post(api_preview_stop))
+        .route("/log", get(api_log))
+        .route("/devices", get(api_devices))
+        .route("/decklink-outputs", get(api_decklink_outputs))
+        .route("/discover", get(api_discover))
+        .route("/ndi-senders", get(api_ndi_senders))
+        .route("/omt-senders", get(api_omt_senders))
+        .route("/omt-output", post(api_omt_output))
+        .route("/open-net-diag", post(api_open_net_diag))
+        .route("/start", post(api_start))
+        .route("/stop", post(api_stop))
+        .route("/kill-orphans", post(api_kill_orphans))
+        .route("/force-stop-all", post(api_force_stop_all))
+        .route("/settings", post(api_settings))
+        .route("/load_xml", post(api_load_xml))
+        .route("/load_xml_text", post(api_load_xml_text))
+        .route("/services/clear", post(api_clear_services))
+        .route("/destination/paste", post(api_destination_paste_stub))
+}
+
+/// Build the Axum router that drives the existing JS UI. Takes the
+/// EncoderFleet directly so the API routes can be mounted once per
+/// tile under `/api/i/:idx/*`, each mount carrying its own
+/// HttpAppState whose encoder/streamer/preview point at that tile's
+/// components. The `/api/*` alias is mounted last and resolves to
+/// tile 0 for backward compatibility with the existing single-
+/// source UI.
+///
+/// `static_dir` is the on-disk path to `bmd_emulator/static/` (or
+/// its bundled equivalent inside the .app's Resources/).
+///
+/// alpha.41: `state_dir` is the per-instance state directory used
+/// by state_persist to read/write per-tile JSON files. Passed via
+/// HttpAppState so apply_settings can call save_tile after every
+/// successful update. `system_monitor` powers the global
+/// /api/system-health endpoint (mounted alongside the per-tile
+/// routes; not per-tile state because system health is global).
+pub fn router(
+    fleet: Arc<EncoderFleet>,
+    static_dir: PathBuf,
+    state_dir: Arc<PathBuf>,
+    system_monitor: Arc<crate::system_monitor::SystemMonitor>,
+) -> Router {
     // Static-file path mount — must come before nest_service('/') so the
     // /static/* prefix routes win over the index fallback. Wrap with
     // a no-cache layer because the WebView (and most browsers without
@@ -67,21 +183,31 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
     )
     .layer(ServeDir::new(&static_dir));
-    let index_path = static_dir.join("index.html");
+    // alpha.16: the 2x2 grid multiview experiment (alpha.15) was
+    // pulled — iframes were too cramped to be operationally useful.
+    // The new multi-source story is multi-instance (Phase A via
+    // spawn_instance) + a small monitor window per instance that
+    // shows preview + bitrate / status in a tile the operator
+    // positions manually like a video-switcher multiview. Root `/`
+    // serves the full single-source UI; the monitor window opens
+    // at /static/monitor.html via a Tauri command.
+    let root_path = static_dir.join("index.html");
 
-    // Re-read index.html on every request rather than caching a copy
-    // at boot. Caching at boot meant any edit to index.html was
-    // invisible until the dev process restarted, even though edits
-    // to JS/CSS (served by ServeDir) showed up immediately. The cost
-    // is one stat + read per page load, which is negligible at
-    // anything below high-traffic-server scale and the file is small
-    // enough that the OS will keep it in the page cache anyway. If we
-    // ever serve from inside a bundled .app's Resources/ where the
-    // file genuinely never changes, we can swap in a OnceCell-cached
-    // path keyed off cfg!(debug_assertions).
-    Router::new()
+    // Build the tile-scoped API sub-router once; clone + mount per-
+    // tile below. The sub-router has no state baked in yet — each
+    // mount calls .with_state(tile_state) to finalize.
+    let tile_routes_template = tile_api_routes();
+
+    let mut router = Router::new()
+        // Re-read index.html on every request rather than caching a copy
+        // at boot. Caching at boot meant any edit to index.html was
+        // invisible until the dev process restarted, even though edits
+        // to JS/CSS (served by ServeDir) showed up immediately. The cost
+        // is one stat + read per page load, which is negligible at
+        // anything below high-traffic-server scale and the file is small
+        // enough that the OS will keep it in the page cache anyway.
         .route("/", get(move || {
-            let path = index_path.clone();
+            let path = root_path.clone();
             async move {
                 match tokio::fs::read_to_string(&path).await {
                     Ok(html) => axum::response::Html(html),
@@ -112,29 +238,48 @@ pub fn router(state: HttpAppState, static_dir: PathBuf) -> Router {
                 }
             }
         }))
-        .route("/api/state", get(api_state))
-        .route("/api/lan-ip", get(api_lan_ip))
-        .route("/api/lan-ips", get(api_lan_ips))
-        .route("/api/preview", get(api_preview))
-        .route("/api/preview/start", post(api_preview_start))
-        .route("/api/preview/stop", post(api_preview_stop))
-        .route("/api/log", get(api_log))
-        .route("/api/devices", get(api_devices))
-        .route("/api/discover", get(api_discover))
-        .route("/api/ndi-senders", get(api_ndi_senders))
-        .route("/api/omt-senders", get(api_omt_senders))
-        .route("/api/omt-output", post(api_omt_output))
-        .route("/api/open-net-diag", post(api_open_net_diag))
-        .route("/api/start", post(api_start))
-        .route("/api/stop", post(api_stop))
-        .route("/api/kill-orphans", post(api_kill_orphans))
-        .route("/api/settings", post(api_settings))
-        .route("/api/load_xml", post(api_load_xml))
-        .route("/api/load_xml_text", post(api_load_xml_text))
-        .route("/api/services/clear", post(api_clear_services))
-        .route("/api/destination/paste", post(api_destination_paste_stub))
-        .nest_service("/static", static_service)
-        .with_state(state)
+        .nest_service("/static", static_service);
+
+    // alpha.41 global system-health endpoint. Mounted at the top
+    // level rather than inside the per-tile sub-router because
+    // health is global, not tile-scoped. Uses a closure capture
+    // over the SystemMonitor Arc rather than Axum's State<T> so we
+    // don't have to expose SystemMonitor in HttpAppState (which is
+    // cloned per-tile and would carry a redundant ref everywhere).
+    {
+        let monitor = system_monitor.clone();
+        router = router.route(
+            "/api/system-health",
+            get(move || {
+                let monitor = monitor.clone();
+                async move { Json(monitor.snapshot()) }
+            }),
+        );
+    }
+
+    // Per-tile API mounts at /api/i/0, /api/i/1, ... — each gets a
+    // clone of the tile-routes sub-router with its own HttpAppState
+    // baked in so handlers automatically dispatch to the right tile
+    // without reading a path parameter. axum's longest-prefix-wins
+    // routing means /api/i/0/state matches THIS mount, not the
+    // /api/* alias mounted below.
+    for tile in fleet.tiles() {
+        let state = HttpAppState::for_tile(&fleet, tile.idx, state_dir.clone())
+            .expect("tile must exist for fleet.tiles() yield");
+        let prefix = format!("/api/i/{}", tile.idx);
+        router = router.nest(&prefix, tile_routes_template.clone().with_state(state));
+    }
+
+    // /api/* alias for tile 0 — keeps the existing single-source UI
+    // working without any URL changes. The iframe-based multiview
+    // shell (later commit) will explicitly hit /api/i/N/* via a
+    // tiny fetch-rewriting shim in app.js, so this alias is purely
+    // for backward compat / direct UI loads with no iframe context.
+    let tile_0_state = HttpAppState::for_tile(&fleet, 0, state_dir.clone())
+        .expect("fleet must have tile 0");
+    router = router.nest("/api", tile_routes_template.with_state(tile_0_state));
+
+    router
 }
 
 // ---- handlers --------------------------------------------------------------
@@ -143,15 +288,77 @@ async fn api_state(State(state): State<HttpAppState>) -> impl IntoResponse {
     // Flatten the encoder snapshot with the current preview status so
     // the JS poll loop sees both in one request — keeps the Preview
     // button label in sync with backend state without a second poll.
+    // Session 12 adds `ffmpeg_decklink_available` so the UI can gate
+    // the DeckLink destination-type picker on FFmpeg build support:
+    // disabled with a "reinstall ATEM IP Patchbay" hint when the
+    // probed muxer is absent, enabled (but possibly empty device
+    // list) when present. Read from the same OnceLock probe lib.rs
+    // primed at setup() — single atomic load per request.
     #[derive(Serialize)]
     struct StateResponse {
         #[serde(flatten)]
         snapshot: crate::state::Snapshot,
         preview: crate::preview::PreviewStatus,
+        ffmpeg_decklink_available: bool,
+        /// alpha.25: video-encoder list probed at boot from `ffmpeg
+        /// -encoders`. The UI's encoder picker filters its dropdown to
+        /// this set so we don't offer nvenc on a build without it.
+        available_encoders: Vec<String>,
     }
     Json(StateResponse {
         snapshot: state.encoder.snapshot(),
         preview: state.preview.status().await,
+        ffmpeg_decklink_available: crate::ffmpeg_path::ffmpeg_has_decklink(),
+        available_encoders: crate::ffmpeg_path::available_encoders().to_vec(),
+    })
+}
+
+/// alpha.31: audio level meters. Returns the latest per-channel
+/// RMS + peak dB values for the UI's canvas VU meters, plus a
+/// server-side timestamp so the UI can detect stalled streams
+/// (audio_levels_at - server_time > ~0.5s = stream stalled,
+/// fade meters to silence). Polled at 4Hz independently of
+/// /api/state so the meter responsiveness doesn't depend on
+/// the main state poll's 1Hz cadence.
+async fn api_audio_levels(State(state): State<HttpAppState>) -> impl IntoResponse {
+    #[derive(Serialize)]
+    struct AudioLevelsResponse {
+        rms_l: f32,
+        rms_r: f32,
+        peak_l: f32,
+        peak_r: f32,
+        /// Server-clock unix epoch seconds when the levels were
+        /// last updated by the FFmpeg stderr parser. 0.0 means
+        /// they haven't been updated yet this session.
+        updated_at: f64,
+        /// Server's current wall-clock for the UI's idle detection
+        /// (always reasonably close to client time — these are
+        /// the same machine in normal operation).
+        server_time: f64,
+        /// Whether the meters_enabled toggle is set. Lets the UI
+        /// gate its 4Hz polling so we don't burn CPU on /api/state
+        /// + /api/audio-levels both at high frequency when meters
+        /// are off.
+        meters_enabled: bool,
+    }
+    let snap = state.encoder.snapshot();
+    // Snapshot already exposes stats; pull the audio fields
+    // directly. read_stats() is a separate lock acquisition to
+    // avoid serializing the whole snapshot when we only need 5
+    // floats.
+    let (rms_l, rms_r, peak_l, peak_r, updated_at) = state.encoder.read_audio_levels();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Json(AudioLevelsResponse {
+        rms_l,
+        rms_r,
+        peak_l,
+        peak_r,
+        updated_at,
+        server_time: now,
+        meters_enabled: snap.meters_enabled,
     })
 }
 
@@ -415,6 +622,37 @@ async fn api_devices(Query(q): Query<HashMap<String, String>>) -> impl IntoRespo
     Json(devs)
 }
 
+/// List DeckLink output devices visible to FFmpeg, with each device's
+/// supported output modes attached. Empty array is the operator's
+/// "missing prerequisite" signal — combined with the
+/// `ffmpeg_decklink_available` flag on `/api/state`, the UI can
+/// distinguish:
+///   - build-support absent (reinstall ATEM IP Patchbay)
+///   - build-support present, devices empty (install Blackmagic
+///     DeckLink Driver or connect a card)
+///   - devices populated (proceed)
+///
+/// `?force=1` bypasses both the device-list cache and the per-device
+/// mode cache (the device-list refresh path clears the mode cache
+/// because card add/remove invalidates everything).
+async fn api_decklink_outputs(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let force = matches!(q.get("force").map(String::as_str), Some("1") | Some("true"));
+    let devices = crate::device_scanner::list_decklink_outputs(force);
+    #[derive(Serialize)]
+    struct DecklinkDeviceWithModes {
+        name: String,
+        modes: Vec<crate::device_scanner::DecklinkMode>,
+    }
+    let with_modes: Vec<DecklinkDeviceWithModes> = devices
+        .into_iter()
+        .map(|d| {
+            let modes = crate::device_scanner::probe_decklink_modes(&d.name);
+            DecklinkDeviceWithModes { name: d.name, modes }
+        })
+        .collect();
+    Json(with_modes)
+}
+
 /// NDI source list, fed by the grafton-ndi Finder. /api/discover and
 /// /api/ndi-senders return the same payload shape — the v0.1.0 UI
 /// hits both endpoints from different code paths.
@@ -505,11 +743,17 @@ async fn api_omt_output(
 /// the static UI is just talking to /api/* over fetch. Keeping the
 /// pattern consistent here means the button works the same way as
 /// every other UI action.
-async fn api_open_net_diag() -> impl IntoResponse {
+async fn api_open_net_diag(State(_state): State<HttpAppState>) -> impl IntoResponse {
     let url = "http://localhost:8092";
     let mut launched_app = false;
     let mut opened_url = false;
     let mut error: Option<String> = None;
+
+    // alpha.25: UDM credentials are now configured INSIDE atem-net-diag
+    // (via its dashboard's UDM form, POST /api/config). The main app no
+    // longer pre-plumbs env vars at spawn time. The spawn here inherits
+    // whatever UDM_API_KEY / UDM_HOST env the user set in their shell
+    // (if any) as a fallback; the dashboard form is the primary path.
 
     #[cfg(target_os = "macos")]
     {
@@ -555,19 +799,80 @@ async fn api_open_net_diag() -> impl IntoResponse {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows doesn't have a single registered "open by app name"
-        // story like macOS, so we just open the URL. If the user has
-        // net-diag for Windows installed (future alpha), we can add
-        // a registry-key lookup or known-path check here.
-        match std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
+        // alpha.17: spawn the bundled atem-net-diag.exe (staged into
+        // resources\sidecar\ by the CI Windows build) so the Net Diag
+        // topbar button actually works on Windows. Detached + no
+        // console so the process survives our exit and doesn't pop
+        // a black terminal window next to the main UI.
+        //
+        // If a net-diag is already running (port 8092 taken), the
+        // spawn fails fast and the existing instance keeps serving;
+        // either way we still open the URL below so the browser
+        // lands on whichever dashboard is alive.
+        if let Some(diag_bin) = crate::ffmpeg_path::net_diag_path() {
+            log::info!("net-diag spawn: {diag_bin}");
+            let mut spawn = std::process::Command::new(&diag_bin);
+            spawn.args(["--ui", "8092"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // alpha.25: UDM credentials are configured inside the
+            // net-diag dashboard now (its UDM panel has a config form
+            // posting to /api/config). The spawn inherits whatever
+            // UDM_API_KEY / UDM_HOST env vars the user has in their
+            // shell — that path still works as a fallback for
+            // operators who prefer the env-var workflow.
+            // CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS: same
+            // detachment pattern as spawn_instance, so closing the
+            // main app doesn't kill net-diag (and ditto in reverse).
+            // The hide-console helper isn't strictly needed with
+            // DETACHED_PROCESS but layered defenses keep stray
+            // consoles from flashing on edge-case launch paths.
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                spawn.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+            }
+            match spawn.spawn() {
+                Ok(child) => {
+                    log::info!("net-diag spawned pid={}", child.id());
+                    launched_app = true;
+                    // Brief settle so the embedded HTTP server is
+                    // listening on 8092 before the browser tries to
+                    // connect — saves one retry round-trip.
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                }
+                Err(e) => {
+                    log::warn!("net-diag spawn failed: {e} (will still open URL — existing instance may serve)");
+                }
+            }
+        } else {
+            log::warn!(
+                "atem-net-diag.exe not found in sidecar/ — Net Diag button will open the URL only. \
+                 If you're running a dev build, set ATEM_NET_DIAG_PATH to your local atem-net-diag.exe."
+            );
+        }
+        // Open the dashboard URL via `rundll32 url.dll,FileProtocolHandler`
+        // rather than `cmd /c start "" URL`. The cmd.exe `start` builtin
+        // exits 0 under CREATE_NO_WINDOW but silently fails to actually
+        // launch the browser — its console-allocation path needs a
+        // visible cmd window to hand off to ShellExecute correctly. We
+        // can't drop CREATE_NO_WINDOW (alpha.13 added it specifically to
+        // suppress the cmd.exe flash on every Net Diag click) and we
+        // don't want to add a new crate just for URL-opening. rundll32
+        // url.dll,FileProtocolHandler is the documented Win32 entry
+        // point for protocol-handler launches, hits ShellExecuteW
+        // directly, and works fine with no attached console.
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", url])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-        {
+            .stderr(std::process::Stdio::null());
+        crate::ffmpeg_path::hide_console_std(&mut cmd);
+        match cmd.status() {
             Ok(s) if s.success() => opened_url = true,
-            Ok(s) => error = Some(format!("cmd /c start exited {s:?}")),
-            Err(e) => error = Some(format!("cmd /c start failed: {e}")),
+            Ok(s) => error = Some(format!("rundll32 url.dll exited {s:?}")),
+            Err(e) => error = Some(format!("rundll32 url.dll failed: {e}")),
         }
     }
 
@@ -626,17 +931,7 @@ async fn api_stop(State(state): State<HttpAppState>) -> impl IntoResponse {
 /// rebuild, so the Drop on Streamer never runs and the FFmpeg
 /// process group survives.
 async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
-    #[cfg(target_os = "macos")]
-    let result = run_pkill("ffmpeg.*streamid=");
-    #[cfg(target_os = "linux")]
-    let result = run_pkill("ffmpeg.*streamid=");
-    #[cfg(target_os = "windows")]
-    let result: Result<usize, String> = Err(
-        "Orphan-kill not yet implemented on Windows. Use Task Manager to end \
-         any 'ffmpeg.exe' processes if a prior run left one streaming."
-            .into(),
-    );
-    match result {
+    match kill_orphan_ffmpeg() {
         Ok(killed) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -653,6 +948,58 @@ async fn api_kill_orphans(_state: State<HttpAppState>) -> impl IntoResponse {
             Json(serde_json::json!({"error": err})),
         ),
     }
+}
+
+/// Emergency "Force Stop All" — the guaranteed recovery path for when a
+/// stream is wedged and normal Stop / Kill-orphans aren't enough.
+///
+/// Order matters and is the whole point:
+///   1. OS-kill EVERY ffmpeg process at the process level FIRST. This is
+///      lock-free — it works even if a tile's streamer lock is held by a
+///      stuck task. Killing FFmpeg closes its stdin, which unblocks any
+///      back-pressured capture thread, which in turn unblocks any
+///      in-flight stop() that was waiting on it.
+///   2. Best-effort stop() each tile (bounded by a timeout so the
+///      handler itself can never hang) to tear down captures + OMT
+///      senders that the OS kill didn't own.
+///   3. Reset every tile's stats to Idle so the UI reflects reality.
+async fn api_force_stop_all(State(state): State<HttpAppState>) -> impl IntoResponse {
+    // Step 1 — nuclear OS kill. This is what makes recovery guaranteed
+    // regardless of lock state.
+    let killed = kill_all_ffmpeg().unwrap_or(0);
+
+    // Steps 2 + 3 — per-tile cleanup. stop() is non-wedging after the
+    // alpha.58 lock-discipline fix, but the timeout guards against any
+    // future regression making this escape hatch itself hang.
+    let mut tiles_reset = 0usize;
+    for tile in state.fleet.tiles() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            tile.streamer.stop(),
+        )
+        .await;
+        tile.encoder.stats_in_place(|s| {
+            s.status = "Idle".into();
+            s.started_at = None;
+            s.bitrate = 0;
+            s.fps = 0.0;
+            s.error = None;
+            s.reconnect_attempt = 0;
+            s.reconnect_next_secs = 0;
+        });
+        tiles_reset += 1;
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "killed": killed,
+            "tiles_reset": tiles_reset,
+            "message": format!(
+                "Force-stopped: killed {killed} ffmpeg process(es), reset {tiles_reset} tile(s) to Idle."
+            )
+        })),
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -695,6 +1042,77 @@ fn run_pkill(pattern: &str) -> Result<usize, String> {
     Ok(killed)
 }
 
+/// Surgical orphan kill (backs the "Kill orphan streams" button).
+/// Matches FFmpeg command lines carrying one of OUR markers — SRT
+/// (`streamid=`), DeckLink (`decklink` / `format_code`), or the NDI
+/// audio bridge (`tcp://127`) — so an unrelated ffmpeg the operator is
+/// running for something else is left alone. (Note: this now also
+/// catches DeckLink-output orphans, which the old `streamid=`-only
+/// pattern silently missed.)
+fn kill_orphan_ffmpeg() -> Result<usize, String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        run_pkill("ffmpeg.*(streamid=|decklink|format_code|tcp://127)")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        kill_ffmpeg_windows(Some("streamid=|decklink|format_code|tcp://127"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Ok(0)
+    }
+}
+
+/// Nuclear kill — EVERY ffmpeg process, no command-line filter. Backs
+/// the emergency Force-Stop-All escape hatch, used when a stream is
+/// wedged and the operator needs a guaranteed kill.
+fn kill_all_ffmpeg() -> Result<usize, String> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        run_pkill("ffmpeg")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        kill_ffmpeg_windows(None)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Ok(0)
+    }
+}
+
+/// Kill ffmpeg.exe on Windows via CIM + Stop-Process. `cmdline_filter`
+/// (a PowerShell `-match` regex) optionally narrows to our own streams;
+/// `None` kills every ffmpeg.exe. CIM exposes CommandLine, which plain
+/// `taskkill` can't filter on. Runs through `hide_console_std` so no
+/// console window flashes (alpha.13 CREATE_NO_WINDOW pattern).
+#[cfg(target_os = "windows")]
+fn kill_ffmpeg_windows(cmdline_filter: Option<&str>) -> Result<usize, String> {
+    use std::process::Command;
+    let where_clause = match cmdline_filter {
+        Some(rx) => format!(" | Where-Object {{ $_.CommandLine -match '{rx}' }}"),
+        None => String::new(),
+    };
+    let script = format!(
+        "$p = Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\"{where_clause}; \
+         $n = 0; \
+         foreach ($x in $p) {{ try {{ Stop-Process -Id $x.ProcessId -Force -ErrorAction Stop; $n++ }} catch {{}} }}; \
+         Write-Output $n"
+    );
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    crate::ffmpeg_path::hide_console_std(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("powershell launch failed: {e}"))?;
+    let killed = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<usize>()
+        .unwrap_or(0);
+    Ok(killed)
+}
+
 /// Settings mutation — accepts a JSON object with any subset of the
 /// snapshot fields and applies them. Phase 1 supports the core string
 /// / int fields; Phase 2+ extends to source/device fields.
@@ -728,6 +1146,27 @@ struct SettingsPayload {
     label: Option<String>,
     relay: Option<RelayPayload>,
     overlay: Option<OverlayPayload>,
+    // Session 12 destination shape — flat siblings of the ATEM-side
+    // fields above. JS posts these alongside the existing keys via the
+    // same /api/settings endpoint; the apply_settings handler validates
+    // destination_type.
+    destination_type: Option<String>,
+    decklink_device_name: Option<String>,
+    decklink_output_mode: Option<String>,
+    decklink_format_code: Option<String>,
+    decklink_pixel_format: Option<String>,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    // UDM credentials removed from this payload — net-diag manages its
+    // own UDM config via its dashboard's /api/config endpoint now.
+    video_encoder: Option<String>,
+    encoder_extra_flags: Option<String>,
+    audio_codec: Option<String>,
+    audio_bitrate_kbps: Option<u32>,
+    audio_sample_rate: Option<u32>,
+    audio_channels: Option<u8>,
+    auto_reconnect: Option<bool>,
+    auto_reconnect_max_attempts: Option<u32>,
+    meters_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -749,12 +1188,84 @@ struct OverlayPayload {
     clock: Option<bool>,
 }
 
+/// The fields that determine which physical source FFmpeg ingests. A
+/// change here while a stream is live means we must restart FFmpeg to
+/// actually switch sources — its input is fixed at launch, so updating
+/// `source_id` alone doesn't hot-swap a running encoder. Used by the
+/// alpha.59 hot-swap path in `api_settings`.
+fn source_identity(s: &crate::state::Snapshot) -> (String, String, String, i32) {
+    (
+        s.source_id.clone(),
+        s.ndi_source_name.clone(),
+        s.omt_source_name.clone(),
+        s.av_video_index,
+    )
+}
+
 async fn api_settings(
     State(state): State<HttpAppState>,
     Json(payload): Json<SettingsPayload>,
 ) -> impl IntoResponse {
+    // alpha.59 hot-swap: capture the source identity + whether a stream is
+    // live BEFORE applying. If applying changes the physical source while
+    // streaming, restart the stream so the live FFmpeg actually ingests the
+    // new source. (Changing source_id alone leaves the OLD source streaming
+    // — FFmpeg's input is fixed at launch — which is the confusing
+    // "switched to NDI but it kept sending the test pattern" behavior.)
+    let was_live = state.streamer.is_running().await;
+    let before = source_identity(&state.encoder.snapshot());
+
     state.encoder.apply_settings(&payload.into());
-    Json(state.encoder.snapshot())
+    // alpha.41: persist the new settings to disk so a Cmd-Q / crash /
+    // reinstall doesn't wipe the operator's per-tile configuration.
+    // Best-effort — save_tile logs and swallows errors.
+    crate::state_persist::save_tile(&state.state_dir, state.tile_idx, &state.encoder);
+
+    let after_snap = state.encoder.snapshot();
+    let after = source_identity(&after_snap);
+
+    if was_live && before != after {
+        log::info!("source changed while live ({before:?} -> {after:?}) — hot-swapping stream");
+        let streamer = state.streamer.clone();
+        let encoder = state.encoder.clone();
+        // Restart in a detached task so this request returns immediately
+        // (the graceful stop() can take up to ~2.5s). The UI stays
+        // responsive and sees status="Switching" on its next poll.
+        tokio::spawn(async move {
+            encoder.stats_in_place(|s| {
+                s.status = "Switching".into();
+                s.error = None;
+            });
+            // Graceful stop (closes SRT cleanly so the ATEM doesn't wedge),
+            // then start with the new source. stop() also sets
+            // stop_requested + notifies the supervisor, so the old source's
+            // supervisor winds down to UserStopped instead of reconnecting.
+            if let Err(e) = streamer.stop().await {
+                log::warn!("hot-swap stop failed: {e}");
+            }
+            // Ensure the child slot is clear before start() — the graceful
+            // fallback path can return a beat before run_one_attempt clears
+            // inner.child. Bounded ~1s; usually a zero-iteration no-op.
+            let clear_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while streamer.is_running().await
+                && std::time::Instant::now() < clear_deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            match streamer.start().await {
+                Ok(()) => log::info!("hot-swap restart complete"),
+                Err(e) => {
+                    log::warn!("hot-swap restart failed: {e}");
+                    encoder.stats_in_place(|s| {
+                        s.status = "Interrupted".into();
+                        s.error = Some(format!("Source switch failed: {e}"));
+                    });
+                }
+            }
+        });
+    }
+
+    Json(after_snap)
 }
 
 #[derive(Deserialize)]
@@ -908,6 +1419,20 @@ impl From<SettingsPayload> for crate::state::SettingsUpdate {
                 logo_path: o.logo_path,
                 clock: o.clock,
             }),
+            destination_type: p.destination_type,
+            decklink_device_name: p.decklink_device_name,
+            decklink_output_mode: p.decklink_output_mode,
+            decklink_format_code: p.decklink_format_code,
+            decklink_pixel_format: p.decklink_pixel_format,
+            video_encoder: p.video_encoder,
+            encoder_extra_flags: p.encoder_extra_flags,
+            audio_codec: p.audio_codec,
+            audio_bitrate_kbps: p.audio_bitrate_kbps,
+            audio_sample_rate: p.audio_sample_rate,
+            audio_channels: p.audio_channels,
+            auto_reconnect: p.auto_reconnect,
+            auto_reconnect_max_attempts: p.auto_reconnect_max_attempts,
+            meters_enabled: p.meters_enabled,
         }
     }
 }

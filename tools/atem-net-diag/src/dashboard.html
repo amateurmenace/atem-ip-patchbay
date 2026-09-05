@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>atem-net-diag · live</title>
+  <title>ATEM Net Utility · live</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     :root {
@@ -436,6 +436,53 @@
     .preshow-banner.ok .preshow-label   { color: var(--good); }
     .preshow-banner.warn .preshow-label { color: var(--warn); }
     .preshow-banner.fail .preshow-label { color: var(--bad); }
+
+    /* alpha.28: detailed pre-show checks panel. One row per check
+       with status icon + label + detail + optional hint. Color of
+       the collapsed-card summary shifts with the worst check. */
+    #preshow-panel.overall-pass .card-summary { color: var(--good); }
+    #preshow-panel.overall-warn .card-summary { color: var(--warn); }
+    #preshow-panel.overall-fail .card-summary { color: var(--bad); }
+    .preshow-checks {
+      display: flex; flex-direction: column;
+      margin-top: 4px;
+    }
+    .preshow-check {
+      display: grid;
+      grid-template-columns: 22px 180px 1fr;
+      gap: 0 12px;
+      align-items: baseline;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 12px;
+    }
+    .preshow-check:last-child { border-bottom: none; }
+    .preshow-check .icon {
+      font-size: 14px; line-height: 1;
+      text-align: center;
+    }
+    .preshow-check.pass .icon  { color: var(--good); }
+    .preshow-check.warn .icon  { color: var(--warn); }
+    .preshow-check.fail .icon  { color: var(--bad);  }
+    .preshow-check.skip .icon  { color: var(--muted-2); }
+    .preshow-check .label {
+      color: var(--text); font-weight: 500;
+    }
+    .preshow-check.skip .label { color: var(--muted); }
+    .preshow-check .detail {
+      color: var(--muted); font-size: 11px;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .preshow-check.pass .detail { color: var(--muted); }
+    .preshow-check.warn .detail { color: var(--warn); }
+    .preshow-check.fail .detail { color: var(--bad);  }
+    .preshow-check .hint {
+      grid-column: 2 / -1;
+      color: var(--muted-2); font-size: 11px;
+      line-height: 1.45;
+      margin-top: 4px;
+      max-width: 720px;
+    }
     .preshow-pills { display: flex; gap: 8px; flex-wrap: wrap; }
     .preshow-pill {
       font-size: 11px; padding: 2px 8px; border-radius: 999px;
@@ -805,15 +852,153 @@
       display: flex; flex-direction: column; gap: 16px;
       margin-top: 8px;
     }
+
+    /* alpha.27: filter bar above the switches grid. Lets the operator
+       drill from a wall-of-ports to just the ones they care about
+       (text search across switch/port/connected-device fields + quick
+       chips for active / errors / ATEM / pinned). */
+    .switches-filter-bar {
+      display: flex; align-items: center; gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    #switches-filter-input {
+      flex: 1 1 280px; min-width: 220px;
+      padding: 7px 10px; font-size: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px;
+      color: var(--text);
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    #switches-filter-input:focus {
+      outline: none;
+      border-color: rgba(247,166,93,0.5);
+      background: rgba(255,255,255,0.06);
+    }
+    #switches-filter-input::placeholder { color: var(--muted-2); }
+    .switches-filter-chips {
+      display: inline-flex; gap: 4px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 6px;
+      padding: 2px;
+    }
+    .switches-filter-chips .chip {
+      cursor: pointer;
+      position: relative;
+    }
+    .switches-filter-chips .chip input[type="radio"] {
+      position: absolute; opacity: 0; pointer-events: none;
+    }
+    .switches-filter-chips .chip span {
+      display: block;
+      padding: 5px 11px;
+      font-size: 11px; font-weight: 500;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      border-radius: 4px;
+      transition: color 0.12s ease, background 0.12s ease;
+    }
+    .switches-filter-chips .chip:hover input:not(:checked) + span {
+      color: var(--text);
+    }
+    .switches-filter-chips .chip input:checked + span {
+      color: var(--text);
+      background: rgba(247,166,93,0.18);
+    }
+    .filter-clear {
+      padding: 5px 12px; font-size: 11px;
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px; color: var(--muted);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .filter-clear:hover {
+      color: var(--text);
+      border-color: rgba(255,138,56,0.35);
+    }
+
+    /* alpha.27: per-port pin button. Stays muted until hovered;
+       persistent + accent-colored when port is pinned. Pinned ports
+       sort to the top of their switch's port table. */
+    .port-row .pin-btn {
+      background: none; border: none;
+      padding: 0 4px; margin: 0;
+      cursor: pointer;
+      font-size: 13px; line-height: 1;
+      color: rgba(255,255,255,0.18);
+      transition: color 0.12s ease;
+      font-family: inherit;
+    }
+    .port-row:hover .pin-btn {
+      color: rgba(255,255,255,0.45);
+    }
+    .port-row.pinned .pin-btn,
+    .port-row .pin-btn[aria-pressed="true"] {
+      color: #f7a65d;
+    }
+    .port-row.pinned > span:first-child {
+      box-shadow: inset 3px 0 0 #f7a65d;
+    }
+    .port-row.pinned > span {
+      background: rgba(247,166,93,0.04);
+    }
+    /* Visual separator after the pinned block (when pinned port is
+       followed by a non-pinned one). */
+    .port-row.last-pinned > span {
+      border-bottom-color: rgba(247,166,93,0.30);
+      border-bottom-style: dashed;
+    }
+    /* Per-switch hide when the filter matches nothing in this switch. */
+    .switch-block.hidden-by-filter { display: none; }
     .switch-block {
       background: rgba(255,255,255,0.02);
       border: 1px solid rgba(255,255,255,0.05);
       border-radius: 6px;
       padding: 10px 12px;
     }
+    /* alpha.32: pinned switches get a subtle accent border so they
+       read as "operator-priority" at a glance when scrolling the
+       grid. */
+    .switch-block.switch-pinned {
+      border-color: rgba(255, 211, 90, 0.4);
+      background: rgba(255, 211, 90, 0.04);
+    }
     .switch-block-head {
       display: flex; align-items: baseline; gap: 12px;
       margin-bottom: 8px; flex-wrap: wrap;
+    }
+    /* Per-switch pin button (alpha.32). Similar visual language to
+       the per-port .pin-btn but slightly larger since it lives in
+       the switch header. Inactive state is subtle so it doesn't
+       compete with the switch name; active state has the same
+       accent yellow the row's left border uses. */
+    .sw-pin-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: rgba(255, 255, 255, 0.25);
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      align-self: center;
+      transition: color 120ms ease, background 120ms ease;
+    }
+    .switch-block-head:hover .sw-pin-btn {
+      color: rgba(255, 255, 255, 0.55);
+    }
+    .sw-pin-btn:hover {
+      background: rgba(255, 211, 90, 0.12);
+      color: #ffd35a !important;
+    }
+    .sw-pin-btn[aria-pressed="true"] {
+      color: #ffd35a;
+      background: rgba(255, 211, 90, 0.12);
     }
     .switch-block-head .name {
       font-weight: 600; color: var(--text);
@@ -882,7 +1067,7 @@
 </head>
 <body>
   <header>
-    <h1>atem-net-diag</h1>
+    <h1>ATEM Net Utility</h1>
     <span class="pill live" id="mode-pill">live</span>
     <span class="target" id="target">loading…</span>
     <span class="uptime" id="uptime"></span>
@@ -895,6 +1080,24 @@
     <span class="preshow-label" id="preshow-label">checking pre-show…</span>
     <span class="preshow-pills" id="preshow-pills"></span>
   </div>
+
+  <!-- alpha.28: pre-show readiness panel. Aggregates the existing
+       state signals (WAN IP, WAN headroom, UDM polling, ATEM
+       reachable, capture visibility, etc.) into a clickable
+       go/no-go check list. Collapsed by default; click the header
+       to expand. Color shifts with the worst-case status across
+       all checks so the collapsed-card chip already tells the
+       operator if anything needs attention. -->
+  <section class="card full collapsible" id="preshow-panel" data-collapse-key="preshow">
+    <h2>
+      Pre-show checks
+      <span class="card-summary" id="preshow-panel-summary">—</span>
+      <span class="chevron">▾</span>
+    </h2>
+    <div class="card-body">
+      <div class="preshow-checks" id="preshow-checks-list"></div>
+    </div>
+  </section>
 
   <!-- Active alarms — red banner, hidden when zero alarms. Polled
        from the UDM's /list/alarm endpoint every 5s. -->
@@ -1067,7 +1270,11 @@
     </section>
 
     <!-- Switches: per-USW port utilization, errors, ATEM-port spotlight.
-         Collapsible because it can be a wall of ports on a busy network. -->
+         Collapsible because it can be a wall of ports on a busy network.
+         alpha.27 added a filter bar (text search + chips) and per-port
+         pin buttons so operators can drill into the handful of ports
+         they actually care about on a 48-port USW. State persists to
+         localStorage so filters + pins survive page reloads. -->
     <section class="card full collapsible" id="switches-card" data-collapse-key="switches">
       <h2>
         Switches &amp; ports
@@ -1075,8 +1282,20 @@
         <span class="chevron">▾</span>
       </h2>
       <div class="card-body">
+        <div class="switches-filter-bar">
+          <input type="search" id="switches-filter-input" placeholder="Filter switches / ports / connected device (name, IP, MAC, hostname)" autocomplete="off" />
+          <div class="switches-filter-chips" role="radiogroup" aria-label="Quick filter">
+            <label class="chip"><input type="radio" name="sw-chip" value="all" checked /><span>All</span></label>
+            <label class="chip"><input type="radio" name="sw-chip" value="active" /><span>Active</span></label>
+            <label class="chip"><input type="radio" name="sw-chip" value="errors" /><span>Errors</span></label>
+            <label class="chip"><input type="radio" name="sw-chip" value="atem" /><span>ATEM</span></label>
+            <label class="chip"><input type="radio" name="sw-chip" value="pinned" /><span>Pinned ★</span></label>
+          </div>
+          <button type="button" class="filter-clear" id="switches-filter-clear" hidden>Clear</button>
+        </div>
         <div class="switches-grid" id="switches-grid"></div>
         <div class="empty" id="switches-empty">No switches reported by the UDM yet.</div>
+        <div class="empty" id="switches-no-match" hidden>No switches or ports match the current filter.</div>
       </div>
     </section>
 
@@ -1093,11 +1312,36 @@
       </div>
       <div class="unifi-error" id="udm-error" hidden></div>
       <div class="unifi-help" id="udm-help" hidden>
-        UDM credentials not configured. Set <code>UDM_API_KEY=...</code> in your shell
-        before launching this tool. Create a key in the UDM web UI under
-        <strong>Settings → Control Plane → Integrations → Create API Key</strong>.
-        Falls back to <code>UDM_USERNAME</code> + <code>UDM_PASSWORD</code> for older
-        UniFi OS versions.
+        <p style="margin:0 0 12px;">Paste your UDM API key below. Create one
+        in the UDM web UI under <strong>Settings → Control Plane → Integrations
+        → Create API Key</strong>.</p>
+        <form id="udm-key-form" autocomplete="off"
+              style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"
+              onsubmit="return false;">
+          <!-- type="text" + the random `data-1p-ignore` / `data-lpignore` /
+               `data-bwignore` markers + autocomplete="off" stack up to
+               keep password-manager extensions (1Password, LastPass,
+               Bitwarden, Chrome's built-in saver) from intercepting the
+               submit. The API key is a 60-char token, not really a
+               password, so type=text + a small show-mask trick is
+               operator-friendly. -->
+          <input type="text" id="udm-key-input" placeholder="UDM API key"
+                 autocomplete="off" spellcheck="false"
+                 name="udm-key-not-a-password"
+                 data-1p-ignore="true" data-lpignore="true" data-bwignore="true"
+                 style="flex:1;min-width:240px;padding:6px 10px;background:#0e0f12;color:#e6e6ea;border:1px solid #2a2d35;border-radius:4px;font-family:monospace;font-size:13px;-webkit-text-security:disc;text-security:disc;">
+          <button type="button" id="udm-key-save"
+                  style="padding:6px 14px;background:#3a7ac4;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;">Save</button>
+          <span id="udm-key-feedback" style="font-size:12px;color:var(--muted);"></span>
+        </form>
+        <p style="margin:12px 0 0;font-size:12px;color:var(--muted);">Stored
+        in-process only — never written to disk. Polling threads pick it
+        up within ~2 seconds. Falls back to <code>UDM_USERNAME</code> +
+        <code>UDM_PASSWORD</code> environment variables for older UniFi OS
+        versions that don't expose local API keys.</p>
+      </div>
+      <div class="unifi-update" id="udm-update" hidden style="margin-top:8px;font-size:12px;">
+        <a href="#" id="udm-update-link" style="color:var(--accent);cursor:pointer;">Update credentials</a>
       </div>
     </section>
 
@@ -1320,7 +1564,129 @@
         errEl.hidden = true;
       }
 
-      $('#udm-help').hidden = status.state !== 'not_configured';
+      // Form visibility: show when not configured OR explicitly
+      // opened via the "Update credentials" link (signaled by the
+      // `data-udm-open` attribute on the body). When connected we
+      // show the link instead so the operator can rotate the key
+      // without restarting.
+      const helpEl = $('#udm-help');
+      const updateEl = $('#udm-update');
+      const explicitlyOpen = document.body.dataset.udmOpen === '1';
+      const failed = status.state === 'failed';
+      const notConfigured = status.state === 'not_configured';
+      helpEl.hidden = !(notConfigured || failed || explicitlyOpen);
+      updateEl.hidden = !(status.state === 'connected' || status.state === 'connecting') || explicitlyOpen;
+    }
+
+    // UDM API-key form: handles submit + the "Update credentials"
+    // toggle. Posts the key to /api/config; backend writes through
+    // to the shared CredentialsHolder, polling threads pick it up
+    // on their next tick.
+    function wireUdmKeyForm() {
+      const form = $('#udm-key-form');
+      const input = $('#udm-key-input');
+      const button = $('#udm-key-save');
+      const fb = $('#udm-key-feedback');
+      const updateLink = $('#udm-update-link');
+      if (!form || !input || !button) {
+        console.warn('udm form not found in DOM at wire-up time');
+        return;
+      }
+
+      const submit = async () => {
+        if (!fb) return;
+        const key = input.value.trim();
+        // alpha.43 UX fixes for "saving for a long time" complaint:
+        //   - Disable the Save button so the operator knows the click
+        //     registered + can't double-submit.
+        //   - 12s hard timeout via AbortController so a hung server
+        //     surfaces as a real error instead of the indefinite
+        //     "Saving…" the operator saw before.
+        //   - Visible "Saving (Ns)…" countdown so the UI proves it's
+        //     still working even when the response is slow.
+        //   - On success, kick an immediate tick() so the next
+        //     /api/state poll happens NOW rather than waiting up to
+        //     1s for the regular setInterval — the operator sees the
+        //     status transition without thinking nothing happened.
+        button.disabled = true;
+        const origButtonText = button.textContent;
+        fb.style.color = 'var(--muted)';
+        fb.textContent = 'Saving…';
+        const ctrl = new AbortController();
+        const TIMEOUT_MS = 12000;
+        const startedAt = Date.now();
+        const tickInterval = setInterval(() => {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          if (elapsed >= 1) fb.textContent = `Saving (${elapsed}s)…`;
+        }, 1000);
+        const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+        try {
+          const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ unifi_api_key: key }),
+            signal: ctrl.signal,
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.ok && data.ok) {
+            fb.style.color = '#3acf6f';
+            fb.textContent = key ? 'Saved — connecting…' : 'Cleared.';
+            input.value = '';
+            document.body.dataset.udmOpen = '';
+            // Immediate poll so the operator sees the UDM panel
+            // transition Connecting → Connected without waiting for
+            // the next 1Hz tick. If tick is in flight it'll just
+            // race + the latest result wins; harmless either way.
+            if (typeof tick === 'function') tick();
+          } else {
+            fb.style.color = '#e85a5a';
+            fb.textContent = (data && data.error) || `Save failed (HTTP ${resp.status})`;
+          }
+        } catch (e) {
+          fb.style.color = '#e85a5a';
+          if (e && e.name === 'AbortError') {
+            fb.textContent = 'Timed out after 12s — the dashboard server may be overloaded. Try closing + reopening Net Utility.';
+          } else {
+            fb.textContent = 'Network error: ' + (e && e.message ? e.message : String(e));
+          }
+        } finally {
+          clearInterval(tickInterval);
+          clearTimeout(timer);
+          button.disabled = false;
+          button.textContent = origButtonText;
+        }
+      };
+
+      // Belt-and-suspenders wiring: the button is type=button (NOT
+      // type=submit) so password-manager extensions don't intercept
+      // form submission. We attach the handler to both the button's
+      // click and the form's submit (which would only fire on Enter
+      // in the input field). preventDefault on both so neither path
+      // triggers a page navigation.
+      button.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        submit();
+      });
+      form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        submit();
+      });
+      // Enter key in the input also triggers submit (the form submit
+      // listener handles it on its own; just here for clarity).
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          submit();
+        }
+      });
+
+      if (updateLink) {
+        updateLink.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          document.body.dataset.udmOpen = '1';
+          input.focus();
+        });
+      }
     }
 
     // WAN bandwidth card — renders the upload + download Mbps,
@@ -1450,6 +1816,57 @@
       pillsEl.innerHTML = checks.map((c) => `<span class="preshow-pill ${c.s}">${c.t}</span>`).join('');
     }
 
+    // alpha.28: detailed pre-show checks panel. Reads the
+    // server-computed `state.pre_show` field (PreShowVerdict) and
+    // renders the per-check list. The compact banner above (built
+    // client-side by renderPreshow) stays as the at-a-glance signal;
+    // this panel surfaces the full check ladder with hints for
+    // remediation when something's failing.
+    function renderPreshowPanel(state) {
+      const panel = document.getElementById('preshow-panel');
+      const list = document.getElementById('preshow-checks-list');
+      const summaryEl = document.getElementById('preshow-panel-summary');
+      if (!panel || !list || !summaryEl) return;
+      const verdict = state.pre_show;
+      if (!verdict || !Array.isArray(verdict.checks)) {
+        list.innerHTML = '';
+        summaryEl.textContent = '—';
+        return;
+      }
+      // Overall status drives the color of the collapsed-card summary.
+      panel.classList.remove('overall-pass', 'overall-warn', 'overall-fail', 'overall-skip');
+      panel.classList.add(`overall-${verdict.overall || 'skip'}`);
+      summaryEl.textContent = verdict.summary || '—';
+      const icons = { pass: '✓', warn: '⚠', fail: '✗', skip: '·' };
+      list.innerHTML = verdict.checks.map((c) => {
+        const icon = icons[c.status] || '·';
+        const hint = c.hint
+          ? `<span class="hint">${escapeHtml(c.hint)}</span>`
+          : '';
+        return `
+          <div class="preshow-check ${c.status}" data-check-id="${escapeHtml(c.id || '')}">
+            <span class="icon" aria-hidden="true">${icon}</span>
+            <span class="label">${escapeHtml(c.label || '')}</span>
+            <span class="detail">${escapeHtml(c.detail || '')}</span>
+            ${hint}
+          </div>`;
+      }).join('');
+    }
+
+    // Tiny HTML escape so backend-provided strings (UDM error
+    // messages, IP addresses, etc.) can't inject markup. Pure
+    // defense in depth — net-diag is a same-machine localhost
+    // service, but the habit is cheap.
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // Collapse state for the small config cards. Persists in
     // localStorage so the operator's preference survives reloads.
     function initCollapsibles() {
@@ -1565,11 +1982,13 @@
 
       // Wizard pre-fill — Step 1 takes the first sorted local IP,
       // Step 2 takes the configured ATEM IP, Step 3 deep-links to
-      // the UDM web UI at the configured host.
+      // the UDM web UI at the configured host. cfg + atemIp already
+      // declared above for the summary line — reuse here to avoid a
+      // duplicate-identifier SyntaxError that blocks the whole
+      // dashboard from rendering (regression observed alpha.21
+      // installs).
       const localIps = state.local_ips || [];
       $('#visibility-local-ip').textContent = localIps.length > 0 ? localIps[0] : '(unknown)';
-      const cfg = state.config || {};
-      const atemIp = (cfg.atem && cfg.atem.ip) || '(not configured)';
       $('#visibility-atem-ip').textContent = atemIp;
       const unifiHost = cfg.unifi_host || 'https://192.168.20.1';
       const unifiLink = $('#visibility-unifi-link');
@@ -1589,27 +2008,196 @@
           toggle.textContent = isOpen ? 'Hide steps ↑' : 'Set up port mirroring →';
         });
       }
+
+      // UDM API-key form (alpha.29). Wire submit handler + the
+      // "Update credentials" link once at boot — the form's
+      // elements survive re-renders since renderUnifi only toggles
+      // hidden, never rebuilds DOM.
+      wireUdmKeyForm();
+
+      // alpha.27: switches/ports filter bar wiring. State (text +
+      // chip) lives in `switchesFilter` and persists to localStorage.
+      // Re-rerenders the switches card immediately on change so the
+      // operator sees their drill-down without waiting for the next
+      // 1Hz poll tick. Pin clicks use event delegation on the grid
+      // because port rows get re-rendered each tick.
+      const filterInput = document.querySelector('#switches-filter-input');
+      const filterChips = document.querySelectorAll('input[name="sw-chip"]');
+      const filterClear = document.querySelector('#switches-filter-clear');
+      const filterCardBody = document.querySelector('#switches-card .card-body');
+
+      // Restore saved state on first render.
+      if (filterInput) filterInput.value = switchesFilter.text || '';
+      filterChips.forEach((c) => {
+        c.checked = (c.value === (switchesFilter.chip || 'all'));
+      });
+      updateFilterClearVisibility();
+
+      function commitFilter() {
+        saveFilterState(switchesFilter);
+        updateFilterClearVisibility();
+        // Re-render immediately if we have last-seen state cached.
+        if (typeof __currentState !== 'undefined' && __currentState) {
+          renderSwitches(__currentState);
+        }
+      }
+      function updateFilterClearVisibility() {
+        if (!filterClear) return;
+        const dirty = (switchesFilter.text || '').length > 0
+                    || (switchesFilter.chip || 'all') !== 'all';
+        filterClear.hidden = !dirty;
+      }
+
+      if (filterInput) {
+        // 'input' fires per-keystroke for live filtering; debounced
+        // mildly via the next-tick render to keep DOM churn cheap on
+        // 48-port switches.
+        let dbnc = null;
+        filterInput.addEventListener('input', () => {
+          switchesFilter.text = filterInput.value;
+          clearTimeout(dbnc);
+          dbnc = setTimeout(commitFilter, 80);
+        });
+      }
+      filterChips.forEach((c) => {
+        c.addEventListener('change', () => {
+          if (!c.checked) return;
+          switchesFilter.chip = c.value;
+          commitFilter();
+        });
+      });
+      if (filterClear) {
+        filterClear.addEventListener('click', () => {
+          switchesFilter = { text: '', chip: 'all' };
+          if (filterInput) filterInput.value = '';
+          filterChips.forEach((c) => { c.checked = (c.value === 'all'); });
+          commitFilter();
+        });
+      }
+      // Pin-click delegation on the switches card body. Handles
+      // both per-port .pin-btn (alpha.27) and per-switch
+      // .sw-pin-btn (alpha.32). Re-renders on toggle so the row
+      // sorts to its new position and the ★/☆ glyph flips.
+      if (filterCardBody) {
+        filterCardBody.addEventListener('click', (e) => {
+          // Per-switch pin (alpha.32). Check FIRST so the broader
+          // .sw-pin-btn match wins before we fall through to the
+          // port-pin handler.
+          const swBtn = e.target.closest('.sw-pin-btn');
+          if (swBtn) {
+            e.preventDefault();
+            const mac = swBtn.dataset.swMac || '';
+            if (pinnedSwitches.has(mac)) pinnedSwitches.delete(mac);
+            else pinnedSwitches.add(mac);
+            saveSwitchPinSet(pinnedSwitches);
+            if (typeof __currentState !== 'undefined' && __currentState) {
+              renderSwitches(__currentState);
+            }
+            return;
+          }
+          // Per-port pin (alpha.27).
+          const btn = e.target.closest('.pin-btn');
+          if (!btn) return;
+          e.preventDefault();
+          const key = btn.dataset.portKey;
+          if (!key) return;
+          if (pinnedPorts.has(key)) pinnedPorts.delete(key);
+          else pinnedPorts.add(key);
+          savePinSet(pinnedPorts);
+          if (typeof __currentState !== 'undefined' && __currentState) {
+            renderSwitches(__currentState);
+          }
+        });
+      }
     });
+
+    // alpha.27: filter + pin state for the switches/ports card.
+    // Persisted to localStorage so operators don't have to re-set
+    // their preferred view every page reload.
+    // alpha.32: per-switch pins (in addition to per-port). Operators
+    // on busy LANs (many switches + many ports) want to pin a whole
+    // switch to the top, not just individual ports — separate Set
+    // keyed by sw.mac.
+    const PIN_STORAGE_KEY = 'netutility_port_pins_v1';
+    const SWITCH_PIN_STORAGE_KEY = 'netutility_switch_pins_v1';
+    const FILTER_STORAGE_KEY = 'netutility_switches_filter_v1';
+    function loadSwitchPinSet() {
+      try {
+        const raw = localStorage.getItem(SWITCH_PIN_STORAGE_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? new Set(arr) : new Set();
+      } catch (_e) { return new Set(); }
+    }
+    function saveSwitchPinSet(set) {
+      try {
+        localStorage.setItem(SWITCH_PIN_STORAGE_KEY, JSON.stringify(Array.from(set)));
+      } catch (_e) { /* non-fatal */ }
+    }
+    function loadPinSet() {
+      try {
+        const raw = localStorage.getItem(PIN_STORAGE_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch (_e) { return new Set(); }
+    }
+    function savePinSet(set) {
+      try {
+        localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(Array.from(set)));
+      } catch (_e) { /* quota/private mode — non-fatal */ }
+    }
+    function loadFilterState() {
+      try {
+        const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+        if (!raw) return { text: '', chip: 'all' };
+        const obj = JSON.parse(raw);
+        return {
+          text: typeof obj.text === 'string' ? obj.text : '',
+          chip: typeof obj.chip === 'string' ? obj.chip : 'all',
+        };
+      } catch (_e) { return { text: '', chip: 'all' }; }
+    }
+    function saveFilterState(state) {
+      try {
+        localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(state));
+      } catch (_e) { /* non-fatal */ }
+    }
+    let pinnedPorts = loadPinSet();
+    let pinnedSwitches = loadSwitchPinSet();
+    let switchesFilter = loadFilterState();
+    function pinKey(swMac, portIdx) { return `${swMac || ''}:${portIdx}`; }
+    function isSwitchPinned(sw) { return pinnedSwitches.has(sw.mac || ''); }
 
     // Switch port utilization. One block per USW, with a port table
     // showing real-time tx/rx kbps, errors, link state. The ATEM's
-    // port is highlighted with an orange dot.
+    // port is highlighted with an orange dot. alpha.27 adds a filter
+    // bar (text search + chip group) above the grid and a per-port
+    // pin button so operators can drill into the handful of ports
+    // they actually care about on a 48-port USW.
     function renderSwitches(state) {
       const switches = (state.switches || []).slice();
       const grid = $('#switches-grid');
       const empty = $('#switches-empty');
+      const noMatch = $('#switches-no-match');
       if (switches.length === 0) {
         grid.innerHTML = '';
         empty.hidden = false;
+        if (noMatch) noMatch.hidden = true;
         updateCardSummary('switches-card', '—');
         return;
       }
       empty.hidden = true;
-      // Sort: switch hosting the ATEM first, then by active-port
-      // count desc (busy switches before idle PDUs), then alphabetical.
-      // Pinning the ATEM's switch to the top means the operator's
-      // primary signal is visible the moment they expand the card.
+      // Sort: operator-pinned switches first (alpha.32), then the
+      // switch hosting the ATEM, then by active-port count desc
+      // (busy switches before idle PDUs), then alphabetical.
+      // Operator pins beat the ATEM auto-priority — if you've
+      // explicitly pinned an uplink switch, you want it on top
+      // regardless of where the ATEM lives.
       switches.sort((a, b) => {
+        const aPin = isSwitchPinned(a);
+        const bPin = isSwitchPinned(b);
+        if (aPin !== bPin) return aPin ? -1 : 1;
         const aAtem = (a.ports || []).some((p) => p.is_atem_port);
         const bAtem = (b.ports || []).some((p) => p.is_atem_port);
         if (aAtem !== bAtem) return aAtem ? -1 : 1;
@@ -1624,19 +2212,72 @@
       const sumParts = [`${switches.length} switch${switches.length === 1 ? '' : 'es'}`, `${totalPorts} active ports`];
       if (errPorts > 0) sumParts.push(`${errPorts} with errors`);
       if (atemPort) sumParts.push(`ATEM on ${atemPort}`);
+      if (pinnedSwitches.size > 0) sumParts.push(`${pinnedSwitches.size} pinned switch${pinnedSwitches.size === 1 ? '' : 'es'}`);
+      if (pinnedPorts.size > 0) sumParts.push(`${pinnedPorts.size} pinned port${pinnedPorts.size === 1 ? '' : 's'}`);
       updateCardSummary('switches-card', sumParts.join(' · '));
 
-      grid.innerHTML = switches.map((sw) => {
+      // alpha.27 filter predicate. Combines text search (matches any of
+      // switch name, port name, connected IP, connected MAC) with the
+      // active chip ("all" | "active" | "errors" | "atem" | "pinned").
+      const ftext = (switchesFilter.text || '').trim().toLowerCase();
+      const fchip = switchesFilter.chip || 'all';
+      const matchesFilter = (sw, p) => {
+        if (ftext.length > 0) {
+          const hay = [sw.name, sw.model, p.name,
+                       p.connected_ip || '', p.connected_mac || '']
+            .join(' ').toLowerCase();
+          if (!hay.includes(ftext)) return false;
+        }
+        const errs = p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped;
+        switch (fchip) {
+          case 'active': return (p.tx_kbps || 0) + (p.rx_kbps || 0) > 0;
+          case 'errors': return errs > 0;
+          case 'atem':   return p.is_atem_port;
+          case 'pinned': return pinnedPorts.has(pinKey(sw.mac, p.port_idx));
+          default:       return true;
+        }
+      };
+
+      let totalShownPorts = 0;
+      let totalShownSwitches = 0;
+      const blocks = switches.map((sw) => {
         const cpu = sw.cpu_pct != null ? `${sw.cpu_pct.toFixed(1)}% CPU` : '';
         const mem = sw.mem_pct != null ? `${sw.mem_pct.toFixed(1)}% mem` : '';
         const up = sw.uptime_secs != null ? `up ${fmtUptime(sw.uptime_secs)}` : '';
         const stats = [cpu, mem, up].filter(Boolean).join(' · ');
-        const portRows = sw.ports.map((p) => {
+
+        // Sort ports: pinned first (preserving their internal order),
+        // then the original port-index order. The "last-pinned" class
+        // tags the final pinned port so CSS can draw a separator
+        // between the pinned block and the rest.
+        const annotated = sw.ports.map((p) => ({
+          p, isPinned: pinnedPorts.has(pinKey(sw.mac, p.port_idx)),
+        }));
+        annotated.sort((a, b) => {
+          if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+          return (a.p.port_idx || 0) - (b.p.port_idx || 0);
+        });
+        const filteredAnnotated = annotated.filter(({ p }) => matchesFilter(sw, p));
+        if (filteredAnnotated.length === 0) {
+          // Render placeholder so DOM stays stable; hide via class.
+          return `<div class="switch-block hidden-by-filter" data-sw-mac="${sw.mac || ''}"></div>`;
+        }
+        totalShownSwitches += 1;
+        totalShownPorts += filteredAnnotated.length;
+        // Find the last pinned in the filtered set to mark the separator.
+        let lastPinnedIdx = -1;
+        for (let i = filteredAnnotated.length - 1; i >= 0; i -= 1) {
+          if (filteredAnnotated[i].isPinned) { lastPinnedIdx = i; break; }
+        }
+
+        const portRows = filteredAnnotated.map(({ p, isPinned }, idx) => {
           const errs = p.tx_errors + p.rx_errors + p.tx_dropped + p.rx_dropped;
           const cls = ['port-row'];
           if (p.is_atem_port) cls.push('atem');
           if (!p.up) cls.push('down');
           if (errs > 0) cls.push('has-errors');
+          if (isPinned) cls.push('pinned');
+          if (idx === lastPinnedIdx) cls.push('last-pinned');
           const txDisp = fmtKbps(p.tx_kbps);
           const rxDisp = fmtKbps(p.rx_kbps);
           const meta = [];
@@ -1644,23 +2285,48 @@
           else if (p.speed_mbps) meta.push(p.speed_mbps >= 1000 ? `${p.speed_mbps/1000}G` : `${p.speed_mbps}M`);
           if (p.media) meta.push(p.media);
           if (errs > 0) meta.push(`${errs} err/drop`);
-          if (p.link_down_count > 0) meta.push(`${p.link_down_count} flap${p.link_down_count === 1 ? '' : 's'}`);
+          if (p.link_down_count > 0) {
+            // alpha.27: surface the time window the flap count covers.
+            // UDM's `num_port_drops` accumulates since the switch
+            // booted (or counter reset), so switch uptime is the
+            // most honest first-pass window. Operator can mentally
+            // compute rate ("3 flaps in 8h" = ~0.4/h, low concern;
+            // "3 flaps in 5min" = active link instability, worth a
+            // closer look). Falls back to bare "N flaps" text when
+            // uptime isn't available (rare; UDM usually reports it).
+            const flapText = `${p.link_down_count} flap${p.link_down_count === 1 ? '' : 's'}`;
+            if (sw.uptime_secs != null && sw.uptime_secs > 0) {
+              meta.push(`${flapText} in ${fmtUptime(sw.uptime_secs)}`);
+            } else {
+              meta.push(flapText);
+            }
+          }
           if (p.sfp_temp_c != null) meta.push(`${p.sfp_temp_c.toFixed(0)}°C`);
           const conn = [p.connected_ip, p.connected_mac].filter(Boolean).join(' · ');
+          const pkey = pinKey(sw.mac, p.port_idx);
+          const pinAria = isPinned ? 'true' : 'false';
+          const pinTitle = isPinned ? 'Unpin port' : 'Pin port (sorts to top, filterable)';
           return `
-            <div class="${cls.join(' ')}">
+            <div class="${cls.join(' ')}" data-port-key="${pkey}">
               <span>${p.port_idx}</span>
               <span class="port-name">${p.name}</span>
               <span class="port-bw ${txDisp.zero ? 'zero' : ''}">${txDisp.value}<span class="unit"> ${txDisp.unit}</span></span>
               <span class="port-bw ${rxDisp.zero ? 'zero' : ''}">${rxDisp.value}<span class="unit"> ${rxDisp.unit}</span></span>
               <span class="port-meta">${meta.join(' · ')}</span>
               <span class="port-meta">${conn}</span>
-              <span></span>
+              <span><button type="button" class="pin-btn" data-port-key="${pkey}" aria-pressed="${pinAria}" title="${pinTitle}">${isPinned ? '★' : '☆'}</button></span>
             </div>`;
         }).join('');
+        const swPinned = isSwitchPinned(sw);
+        const swPinAria = swPinned ? 'true' : 'false';
+        const swPinTitle = swPinned
+          ? 'Unpin switch'
+          : 'Pin switch (sorts to top, separate from per-port pins below)';
+        const headClass = swPinned ? 'switch-block-head pinned' : 'switch-block-head';
         return `
-          <div class="switch-block">
-            <div class="switch-block-head">
+          <div class="switch-block${swPinned ? ' switch-pinned' : ''}" data-sw-mac="${sw.mac || ''}">
+            <div class="${headClass}">
+              <button type="button" class="sw-pin-btn" data-sw-mac="${sw.mac || ''}" aria-pressed="${swPinAria}" title="${swPinTitle}">${swPinned ? '★' : '☆'}</button>
               <span class="name">${sw.name}</span>
               <span class="model">${sw.model}</span>
               <span class="stats">${stats}</span>
@@ -1672,11 +2338,27 @@
               <span class="ports-head">RX</span>
               <span class="ports-head">Link</span>
               <span class="ports-head">Connected to</span>
-              <span class="ports-head"></span>
+              <span class="ports-head">Pin</span>
               ${portRows}
             </div>
           </div>`;
-      }).join('');
+      });
+      grid.innerHTML = blocks.join('');
+
+      // alpha.27: when the filter excludes EVERY port across every
+      // switch, show a friendly "no matches" hint instead of an empty
+      // grid (which the operator would read as "no switches" — same
+      // visual as the genuine no-switches state).
+      const allHidden = totalShownPorts === 0 && totalShownSwitches === 0;
+      if (noMatch) noMatch.hidden = !allHidden;
+
+      // Summary also reflects how many ports passed the filter, so
+      // the collapsed-card chip surfaces operator's drill-down state.
+      if (ftext.length > 0 || fchip !== 'all') {
+        const extra = `· filter: ${totalShownPorts}/${totalPorts} ports`;
+        updateCardSummary('switches-card',
+          (sumParts.join(' · ') + ' ' + extra).trim());
+      }
     }
 
     function renderClients(state) {
@@ -1766,6 +2448,7 @@
 
       renderModeBanner(cfg.mode || 'live');
       renderPreshow(s);
+      renderPreshowPanel(s);
       renderAlarms(s);
       renderVisibility(s);
       renderWan(s);
