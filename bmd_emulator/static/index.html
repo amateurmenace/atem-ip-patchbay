@@ -65,7 +65,7 @@
       </button>
       <a id="view-toggle-multi" href="/static/multiview.html" class="view-toggle-btn"
          role="tab" aria-selected="false"
-         title="Multiview — 4 channels in one window, route multiple sources to multiple destinations">
+         title="Multiview — 6 channels in one window, route multiple sources to multiple destinations">
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
           <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
@@ -162,19 +162,18 @@
           software and not Blackmagic hardware, they seem to have lessened
           some of the handshake requirements between sender and receiver, so
           it was much easier to deconstruct what was essential and what was
-          just noise. Then Claude and I (mostly Claude) built an emulator of
-          a streaming encoder and eventually stumbled onto the winning
-          combination that got a signal into the ATEM Mini Extreme ISO G2
-          that inspired this journey.
+          just noise. Then, with Claude Code as a pair programmer, I built an
+          emulator of a streaming encoder and found the combination that got
+          a signal into the ATEM Mini Extreme ISO G2 that inspired this
+          journey.
         </p>
       </div>
     </div>
     <div class="hero-disclaimer">
-      This is more of a demo app showing what is now possible, a proof of
-      concept, and should only be used in real productions at your own
-      risk. It is free forever, until it either gets stopped by Blackmagic
-      or they fully embrace opening up their powerful stream decoding
-      ecosystem.
+      This is an independent, open-source proof of concept built on
+      Blackmagic Design's publicly documented streaming protocols. It is
+      not affiliated with or endorsed by Blackmagic Design, and it should
+      be used in real productions at your own risk.
     </div>
     <!-- Hero credit moved to the page footer to keep this band tight on the credits-vs-disclaimer
          distinction. -->
@@ -289,6 +288,10 @@
     <!-- ---------- OVERLAYS (left column, under FFmpeg log) ---- -->
     <section class="card overlay-card">
       <div class="card-title"><span>Overlays</span></div>
+      <p class="recovery-lead" style="font-size:11px; color: var(--muted);">
+        Saved with your settings, but not yet composited into the stream
+        in this release.
+      </p>
       <div class="row-2">
         <label>Title
           <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
@@ -323,13 +326,13 @@
         path.
       </p>
       <p class="recovery-lead" style="font-size:11px; color: var(--muted);">
-        <strong>alpha.9:</strong> works with NDI and OMT sources only
-        (frames are already raw at the source). AVF cameras / pipe /
-        relay sources fall through silently — full coverage lands in
-        alpha.10. Audio over OMT is also alpha.10. Pre-built
-        binaries ship with OMT compiled out (set
-        <code>--features omt</code> with libomt.dylib in your lib
-        path to enable).
+        NDI and OMT sources are published from their raw frames
+        in-process; cameras, screens, pipe and relay sources are
+        published through a second FFmpeg process that opens the same
+        source (some cameras allow only one reader). Audio over OMT is
+        included for NDI sources. Pre-built
+        installers ship with OMT enabled (libomt is bundled); source
+        builds need <code>--features omt</code>.
       </p>
       <label style="display:flex; align-items:center; gap:8px; margin: 8px 0;">
         <input type="checkbox" id="omt-output-enabled">
@@ -1280,7 +1283,7 @@
       <div class="guide-card">
         <h3>Latency budget</h3>
         <ul class="guide-facts">
-          <li><strong>SRT push</strong> — 200–500 ms typical (we set <code>latency=500000 µs</code> by default)</li>
+          <li><strong>SRT push</strong> — 200–500 ms typical (default SRT latency is 200 ms; raise it on flaky links)</li>
           <li><strong>Encoder</strong> — 50–100 ms (libx265/x264, <code>preset veryfast tune zerolatency</code>)</li>
           <li><strong>Total end-to-end</strong> — 250–600 ms typical</li>
           <li><strong>Bandwidth</strong> — 2.5 Mbps (Low) · 4.5 Mbps (Medium) · 6 Mbps (High); 1080p60 needs ~1.5× more</li>
@@ -1314,10 +1317,10 @@
           BMD doesn't endorse third-party encoders. Use in real productions at your own risk.</p>
         </details>
         <details class="faq-item">
-          <summary>Why does my source appear delayed by ~500 ms on the ATEM?</summary>
-          <p>That's SRT's latency budget — the receiver buffers half a second so packet retransmits
-          have time to land. Reduce <code>SRT latency</code> in the Advanced section if your network
-          is fast and stable; raise it on flaky connections.</p>
+          <summary>Why does my source appear delayed by a few hundred ms on the ATEM?</summary>
+          <p>That's SRT's latency budget — the receiver buffers (200 ms by default) so packet
+          retransmits have time to land, plus encoder and decoder time. Reduce <code>SRT latency</code>
+          in the Advanced section if your network is fast and stable; raise it on flaky connections.</p>
         </details>
         <details class="faq-item">
           <summary>What's the difference between NDI direct and the bridge workflow?</summary>
@@ -1371,13 +1374,13 @@
         </details>
         <details class="faq-item">
           <summary>Does this support OMT (Open Media Transport)?</summary>
-          <p><strong>OMT support coming soon.</strong> OMT is the open, royalty-free
+          <p><strong>Yes, in and out.</strong> OMT is the open, royalty-free
           alternative to NDI from the Open Media Transport project — same use case
-          (low-latency uncompressed-ish video over IP on a LAN), no per-seat licensing,
-          and an MIT-licensed reference implementation. It's a natural fit alongside
-          our direct NDI ingest path; we'll add it as another source kind once the
-          Rust crate stabilizes. If you have a strong use case, drop a note via the
-          Email link below — early-feedback senders get tested against first.</p>
+          (low-latency video over IP on a LAN), no per-seat licensing, and an
+          MIT-licensed reference implementation. OMT senders on the LAN appear as
+          source tiles next to NDI senders, and the OMT output card publishes the
+          outgoing stream on the LAN alongside the ATEM-bound path. The pre-built
+          installers include the OMT runtime.</p>
         </details>
       </div>
     </div>

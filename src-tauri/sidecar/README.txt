@@ -6,14 +6,14 @@ either need an `ffmpeg` binary dropped in here, or rely on the
 ffmpeg_path resolver falling through to PATH (any `brew install ffmpeg`
 already on the dev machine).
 
-CI populates this directory before `cargo tauri build`:
-
-  Mac arm64:  Jellyfin GPL build (jellyfin-ffmpeg_*_portable_macarm64-gpl)
-  Win x64:    BtbN GPL build (ffmpeg-n*-latest-win64-gpl-8.1)
-
-Both ship libsrt + HEVC + libx264 + the platform's hardware-accelerated
-encoders (VideoToolbox / nvenc / qsv) statically linked, so the bundled
-binary has no DLL or dylib dependencies of its own.
+CI populates this directory before `cargo tauri build` with our own
+FFmpeg build (see .github/workflows/build-ffmpeg.yml and
+ci/ffmpeg-pins.env): FFmpeg n8.1.1 configured with libsrt, libx264,
+libx265 and the DeckLink output device (built against Blackmagic
+DeckLink SDK 16.0), plus VideoToolbox on macOS and NVENC on Windows.
+The Mac build carries its Homebrew dylibs next to the binary; the
+Windows build carries the MinGW runtime DLLs. The NDI runtime, libomt,
+and (on Windows) atem-net-diag.exe are staged here as well.
 
 The presence of this README is load-bearing for `bundle.resources`'s
 `sidecar/*` glob — without at least one file matching, tauri-bundler's

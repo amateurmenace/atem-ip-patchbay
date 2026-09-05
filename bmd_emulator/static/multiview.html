@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
-  alpha.41 broadcast multiview — 4 channels in one window. Each tile
-  is a full source→DeckLink-output pipeline routed via the same
-  /api/i/:idx/* endpoints the single-source UI uses; TILE_COUNT=4 in
-  fleet.rs gives us 4 independent EncoderState + Streamer + Preview
-  slots.
+  Broadcast multiview — 6 channels in one window (4 at alpha.41, 6
+  since alpha.62). Each tile is a full source→DeckLink-output pipeline
+  routed via the same /api/i/:idx/* endpoints the single-source UI
+  uses; TILE_COUNT=6 in fleet.rs gives us 6 independent EncoderState +
+  Streamer + Preview slots.
 
   alpha.41 production hardening:
   - System health pill in header (CPU/RAM polled every 2s via
