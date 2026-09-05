@@ -110,23 +110,98 @@ jobs:
           ls -lh /usr/local/lib/libndi*
           otool -D /usr/local/lib/libndi.dylib
 
-      - name: Download FFmpeg sidecar (Jellyfin GPL build, arm64)
+      - name: Download FFmpeg+DeckLink sidecar (our build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Bundle FFmpeg into the .app so end users without Homebrew
-          # can stream on first launch. Jellyfin's portable arm64 GPL
-          # build is the same one v0.1.0 shipped — libsrt + HEVC +
-          # VideoToolbox encoders all included, no shared libraries
-          # to wrangle. Pinned version so the CI cache stays valid
-          # across runs and the bundled binary is reproducible.
-          JELLYFIN_VERSION="7.1.3-5"
-          URL="https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JELLYFIN_VERSION}/jellyfin-ffmpeg_${JELLYFIN_VERSION}_portable_macarm64-gpl.tar.xz"
-          curl -fSL -o /tmp/ffmpeg.tar.xz "$URL"
-          mkdir -p /tmp/ffmpeg-extract src-tauri/sidecar
-          tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract
-          cp /tmp/ffmpeg-extract/ffmpeg src-tauri/sidecar/ffmpeg
+          set -e
+          # alpha.34: switched from jellyfin-ffmpeg to our own
+          # FFmpeg+DeckLink build (see ci/ffmpeg-pins.env +
+          # .github/workflows/build-ffmpeg.yml). Both shipped with
+          # --enable-decklink so alpha.21's DeckLink output direction
+          # actually works on end-user installs without operators
+          # having to point ATEM_PATCHBAY_FFMPEG at a custom build.
+          #
+          # Same flag set as jellyfin's Mac build otherwise: libsrt,
+          # libx264, libx265, videotoolbox. Pinned via ci/ffmpeg-
+          # pins.env so the CI cache + downstream version expectations
+          # stay deterministic.
+          set -a
+          source ci/ffmpeg-pins.env
+          set +a
+          FFMPEG_VERSION_TRIM="${FFMPEG_VERSION#n}"
+          RELEASE_TAG="ffmpeg-decklink-${FFMPEG_VERSION_TRIM}-bmd${BMD_SDK_VERSION}-rev${BUILD_REVISION}"
+          ARTIFACT="ffmpeg-${FFMPEG_VERSION}-macos-arm64.tar.gz"
+          echo "Downloading $ARTIFACT from sidecar release $RELEASE_TAG"
+          gh release download "$RELEASE_TAG" --pattern "$ARTIFACT" --dir /tmp
+          mkdir -p src-tauri/sidecar
+          # alpha.35: tarball is now flat (ffmpeg + bundled
+          # /opt/homebrew dylibs at the root, no top-level dir).
+          # Extract directly into src-tauri/sidecar/ so the dylibs
+          # land alongside ffmpeg where its embedded @executable_path
+          # load commands expect them. Pre-alpha.35 the tarball
+          # contained only ffmpeg and `cp /tmp/ffmpeg sidecar/`
+          # worked, but the released binary then failed at dyld load
+          # on any machine without Homebrew's libsrt etc. installed.
+          tar -xzf "/tmp/$ARTIFACT" -C src-tauri/sidecar
           chmod +x src-tauri/sidecar/ffmpeg
           ls -lh src-tauri/sidecar/
+          # Quick audit — fails the build loud if /opt/homebrew refs
+          # somehow survived the build-ffmpeg.yml bundle pass (e.g.
+          # if a sidecar tarball from before alpha.35 got pulled).
+          if otool -L src-tauri/sidecar/ffmpeg 2>/dev/null | grep -qE '^\s+/(opt/homebrew|usr/local)/'; then
+            echo "::error::sidecar/ffmpeg still references non-system dylibs — did the sidecar build skip the bundling step?"
+            otool -L src-tauri/sidecar/ffmpeg | grep -E '^\s+/(opt/homebrew|usr/local)/'
+            exit 1
+          fi
           src-tauri/sidecar/ffmpeg -version | head -3
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
+          MUXERS=$(src-tauri/sidecar/ffmpeg -hide_banner -muxers 2>/dev/null)
+          ENCODERS=$(src-tauri/sidecar/ffmpeg -hide_banner -encoders 2>/dev/null)
+          PROTOCOLS=$(src-tauri/sidecar/ffmpeg -hide_banner -protocols 2>/dev/null)
+          for need in decklink mpegts flv; do
+            echo "$MUXERS" | grep -qE "\\s${need}\\s" || { echo "::error::muxer '${need}' missing"; exit 1; }
+          done
+          for need in libx264 h264_videotoolbox; do
+            echo "$ENCODERS" | grep -qE "${need}" || { echo "::error::encoder '${need}' missing"; exit 1; }
+          done
+          echo "$PROTOCOLS" | grep -qE '^\s*srt\s*$' || { echo "::error::protocol 'srt' missing"; exit 1; }
+          echo "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
+
+      - name: Download + stage libomt for OMT support (Mac arm64)
+        run: |
+          # alpha.18: OMT (Open Media Transport) — needed so OMT
+          # sources actually appear in the discovery dropdown. The
+          # libomt crate is feature-gated behind `omt`; enabling it
+          # requires libomt.dylib + libvmx.dylib at link time AND at
+          # runtime. Download URL matches the libomt-rs crate's
+          # mise.toml `native:download` task — official OMT 1.0.0.14
+          # binaries from openmediatransport/libomtnet GitHub
+          # releases.
+          OMT_VERSION="v1.0.0.14"
+          URL="https://github.com/openmediatransport/libomtnet/releases/download/${OMT_VERSION}/OpenMediaTransport.Binaries.Release.${OMT_VERSION}.zip"
+          curl -fSL -o /tmp/omt.zip "$URL"
+          mkdir -p /tmp/omt-extract
+          unzip -jo /tmp/omt.zip "Libraries/MacOS/libomt.dylib" "Libraries/MacOS/libvmx.dylib" -d /tmp/omt-extract
+          # Install at /usr/local/lib/ alongside libndi.dylib so
+          # tauri.conf.json's bundle.macOS.frameworks (absolute
+          # paths) can find them at bundle time. install_name_tool
+          # rewrites the LC_ID_DYLIB to @rpath/<name> so binaries
+          # link against the rpath-relative location the .app's
+          # build.rs sets via -Wl,-rpath,@executable_path/../Frameworks.
+          sudo mkdir -p /usr/local/lib
+          sudo cp -v /tmp/omt-extract/libomt.dylib /usr/local/lib/libomt.dylib
+          sudo cp -v /tmp/omt-extract/libvmx.dylib /usr/local/lib/libvmx.dylib
+          sudo install_name_tool -id "@rpath/libomt.dylib" /usr/local/lib/libomt.dylib
+          sudo install_name_tool -id "@rpath/libvmx.dylib" /usr/local/lib/libvmx.dylib
+          ls -lh /usr/local/lib/libomt* /usr/local/lib/libvmx*
+          # Export LIBOMT_PATH so the libomt-rs build.rs links
+          # against /usr/local/lib instead of its vendored stub
+          # location. Persists across subsequent CI steps.
+          echo "LIBOMT_PATH=/usr/local/lib" >> $GITHUB_ENV
 
       - name: Import signing identity (if secrets are set)
         env:
@@ -185,7 +260,28 @@ jobs:
           # secret override the hardcoded identity in the conf.
           APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         working-directory: src-tauri
-        run: cargo tauri build
+        run: cargo tauri build --features omt
+
+      - name: Copy libomt + libvmx into the .app's Contents/Frameworks
+        run: |
+          # alpha.18: libomt + libvmx need to ride along inside the .app
+          # for OMT to work at runtime. We don't put them in tauri.conf
+          # bundle.macOS.frameworks (that requires the dylibs at config-
+          # load time, which would break local cargo check for anyone
+          # who hasn't run `mise run native:download`) — copy them in
+          # post-build instead, after `cargo tauri build` has produced
+          # the .app and before the deep-codesign step picks them up.
+          APP="src-tauri/target/release/bundle/macos/ATEM IP Patchbay.app"
+          FW="$APP/Contents/Frameworks"
+          mkdir -p "$FW"
+          cp -v /usr/local/lib/libomt.dylib "$FW/libomt.dylib"
+          cp -v /usr/local/lib/libvmx.dylib "$FW/libvmx.dylib"
+          ls -lh "$FW/"
+          # install_name on each dylib should already be @rpath/... from
+          # the earlier staging step; verify so a misconfig fails loud
+          # rather than producing a non-loadable binary.
+          otool -D "$FW/libomt.dylib"
+          otool -D "$FW/libvmx.dylib"
 
       - name: Deep codesign every Mach-O in the .app (hardened runtime)
         # Tauri 2's bundler signs the main binary in Contents/MacOS/
@@ -219,16 +315,40 @@ jobs:
             fi
           done < <(find "$APP" -type f)
 
-          echo "===== Re-signing every Mach-O with hardened runtime ====="
-          while IFS= read -r f; do
+          # SIGN INSIDE-OUT: leaves first (Frameworks/* + Resources/*
+          # subcomponents that the main binary embeds-and-seals),
+          # then the main binary in MacOS/, then the outer bundle.
+          # Without this order, codesign refuses to sign the main
+          # binary with "code object is not signed at all" because
+          # one of its embedded subcomponents (e.g. libomt /
+          # libvmx that we just dropped into Frameworks/ post-build)
+          # is still ad-hoc / linker-signed. alpha.18 hit this when
+          # we added libomt + libvmx but didn't enforce signing order.
+          sign_one() {
+            local f="$1"
             if file "$f" 2>/dev/null | grep -qE 'Mach-O'; then
               echo "  signing ${f#$APP/}"
               codesign --force --options runtime --timestamp \
                 --sign "$SIGN_IDENTITY" "$f"
             fi
-          done < <(find "$APP" -type f)
+          }
 
-          echo "===== Re-signing the outer .app bundle ====="
+          echo "===== Phase 1: re-sign Frameworks/* (leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Frameworks" -type f 2>/dev/null)
+
+          echo "===== Phase 2: re-sign Resources/* (sidecar leaves) ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/Resources" -type f 2>/dev/null)
+
+          echo "===== Phase 3: re-sign main binary in MacOS/ ====="
+          while IFS= read -r f; do
+            sign_one "$f"
+          done < <(find "$APP/Contents/MacOS" -type f 2>/dev/null)
+
+          echo "===== Phase 4: re-sign the outer .app bundle ====="
           codesign --force --options runtime --timestamp \
             --sign "$SIGN_IDENTITY" "$APP"
 
@@ -520,27 +640,174 @@ jobs:
           "NDI_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Exported NDI_SDK_DIR=$sdkRoot"
 
-      - name: Download FFmpeg sidecar (BtbN GPL build, x64)
+      - name: Download FFmpeg+DeckLink sidecar (our build)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Bundle FFmpeg into the NSIS installer so end users
-          # without their own FFmpeg can stream on first launch.
-          # BtbN's static GPL build pins libsrt + HEVC + nvenc
-          # without DLL dependencies, same shape v0.1.0 shipped.
-          $version = "n8.1"
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-$version-latest-win64-gpl-8.1.zip"
-          $out = "$env:RUNNER_TEMP\ffmpeg.zip"
-          Invoke-WebRequest -Uri $url -OutFile $out
-          Expand-Archive -Path $out -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract"
-          $ffmpeg = Get-ChildItem -Path "$env:RUNNER_TEMP\ffmpeg-extract" -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          # alpha.34: switched from gyan.dev to our own FFmpeg+
+          # DeckLink build. See ci/ffmpeg-pins.env + .github/
+          # workflows/build-ffmpeg.yml for the pipeline. The
+          # bundled FFmpeg now ships --enable-decklink so alpha.21's
+          # DeckLink output direction works out of the box on end-
+          # user Windows installs — no more ATEM_PATCHBAY_FFMPEG
+          # workaround.
+          #
+          # Same feature set as gyan.dev's full_build otherwise:
+          # libsrt, libx264, libx265, NVENC (NVIDIA hardware
+          # encode), d3d11va/dxva2/mediafoundation decoders.
+
+          # Read pins.
+          $pins = @{}
+          Get-Content ci/ffmpeg-pins.env | Where-Object { $_ -match '^\s*[A-Z_]+=' } | ForEach-Object {
+            $parts = $_ -split '=', 2
+            $pins[$parts[0].Trim()] = $parts[1].Trim()
+          }
+          $version = $pins['FFMPEG_VERSION']
+          $versionTrim = $version -replace '^n', ''
+          $sdkVer = $pins['BMD_SDK_VERSION']
+          $rev = $pins['BUILD_REVISION']
+          $releaseTag = "ffmpeg-decklink-$versionTrim-bmd$sdkVer-rev$rev"
+          $artifact = "ffmpeg-$version-windows-x64.zip"
+          Write-Host "Downloading $artifact from sidecar release $releaseTag"
+          gh release download $releaseTag --pattern $artifact --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Failed to download FFmpeg sidecar artifact"
+            exit 1
+          }
           New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
-          Copy-Item $ffmpeg.FullName -Destination "src-tauri\sidecar\ffmpeg.exe"
+          Expand-Archive -Path "$env:RUNNER_TEMP\$artifact" -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract" -Force
+          # The sidecar zip contains ffmpeg.exe + MinGW runtime
+          # DLLs (libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-
+          # 1.dll). All need to land next to ffmpeg.exe so the
+          # Windows loader finds them at process startup.
+          Copy-Item "$env:RUNNER_TEMP\ffmpeg-extract\*" -Destination "src-tauri\sidecar\" -Force
           Get-ChildItem src-tauri\sidecar
           & "src-tauri\sidecar\ffmpeg.exe" -version | Select-Object -First 3
 
+          # Muxer-assertion sanity check. Fails the build loud if
+          # the bundled FFmpeg is missing the muxers/encoders/
+          # protocols the app expects. Regression guard for any
+          # future sidecar pipeline change.
+          $muxers = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -muxers
+          $encoders = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -encoders
+          $protocols = & "src-tauri\sidecar\ffmpeg.exe" -hide_banner -protocols
+          foreach ($need in @('decklink', 'mpegts', 'flv')) {
+            if (-not ($muxers | Select-String -Pattern "\s$need\s" -Quiet)) {
+              Write-Host "::error::muxer '$need' missing"
+              exit 1
+            }
+          }
+          foreach ($need in @('libx264', 'h264_nvenc')) {
+            if (-not ($encoders | Select-String -Pattern $need -Quiet)) {
+              Write-Host "::error::encoder '$need' missing"
+              exit 1
+            }
+          }
+          if (-not ($protocols | Select-String -Pattern '^\s*srt\s*$' -Quiet)) {
+            Write-Host "::error::protocol 'srt' missing"
+            exit 1
+          }
+          Write-Host "✓ DeckLink + standard muxer/encoder set present in bundled FFmpeg"
+
+      - name: Download + stage libomt for OMT support (Windows x64)
+        shell: pwsh
+        run: |
+          # alpha.18: OMT (Open Media Transport) bundling for Windows.
+          # libomt.dll + libvmx.dll go into sidecar/ next to ffmpeg.exe
+          # and Processing.NDI.Lib.x64.dll; libomt.lib (the import
+          # library) goes into a separate vendor dir that LIBOMT_PATH
+          # points at for build-time linking.
+          $OMT_VERSION = "v1.0.0.14"
+          $url = "https://github.com/openmediatransport/libomtnet/releases/download/$OMT_VERSION/OpenMediaTransport.Binaries.Release.$OMT_VERSION.zip"
+          $out = "$env:RUNNER_TEMP\omt.zip"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Write-Host "Downloaded OMT binaries: $([math]::Round((Get-Item $out).Length / 1MB, 1)) MB"
+          $extract = "$env:RUNNER_TEMP\omt-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Expand-Archive -Path $out -DestinationPath $extract -Force
+          # Pin to Libraries\Winx64\ explicitly — the OMT zip also
+          # contains WinArm64 builds, and a -Recurse -Filter "*.dll"
+          # picks up the FIRST match in filesystem walk order which
+          # may be the ARM64 one. alpha.18 hit this: the resulting
+          # x64 cargo build emitted "library machine type 'ARM64'
+          # conflicts with target machine type 'x64'" with 30 LNK2019
+          # unresolved-external errors.
+          $omtRoot = Join-Path $extract "Libraries\Winx64"
+          if (-not (Test-Path $omtRoot)) {
+            # Some zip arrangements use Libraries/Winx64 with forward
+            # slashes — find it case- and slash-insensitively.
+            $omtRoot = Get-ChildItem -Path $extract -Directory -Recurse `
+              | Where-Object { $_.Name -ieq "Winx64" } `
+              | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $omtRoot -or -not (Test-Path $omtRoot)) {
+            Write-Host "ERROR: Winx64 directory not found in OMT zip"
+            Get-ChildItem -Path $extract -Recurse -Depth 3 | Format-Table FullName, Length -AutoSize
+            exit 1
+          }
+          Write-Host "Using OMT root: $omtRoot"
+          $omtDll = Get-Item (Join-Path $omtRoot "libomt.dll") -ErrorAction SilentlyContinue
+          $vmxDll = Get-Item (Join-Path $omtRoot "libvmx.dll") -ErrorAction SilentlyContinue
+          $omtLib = Get-Item (Join-Path $omtRoot "libomt.lib") -ErrorAction SilentlyContinue
+          if (-not $omtDll -or -not $vmxDll -or -not $omtLib) {
+            Write-Host "ERROR: missing one of libomt.dll/libvmx.dll/libomt.lib in $omtRoot"
+            Get-ChildItem -Path $omtRoot | Format-Table Name, Length -AutoSize
+            exit 1
+          }
+          # Stage DLLs into sidecar/ so they ship in the NSIS installer
+          # AND get picked up by SetDllDirectoryW at runtime (the same
+          # mechanism that finds Processing.NDI.Lib.x64.dll).
+          New-Item -ItemType Directory -Force -Path "src-tauri\sidecar" | Out-Null
+          Copy-Item $omtDll.FullName -Destination "src-tauri\sidecar\libomt.dll" -Force
+          Copy-Item $vmxDll.FullName -Destination "src-tauri\sidecar\libvmx.dll" -Force
+          # Stage .lib for build-time linking. Cargo's build.rs reads
+          # LIBOMT_PATH to locate the import library.
+          $libomtVendor = "$env:RUNNER_TEMP\libomt-vendor"
+          New-Item -ItemType Directory -Force -Path $libomtVendor | Out-Null
+          Copy-Item $omtDll.FullName -Destination "$libomtVendor\libomt.dll" -Force
+          Copy-Item $omtLib.FullName -Destination "$libomtVendor\libomt.lib" -Force
+          # Persist LIBOMT_PATH for subsequent steps. The libomt-rs
+          # build.rs joins it with `libomt.dll` to test for presence
+          # then links against libomt.lib from the same directory.
+          "LIBOMT_PATH=$libomtVendor" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Staged OMT binaries:"
+          Get-ChildItem src-tauri\sidecar | Where-Object { $_.Name -like "libomt*" -or $_.Name -like "libvmx*" } | Format-Table Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,2)}}
+
+      - name: Build atem-net-diag.exe + stage into sidecar
+        shell: pwsh
+        run: |
+          # alpha.17: bundle the net-diag CLI into the Windows installer
+          # so the Net Diag topbar button actually works on Windows.
+          # Builds the same companion tool that's been Mac-arm64-only
+          # since alpha.4 and stages it next to ffmpeg.exe so the main
+          # app's runtime path resolver can find it.
+          #
+          # tshark is NOT bundled — the capture (--monitor) feature
+          # needs Wireshark installed separately on Windows. UDM
+          # polling + active probe + dashboard UI work without it,
+          # which is most of net-diag's value for the operator.
+          Write-Host "Building atem-net-diag.exe..."
+          Push-Location tools\atem-net-diag
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: atem-net-diag build failed"
+            exit 1
+          }
+          Pop-Location
+
+          $netdiag = "tools\atem-net-diag\target\release\atem-net-diag.exe"
+          if (-not (Test-Path $netdiag)) {
+            Write-Host "ERROR: atem-net-diag.exe not found at $netdiag"
+            exit 1
+          }
+          Copy-Item $netdiag -Destination "src-tauri\sidecar\atem-net-diag.exe"
+          $sizeMB = [math]::Round((Get-Item "src-tauri\sidecar\atem-net-diag.exe").Length / 1MB, 1)
+          Write-Host "Staged atem-net-diag.exe ($sizeMB MB) into src-tauri\sidecar\"
+
       - name: Build .exe + NSIS installer
         working-directory: src-tauri
-        run: cargo tauri build
+        run: cargo tauri build --features omt
 
       - name: Sanity-check the artifacts
         shell: pwsh
@@ -554,7 +821,13 @@ jobs:
           # Without these the .exe launches but NDI features silently
           # fail with "module not found" at first NDI use.
           $sidecar = "src-tauri\sidecar"
-          $required = @("Processing.NDI.Lib.x64.dll", "ffmpeg.exe")
+          $required = @(
+            "Processing.NDI.Lib.x64.dll",
+            "ffmpeg.exe",
+            "atem-net-diag.exe",
+            "libomt.dll",
+            "libvmx.dll"
+          )
           $missing = @()
           foreach ($f in $required) {
             $path = Join-Path $sidecar $f
@@ -576,6 +849,38 @@ jobs:
           name: windows-x64
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      # alpha.38: Session 16 Phase A diagnostic. Spawns N concurrent
+      # decklink_enc FFmpeg children against the operator's real rig
+      # to verify whether the multiview rework can use a single Tauri
+      # process (Option A — EncoderFleet TILE_COUNT=8) or needs to
+      # spread across N processes (Option B). One-off diagnostic, not
+      # bundled into the NSIS installer — separate .exe so operators
+      # can run it standalone without disturbing their app install.
+      - name: Build decklink-spike.exe
+        shell: pwsh
+        run: |
+          Write-Host "Building decklink-spike.exe (Session 16 Phase A)..."
+          Push-Location tools\decklink-spike
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: decklink-spike build failed"
+            exit 1
+          }
+          Pop-Location
+          $spike = "tools\decklink-spike\target\release\decklink-spike.exe"
+          if (-not (Test-Path $spike)) {
+            Write-Host "ERROR: decklink-spike.exe not found at $spike"
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $spike).Length / 1MB, 2)
+          Write-Host "Built decklink-spike.exe ($sizeMB MB)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-decklink-spike
+          path: tools/decklink-spike/target/release/decklink-spike.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------
@@ -744,6 +1049,13 @@ jobs:
           fi
           if compgen -G "artifacts/atem-net-diag-macos-arm64/*.app.zip" > /dev/null; then
             FILES+=(artifacts/atem-net-diag-macos-arm64/*.app.zip)
+          fi
+          # alpha.38: Session 16 Phase A spike diagnostic. Only built
+          # for Windows since the operator's test rig is the
+          # Broadcast Pix Windows machine. Optional artifact — release
+          # publishes even if spike build was skipped or failed.
+          if compgen -G "artifacts/windows-x64-decklink-spike/*.exe" > /dev/null; then
+            FILES+=(artifacts/windows-x64-decklink-spike/*.exe)
           fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \

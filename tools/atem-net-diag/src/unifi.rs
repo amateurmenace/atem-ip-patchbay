@@ -56,18 +56,32 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// long enough that a UDM reboot doesn't get hammered.
 const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnifiCredentials {
     ApiKey(String),
     Login { username: String, password: String },
 }
 
+/// Shared credentials slot. Set by /api/config POST handler when the
+/// operator enters a key in the dashboard form, read by every
+/// polling thread on each tick. None = not configured (threads idle).
+/// Some = polling threads (re)build their UnifiClient on the next tick.
+///
+/// Lives outside DashboardState so the credentials never enter the
+/// JSON returned by /api/state. The polling threads access the inner
+/// Option directly; the only thing that leaks to the dashboard is the
+/// `UnifiStatus` they publish (Connected / Connecting / Failed /
+/// NotConfigured).
+pub type CredentialsHolder = std::sync::Arc<std::sync::Mutex<Option<UnifiCredentials>>>;
+
 /// Read UDM credentials from environment variables. Preferred:
 /// `UDM_API_KEY` (Local Controller API key from UniFi OS 9.0+).
 /// Fallback: `UDM_USERNAME` + `UDM_PASSWORD` (cookie-auth login
 /// flow for older UniFi OS or read-only local accounts). Returns
-/// None when neither is set — the polling thread won't start in
-/// that case and the dashboard shows "UDM: not configured".
+/// None when neither is set — the polling thread idles in that
+/// case until the operator supplies a key via the dashboard form,
+/// at which point the threads pick up the new creds on their
+/// next tick.
 pub fn read_credentials_from_env() -> Option<UnifiCredentials> {
     if let Ok(key) = std::env::var("UDM_API_KEY") {
         let key = key.trim().to_string();
@@ -418,58 +432,84 @@ fn parse_iso8601_to_unix(s: Option<&str>) -> Option<u64> {
     }
 }
 
-/// Polling loop. Reads creds at startup, polls forever, updates
-/// DashboardState on each cycle.
-pub fn poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
-    let mut client = match UnifiClient::new(host, creds) {
-        Ok(c) => c,
-        Err(e) => {
-            let mut s = state.lock().unwrap();
-            s.unifi_status = UnifiStatus::Failed {
-                error: format!("init: {e}"),
-                last_attempt: now_secs(),
-            };
-            return;
-        }
-    };
-
+/// Polling loop. Manages a lifecycle around the inner poll work so
+/// credentials can be injected at runtime via the dashboard form.
+///
+/// Outer `'lifecycle` loop reads creds from the shared holder on each
+/// iteration; when None, the thread idles until the operator supplies
+/// a key. When creds change underneath us, the inner loop bails to
+/// outer to rebuild the UnifiClient. This is how POST /api/config
+/// with a new `unifi_api_key` takes effect within ~2 seconds.
+pub fn poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
     {
         let mut s = state.lock().unwrap();
         s.unifi_thread_alive = true;
-        s.unifi_status = UnifiStatus::Connecting;
     }
 
-    if let Err(e) = client.login() {
-        // Login failure is fatal for cookie-auth; for ApiKey auth
-        // login is a no-op, so this branch only fires for the
-        // username/password path. Surface the error and bail —
-        // the operator needs to fix the password before retrying.
-        let mut s = state.lock().unwrap();
-        s.unifi_status = UnifiStatus::Failed {
-            error: format!("login: {e}"),
-            last_attempt: now_secs(),
+    'lifecycle: loop {
+        // Re-read host + creds at the top of each lifecycle iter.
+        // If creds are absent, idle in NotConfigured — the dashboard's
+        // UDM panel will surface the form so the operator can set them.
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().unifi_status = UnifiStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
         };
-        s.unifi_thread_alive = false;
-        return;
-    }
+        let host = state.lock().unwrap().config.unifi_host.clone();
 
-    // Per-MAC last-poll counters → delta → kbps. This map can
-    // grow unbounded if clients churn fast (a noisy guest network
-    // would feed thousands over hours), but in a typical
-    // production network it stays under a few hundred entries.
-    // Add LRU eviction later if it becomes a problem.
-    let mut prev: HashMap<String, (u64, u64, Instant)> = HashMap::new();
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().unifi_status = UnifiStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
 
-    loop {
-        let atem_mac_lower = state
-            .lock()
-            .unwrap()
-            .config
-            .atem
-            .mac
-            .as_deref()
-            .map(|m| m.to_ascii_lowercase());
-        match client.list_clients() {
+        state.lock().unwrap().unifi_status = UnifiStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            // Login failure is meaningful for cookie-auth; for ApiKey
+            // auth login is a no-op, so this branch only fires for
+            // username/password. Surface the error, sleep, and retry
+            // — the operator may be re-entering the password via
+            // the dashboard form.
+            state.lock().unwrap().unifi_status = UnifiStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        // Per-MAC last-poll counters → delta → kbps. This map can
+        // grow unbounded if clients churn fast (a noisy guest network
+        // would feed thousands over hours), but in a typical
+        // production network it stays under a few hundred entries.
+        // Add LRU eviction later if it becomes a problem.
+        let mut prev: HashMap<String, (u64, u64, Instant)> = HashMap::new();
+
+        loop {
+            // Bail to outer if creds changed under us (operator updated
+            // the API key in the dashboard form, or cleared it).
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
+            let atem_mac_lower = state
+                .lock()
+                .unwrap()
+                .config
+                .atem
+                .mac
+                .as_deref()
+                .map(|m| m.to_ascii_lowercase());
+            match client.list_clients() {
             Ok(raw_clients) => {
                 let now = Instant::now();
                 let snapshots: Vec<UnifiClientSnapshot> = raw_clients
@@ -543,6 +583,7 @@ pub fn poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Dashboa
                 drop(s);
                 std::thread::sleep(ERROR_BACKOFF);
             }
+            }
         }
     }
 }
@@ -608,34 +649,53 @@ struct GwSysStats {
     uptime: Option<String>,
 }
 
-pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
-    let mut client = match UnifiClient::new(host, creds) {
-        Ok(c) => c,
-        Err(e) => {
-            let mut s = state.lock().unwrap();
-            s.wan_status = WanStatus::Failed {
-                error: format!("init: {e}"),
-                last_attempt: now_secs(),
-            };
-            return;
-        }
-    };
+pub fn wan_poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
     {
         let mut s = state.lock().unwrap();
         s.wan_thread_alive = true;
-        s.wan_status = WanStatus::Connecting;
     }
-    if let Err(e) = client.login() {
-        let mut s = state.lock().unwrap();
-        s.wan_status = WanStatus::Failed {
-            error: format!("login: {e}"),
-            last_attempt: now_secs(),
+
+    'lifecycle: loop {
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().wan_status = WanStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
         };
-        s.wan_thread_alive = false;
-        return;
-    }
-    loop {
-        match client.get("/proxy/network/api/s/default/stat/health") {
+        let host = state.lock().unwrap().config.unifi_host.clone();
+
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().wan_status = WanStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
+
+        state.lock().unwrap().wan_status = WanStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            state.lock().unwrap().wan_status = WanStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        loop {
+            // Bail to outer on creds change (operator updated the
+            // API key in the dashboard form).
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
+            match client.get("/proxy/network/api/s/default/stat/health") {
             Ok(resp) => match resp.into_json::<HealthEnvelope>() {
                 Ok(env) => {
                     let wan = env.data.iter().find(|s| s.subsystem == "wan");
@@ -704,6 +764,7 @@ pub fn wan_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<Das
                 };
                 drop(s);
                 std::thread::sleep(ERROR_BACKOFF);
+            }
             }
         }
     }
@@ -813,29 +874,53 @@ struct RawAlarm {
     #[serde(default)] severity: Option<String>,
 }
 
-pub fn system_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<DashboardState>>) {
-    let mut client = match UnifiClient::new(host, creds) {
-        Ok(c) => c,
-        Err(e) => {
-            let mut s = state.lock().unwrap();
-            s.system_status = SystemStatus::Failed { error: format!("init: {e}"), last_attempt: now_secs() };
-            return;
-        }
-    };
-    if let Err(e) = client.login() {
-        let mut s = state.lock().unwrap();
-        s.system_status = SystemStatus::Failed { error: format!("login: {e}"), last_attempt: now_secs() };
-        return;
-    }
+pub fn system_poll_loop(state: Arc<Mutex<DashboardState>>, creds_holder: CredentialsHolder) {
     {
         let mut s = state.lock().unwrap();
         s.system_thread_alive = true;
-        s.system_status = SystemStatus::Connecting;
     }
 
-    let atem_mac_lower: Option<String> = state.lock().unwrap().config.atem.mac.as_deref().map(|m| m.to_ascii_lowercase());
+    'lifecycle: loop {
+        let cur_creds = match creds_holder.lock().unwrap().clone() {
+            Some(c) => c,
+            None => {
+                state.lock().unwrap().system_status = SystemStatus::NotConfigured;
+                std::thread::sleep(Duration::from_secs(2));
+                continue 'lifecycle;
+            }
+        };
+        let host = state.lock().unwrap().config.unifi_host.clone();
 
-    loop {
+        let mut client = match UnifiClient::new(host, cur_creds.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                state.lock().unwrap().system_status = SystemStatus::Failed {
+                    error: format!("init: {e}"),
+                    last_attempt: now_secs(),
+                };
+                std::thread::sleep(ERROR_BACKOFF);
+                continue 'lifecycle;
+            }
+        };
+
+        state.lock().unwrap().system_status = SystemStatus::Connecting;
+
+        if let Err(e) = client.login() {
+            state.lock().unwrap().system_status = SystemStatus::Failed {
+                error: format!("login: {e}"),
+                last_attempt: now_secs(),
+            };
+            std::thread::sleep(ERROR_BACKOFF);
+            continue 'lifecycle;
+        }
+
+        let atem_mac_lower: Option<String> = state.lock().unwrap().config.atem.mac.as_deref().map(|m| m.to_ascii_lowercase());
+
+        loop {
+            // Bail to outer on creds change.
+            if creds_holder.lock().unwrap().as_ref() != Some(&cur_creds) {
+                continue 'lifecycle;
+            }
         let mut last_err: Option<String> = None;
 
         // /stat/device → switches + APs + UDM. We surface USWs (port
@@ -938,6 +1023,7 @@ pub fn system_poll_loop(host: String, creds: UnifiCredentials, state: Arc<Mutex<
         }
         drop(s);
         std::thread::sleep(SYSTEM_POLL_INTERVAL);
+        }
     }
 }
 

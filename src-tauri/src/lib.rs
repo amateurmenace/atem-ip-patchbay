@@ -1,5 +1,7 @@
+mod audio_bridge;
 mod device_scanner;
 mod ffmpeg_path;
+mod fleet;
 mod frame_pack;
 mod http;
 mod instance;
@@ -12,8 +14,10 @@ mod preview;
 mod protocol;
 mod sources;
 mod state;
+mod state_persist;
 mod streamer;
 mod streamid;
+mod system_monitor;
 mod xml;
 
 use std::path::PathBuf;
@@ -21,8 +25,7 @@ use std::sync::Arc;
 
 use tauri::{Manager, RunEvent};
 
-use crate::http::HttpAppState;
-use crate::preview::Preview;
+use crate::fleet::{EncoderFleet, TILE_COUNT};
 use crate::protocol::ProtocolServer;
 use crate::state::EncoderState;
 use crate::streamer::Streamer;
@@ -41,14 +44,184 @@ fn window_title(instance: &str, http_port: u16, bmd_port: u16) -> String {
     }
 }
 
+/// Tauri command that spawns a new patchbay process via the existing
+/// `--instance-name` CLI flag. Used by the multiview shell's
+/// "+ New Window" button to let a power user run a 5th+ stream in
+/// its own window with its own state directory + port pair, on top
+/// of the in-app 2x2 grid.
+///
+/// Detaches properly so closing the parent doesn't kill the spawn:
+/// macOS/Linux use `setsid` to put the child in a new session +
+/// process group; Windows uses `CREATE_NEW_PROCESS_GROUP |
+/// DETACHED_PROCESS` so the child survives the parent's exit and
+/// gets its own console (or none, with our existing hide-console
+/// helper).
+#[tauri::command]
+async fn spawn_instance(name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("instance name cannot be empty".into());
+    }
+    // Sanitize — instance name becomes a directory path component.
+    // Reject anything that would create a weird filesystem layout.
+    if trimmed.contains(['/', '\\', ':', '\0']) {
+        return Err(format!("instance name contains invalid characters: {trimmed:?}"));
+    }
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("could not resolve current exe: {e}"))?;
+
+    log::info!("spawning new instance: name={trimmed:?} exe={}", current_exe.display());
+
+    let mut cmd = std::process::Command::new(&current_exe);
+    cmd.args(["--instance-name", trimmed]);
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // setsid creates a new session + process group with the
+            // child as leader. Without this, the spawned instance
+            // shares our process group → Cmd-Q on the parent kills
+            // the spawn too. setsid detaches it cleanly.
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x0000_0200, the child can be
+        // signaled independently of our process group.
+        // DETACHED_PROCESS = 0x0000_0008, no shared console with
+        // the parent — pairs with the hide-console helper in
+        // ffmpeg_path.rs to keep the spawn console-less on Windows.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|child| {
+            log::info!(
+                "spawned instance {trimmed:?} pid={}",
+                child.id()
+            );
+            // We intentionally drop the Child handle here — the
+            // OS keeps the process alive (detached). If we held
+            // onto it, the kill_on_drop default would terminate
+            // the spawn when our process exits, which is the
+            // opposite of what we want.
+        })
+        .map_err(|e| format!("failed to spawn instance: {e}"))
+}
+
+/// Tauri command that opens (or focuses, if already open) a small
+/// companion window pointed at /static/monitor.html. The monitor
+/// shows live preview + condensed stats — designed to be positioned
+/// on screen alongside others like a video-switcher multiview
+/// output. Each instance (process) has its own main window + one
+/// monitor; operators run multiple instances via `spawn_instance`
+/// to drive multi-source workflows.
+///
+/// The label "monitor" is fixed (only one per instance). Clicking
+/// "Open Monitor" again when the monitor is already open just
+/// focuses the existing window — no duplicates.
+#[tauri::command]
+async fn open_monitor_window(handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewUrl;
+    // The monitor is served from our embedded Axum HTTP server — the
+    // main window was navigated to http://127.0.0.1:PORT/ at boot
+    // (see setup()), and the monitor lives at /static/monitor.html
+    // on the same origin. Resolve the main window's URL so we know
+    // which port to target.
+    let main_url = match handle.get_webview_window("main") {
+        Some(win) => win
+            .url()
+            .map_err(|e| format!("could not read main window URL: {e}"))?,
+        None => return Err("main window not found".into()),
+    };
+    let scheme = main_url.scheme();
+    let host = main_url.host_str().unwrap_or("127.0.0.1");
+    let port = main_url
+        .port_or_known_default()
+        .ok_or_else(|| "main window URL has no port".to_string())?;
+    let monitor_url_str = format!("{scheme}://{host}:{port}/static/monitor.html");
+    let monitor_url = tauri::Url::parse(&monitor_url_str)
+        .map_err(|e| format!("invalid monitor URL {monitor_url_str:?}: {e}"))?;
+
+    // If a monitor window is already open, just bring it to front
+    // instead of spawning a second one.
+    if let Some(existing) = handle.get_webview_window("monitor") {
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        let _ = existing.show();
+        return Ok(());
+    }
+
+    // Otherwise spawn a fresh monitor window. Default size is small
+    // enough to drop into a corner; resizable so the user can scale
+    // up if they want to read the preview at higher resolution.
+    tauri::WebviewWindowBuilder::new(
+        &handle,
+        "monitor",
+        WebviewUrl::External(monitor_url),
+    )
+    .title("ATEM Patchbay — Monitor")
+    .inner_size(360.0, 320.0)
+    .min_inner_size(220.0, 200.0)
+    .resizable(true)
+    .always_on_top(false)
+    .build()
+    .map_err(|e| format!("failed to open monitor window: {e}"))?;
+    Ok(())
+}
+
+/// Tauri command that brings the main configuration window back to
+/// front. Wired to the monitor window's "Expand ↗" button so the
+/// operator can jump back to the full UI without having to navigate
+/// the OS window list. Leaves the monitor window open — the
+/// operator can close it manually when done.
+#[tauri::command]
+async fn focus_main_window(handle: tauri::AppHandle) -> Result<(), String> {
+    let main = handle
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let _ = main.unminimize();
+    main.show().map_err(|e| format!("show failed: {e}"))?;
+    main.set_focus().map_err(|e| format!("set_focus failed: {e}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            spawn_instance,
+            open_monitor_window,
+            focus_main_window,
+        ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
+            // alpha.69: initialize logging in RELEASE too. Previously this
+            // was gated on `cfg!(debug_assertions)`, so the SHIPPED build
+            // registered no logger at all and every log::info/warn (incl.
+            // the NDI capture's per-second `audio_sent/audio_dropped`
+            // telemetry that diagnoses audio drops) went nowhere — invisible
+            // on a GUI-subsystem release exe with no console. Add a LogDir
+            // file target so the app log persists to disk (app log dir /
+            // patchbay.log) and is finally readable post-incident.
+            {
+                use tauri_plugin_log::{Target, TargetKind};
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        .target(Target::new(TargetKind::LogDir {
+                            file_name: Some("patchbay".into()),
+                        }))
                         .build(),
                 )?;
             }
@@ -65,7 +238,41 @@ pub fn run() {
                 instance_dir.display()
             );
 
-            let encoder = Arc::new(EncoderState::new());
+            // alpha.15 multi-source: the fleet holds N independent
+            // tiles, each one a self-contained source→destination
+            // pipeline. For this phase, only tile 0 is wired through
+            // the existing HTTP API + BMD protocol server; tiles 1-3
+            // exist in memory but are dormant until later commits
+            // expose them via /api/i/:idx/* routes and start
+            // additional protocol servers. Cost of the dormant tiles
+            // is ~a few KB of struct overhead each — no FFmpeg, no
+            // SDK threads.
+            let bmd_start = cli.bmd_port.unwrap_or(BMD_START_PORT);
+            // Per-tile BMD port plan: each tile gets a 4-port range
+            // starting at BMD_START_PORT + idx*4 (so tile 0 walks
+            // 9977-9980, tile 1 walks 9981-9984, etc.). For Phase 1
+            // only tile 0 is bound; tiles 1-3 carry the planned
+            // start ports as a forward-looking marker.
+            let bmd_ports: [u16; TILE_COUNT] = std::array::from_fn(|i| {
+                bmd_start.saturating_add((i * 4) as u16)
+            });
+            let fleet = EncoderFleet::new(bmd_ports);
+            log::info!(
+                "encoder fleet: {} tiles, BMD start ports {:?}",
+                TILE_COUNT,
+                bmd_ports
+            );
+
+            // Tile 0 is the "default" tile that the existing single-
+            // source UI talks to. XML configs + default device
+            // selection apply to it; future commits will replay the
+            // same boot work per-tile when each loads its own
+            // state-N.json.
+            let tile0 = fleet
+                .tile(0)
+                .expect("fleet must always have at least tile 0");
+            let encoder = tile0.encoder.clone();
+            let streamer = tile0.streamer.clone();
 
             // Tell the FFmpeg path resolver where the bundled sidecar
             // lives. Phase 9 adds bundle.externalBin; for now this just
@@ -85,8 +292,46 @@ pub fn run() {
                 add_windows_dll_search_path(&resource_dir);
             }
 
+            // Probe DeckLink output support eagerly so the first UI
+            // request that reads `/api/state` doesn't pay the
+            // ffmpeg-spawn cost. Result is cached for the process
+            // lifetime; if the user reinstalls FFmpeg between
+            // launches the probe runs fresh on next boot.
+            let _ = ffmpeg_path::ffmpeg_has_decklink();
+            // alpha.25: probe the available encoders too. Surfaces
+            // on /api/state as `available_encoders: Vec<String>` so
+            // the JS encoder picker only offers what the bundled
+            // FFmpeg can actually use. Same eager-at-setup pattern.
+            let _ = ffmpeg_path::available_encoders();
+
             load_default_xml_files(app.handle(), &encoder);
             apply_default_devices_at_boot(&encoder);
+
+            // alpha.41: restore each tile's persisted settings from
+            // disk. Runs AFTER apply_default_devices_at_boot for tile
+            // 0 so the persisted state overrides the defaults (the
+            // operator's last-saved picks take priority). Tiles 1+
+            // didn't have defaults applied; they only get whatever
+            // load_and_apply restores or stay empty.
+            //
+            // Wrapped in an Arc<PathBuf> so the per-tile HttpAppState
+            // mounts inside router() can each carry a cheap clone.
+            // The path itself doesn't change across the process
+            // lifetime — Arc is for sharing, not interior mutability.
+            let state_dir = Arc::new(instance_dir.clone());
+            for tile in fleet.tiles() {
+                let _ = state_persist::load_and_apply(&state_dir, tile.idx, &tile.encoder);
+            }
+
+            // alpha.41: start the system health monitor. Polls CPU%
+            // + memory every 1.5s in a background tokio task. Surfaces
+            // via /api/system-health for the multiview header to
+            // render as a traffic-light pill. The monitor task self-
+            // manages its lifetime against the tokio runtime; no
+            // shutdown hook needed because it dies when the runtime
+            // drops at process exit.
+            let system_monitor = system_monitor::SystemMonitor::start();
+            log::info!("system health monitor started (polls every 1.5s)");
 
             // Initialize the NDI runtime (loads libndi.dylib via
             // dlopen). If NDI Tools isn't installed this fails with
@@ -105,13 +350,11 @@ pub fn run() {
             let static_dir = resolve_static_dir(app.handle());
             log::info!("static dir: {}", static_dir.display());
 
-            let preview = Preview::new();
-            let streamer = Streamer::new(encoder.clone(), preview.clone());
-            let http_state = HttpAppState {
-                encoder: encoder.clone(),
-                streamer: streamer.clone(),
-                preview: preview.clone(),
-            };
+            // alpha.15: the router now takes the fleet directly and
+            // mounts per-tile API sub-routers at /api/i/0..3 plus a
+            // /api/* alias for tile 0. The HttpAppState wrapper that
+            // existed in earlier code paths is constructed internally
+            // by the router for each mount point.
 
             // Bind synchronously so we know the port before creating
             // the webview. The Axum server itself runs in a tokio task.
@@ -122,7 +365,12 @@ pub fn run() {
                 .expect("could not bind HTTP API port");
             log::info!("HTTP API listening on http://127.0.0.1:{port}/");
 
-            let router = crate::http::router(http_state, static_dir);
+            let router = crate::http::router(
+                fleet.clone(),
+                static_dir,
+                state_dir.clone(),
+                system_monitor.clone(),
+            );
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = axum::serve(listener, router).await {
                     log::error!("Axum server stopped: {err}");
@@ -142,12 +390,15 @@ pub fn run() {
                 })?;
             log::info!("BMD control protocol bound on TCP {bmd_port}");
 
-            // Manage encoder + streamer + protocol server so future
-            // Tauri commands / event handlers can grab them via
-            // app.state().
+            // Manage fleet (the new shared multi-tile state) +
+            // tile-0 aliases (used by the legacy single-source flows)
+            // + the protocol server. The fleet is the long-term home;
+            // legacy fields stay around so existing Tauri commands
+            // grabbing Arc<Streamer> via app.state() still resolve.
+            app.manage(fleet.clone());
             app.manage(encoder);
             app.manage(streamer);
-            app.manage(preview);
+            app.manage(tile0.preview.clone());
             app.manage(proto);
             app.manage(http_state_marker(port));
             app.manage(BmdPort(bmd_port));
@@ -180,16 +431,25 @@ pub fn run() {
             // On Cmd-Q / window-close-causes-app-quit, Tauri fires
             // ExitRequested then Exit. We hook BOTH because some
             // platforms emit only one — and we synchronously stop
-            // the streamer + NDI capture before the parent process
-            // dies, otherwise FFmpeg orphans to launchd and keeps
-            // streaming to the destination forever.
+            // every tile's streamer before the parent process dies,
+            // otherwise FFmpeg orphans to launchd and keeps streaming
+            // to the destination forever.
+            //
+            // alpha.15 multi-source: shutdown_all iterates every
+            // tile, not just the singleton, so spawning N FFmpegs
+            // across 4 tiles cleans up uniformly. Phase 1 only ever
+            // has tile 0 running, but the iteration cost is
+            // negligible and the hook is correct for future phases.
             match event {
                 RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-                    if let Some(streamer) = app_handle.try_state::<Arc<Streamer>>() {
+                    if let Some(fleet) = app_handle.try_state::<Arc<EncoderFleet>>() {
+                        let f = fleet.inner().clone();
+                        let runtime = tauri::async_runtime::handle();
+                        runtime.block_on(f.shutdown_all());
+                    } else if let Some(streamer) = app_handle.try_state::<Arc<Streamer>>() {
+                        // Fallback in case fleet management hasn't
+                        // landed (test harness / partial init).
                         let s = streamer.inner().clone();
-                        // block_on inside the Tauri run-loop is fine
-                        // here; we want a hard sync barrier before the
-                        // process exits so all child cleanup completes.
                         let runtime = tauri::async_runtime::handle();
                         let _ = runtime.block_on(s.stop());
                     }

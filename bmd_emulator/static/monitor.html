@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATEM IP Patchbay — Monitor</title>
+  <link rel="stylesheet" href="/static/monitor.css">
+</head>
+<body>
+  <!-- Small companion window — open one per running stream, position
+       on screen like a video-switcher multiview output. Shows live
+       preview + condensed stats. Clicking "Expand" brings the main
+       configuration window to front so the operator can adjust the
+       stream without losing the monitor's screen position. -->
+  <header class="mon-top">
+    <span class="mon-status mon-status-idle" id="mon-status">Idle</span>
+    <button class="mon-expand-btn" id="mon-expand" type="button"
+            title="Bring the main configuration window to front">Expand ↗</button>
+  </header>
+
+  <div class="mon-preview-wrap">
+    <img id="mon-preview" class="mon-preview" alt="Live preview" />
+    <div class="mon-preview-placeholder" id="mon-preview-placeholder">
+      No preview yet
+      <small>Start a stream or click Preview in the main window</small>
+    </div>
+  </div>
+
+  <footer class="mon-footer">
+    <div class="mon-row mon-row-bitrate">
+      <span class="mon-bitrate" id="mon-bitrate">— kbps</span>
+    </div>
+    <div class="mon-row mon-row-source">
+      <span class="mon-label">From</span>
+      <span class="mon-source" id="mon-source">—</span>
+    </div>
+    <div class="mon-row mon-row-dest">
+      <span class="mon-label">To</span>
+      <span class="mon-dest" id="mon-dest">—</span>
+    </div>
+  </footer>
+
+  <script src="/static/monitor.js"></script>
+</body>
+</html>

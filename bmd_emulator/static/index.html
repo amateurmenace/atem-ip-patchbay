@@ -5,6 +5,23 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ATEM IP Patchbay</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script src="/static/system-drawer.js" defer></script>
+  <!-- alpha.55: about section always appears on app launch. The
+       previous alpha.42 logic persisted hidden state to localStorage,
+       which meant operators who hid it once never saw it again unless
+       they explicitly clicked Show — unfriendly default. Now hide is
+       session-only; reload / relaunch resets to visible. -->
+  <script>
+    (function () {
+      // Always start with hero visible. Operator can hide during the
+      // session via the topbar toggle or the in-hero × button; the
+      // hidden state does NOT persist.
+      document.documentElement.dataset.heroHidden = 'false';
+      // Clean up the old persisted flag from any prior alpha so the
+      // operator isn't surprised by leftover state.
+      try { localStorage.removeItem('atemPatchbay_heroHidden'); } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
 
@@ -31,18 +48,67 @@
         <div class="kicker">Proof of concept · free forever</div>
       </div>
     </button>
+    <!-- alpha.42: view-mode toggle. Most prominent affordance in the
+         topbar — replaces the previous standalone Multiview button.
+         Clicking Multi navigates the current WebView; the same toggle
+         appears in multiview.html so the operator can come back via the
+         Single side. -->
+    <div class="view-toggle" role="tablist" aria-label="View mode">
+      <button id="view-toggle-single" type="button" class="view-toggle-btn active"
+              role="tab" aria-selected="true"
+              title="Single source view — configure one source → one destination">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="8" r="2.4" fill="currentColor"/>
+        </svg>
+        Single
+      </button>
+      <a id="view-toggle-multi" href="/static/multiview.html" class="view-toggle-btn"
+         role="tab" aria-selected="false"
+         title="Multiview — 6 channels in one window, route multiple sources to multiple destinations">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        Multi
+      </a>
+    </div>
     <div class="status-block">
       <div class="status-pill" id="status-pill">IDLE</div>
       <div class="duration" id="duration">00:00:00:00</div>
-      <button id="open-net-diag" type="button" class="net-diag-btn"
-              title="Open the ATEM Net Diag operator dashboard (separate companion app — download from Releases if not installed)"
-              aria-label="Open ATEM Net Diag">
-        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11" style="vertical-align: -1px; margin-right: 5px;">
+      <!-- alpha.55: renamed "intro" → "about" per operator request.
+           Always-visible topbar toggle that flips text/title between
+           Hide/Show based on the current data-hero-hidden value. The
+           hero × button stays as a contextual dismiss when reading. -->
+      <button id="intro-toggle-btn" type="button" class="intro-toggle-btn"
+              title="Hide the About section">▼ Hide about</button>
+      <!-- alpha.52: Monitor button removed. The single-tile companion
+           window pattern from alpha.16 is superseded by the alpha.40
+           multiview UI + alpha.50 per-tile stats panel — the operator
+           can monitor any source there. Tauri command
+           open_monitor_window stays registered in lib.rs (harmless
+           leftover; nothing surfaces it). -->
+      <!-- alpha.50 system health pill in single-view topbar. Click → drawer. -->
+      <div id="sys-pill" class="sys-pill-topbar unknown" title="System health — CPU + memory. Click for details.">
+        <span class="dot"></span>
+        <span class="label-text" id="sys-pill-label">CPU —</span>
+      </div>
+      <button id="open-net-diag" type="button" class="net-diag-btn prominent"
+              title="Open the ATEM Net Utility operator dashboard (UDM polling, ATEM reachability, WAN headroom, per-flow stats, pre-show checks)"
+              aria-label="Open ATEM Net Utility">
+        <svg viewBox="0 0 16 16" aria-hidden="true" width="11" height="11">
           <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
           <path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/>
         </svg>
-        Net Diag
+        Net Utility
       </button>
+      <!-- alpha.25 removed the alpha.22 UDM config dialog from the main
+           app. UDM credentials are configured INSIDE the atem-net-diag
+           dashboard now (separation of concerns — net-diag manages its
+           own UDM state). Click Net Diag in the topbar to open the
+           dashboard, then configure UDM via the form in its UDM panel. -->
       <button id="refresh-app" type="button" class="refresh-btn" title="Force-reload the UI (clears any stale cached JS/CSS)" aria-label="Refresh UI">↻ Refresh</button>
     </div>
    </div>
@@ -52,6 +118,13 @@
   <!-- HERO                                                        -->
   <!-- ========================================================== -->
   <section class="hero">
+    <!-- alpha.55: Hide About contextual button. Session-only (does
+         not persist to localStorage); the topbar toggle restores it
+         for this session, next launch starts visible again. -->
+    <button id="hero-hide-btn" type="button" class="hero-hide-btn"
+            title="Hide the About text for this session. Resets on next app launch.">
+      Hide about ×
+    </button>
     <div class="hero-headline">
       Turn multiple worldwide video sources, from iPhones to Drones to
       <strong>NDI</strong> sources to computer screens, into remote inputs that
@@ -59,6 +132,9 @@
       <strong>Blackmagic Streaming Decoders / Bridges</strong> over the single
       ethernet cable. Even route Dante audio onto a video source that maps
       directly to one of your switcher's SDI or HDMI inputs!
+      <span class="hero-headline-reverse">And do the reverse: convert
+        network sources to physical outputs using
+        <strong>DeckLink</strong>!</span>
     </div>
     <div class="hero-cols">
       <div class="hero-col">
@@ -86,19 +162,18 @@
           software and not Blackmagic hardware, they seem to have lessened
           some of the handshake requirements between sender and receiver, so
           it was much easier to deconstruct what was essential and what was
-          just noise. Then Claude and I (mostly Claude) built an emulator of
-          a streaming encoder and eventually stumbled onto the winning
-          combination that got a signal into the ATEM Mini Extreme ISO G2
-          that inspired this journey.
+          just noise. Then, with Claude Code as a pair programmer, I built an
+          emulator of a streaming encoder and found the combination that got
+          a signal into the ATEM Mini Extreme ISO G2 that inspired this
+          journey.
         </p>
       </div>
     </div>
     <div class="hero-disclaimer">
-      This is more of a demo app showing what is now possible, a proof of
-      concept, and should only be used in real productions at your own
-      risk. It is free forever, until it either gets stopped by Blackmagic
-      or they fully embrace opening up their powerful stream decoding
-      ecosystem.
+      This is an independent, open-source proof of concept built on
+      Blackmagic Design's publicly documented streaming protocols. It is
+      not affiliated with or endorsed by Blackmagic Design, and it should
+      be used in real productions at your own risk.
     </div>
     <!-- Hero credit moved to the page footer to keep this band tight on the credits-vs-disclaimer
          distinction. -->
@@ -126,6 +201,17 @@
           <div class="bar bar-blue"></div>
         </div>
         <div class="preview-message" id="preview-message" hidden></div>
+        <!-- alpha.48: VU meter overlay on the preview, mirroring the
+             multiview tile pattern. Operators want audio levels right
+             where they're watching the picture, not buried in the
+             Audio Mixer card. The pair below shares pollAudioLevels'
+             render output with the Audio Mixer card's canvas — no
+             duplicate poll, just an additional render target. -->
+        <div class="preview-meters" id="preview-meters" aria-hidden="true">
+          <canvas id="preview-meter-l" width="9" height="78" title="Left channel level"></canvas>
+          <canvas id="preview-meter-r" width="9" height="78" title="Right channel level"></canvas>
+          <span class="preview-meter-readout" id="preview-meter-readout">—</span>
+        </div>
         <div class="live-badge" id="live-badge" hidden>● LIVE</div>
         <div class="preview-overlay">
           <div class="ovl-row"><span>SOURCE</span> <strong id="ovl-source">—</strong></div>
@@ -202,6 +288,10 @@
     <!-- ---------- OVERLAYS (left column, under FFmpeg log) ---- -->
     <section class="card overlay-card">
       <div class="card-title"><span>Overlays</span></div>
+      <p class="recovery-lead" style="font-size:11px; color: var(--muted);">
+        Saved with your settings, but not yet composited into the stream
+        in this release.
+      </p>
       <div class="row-2">
         <label>Title
           <input id="ov-title" type="text" placeholder="ON AIR · Studio A" />
@@ -236,13 +326,13 @@
         path.
       </p>
       <p class="recovery-lead" style="font-size:11px; color: var(--muted);">
-        <strong>alpha.9:</strong> works with NDI and OMT sources only
-        (frames are already raw at the source). AVF cameras / pipe /
-        relay sources fall through silently — full coverage lands in
-        alpha.10. Audio over OMT is also alpha.10. Pre-built
-        binaries ship with OMT compiled out (set
-        <code>--features omt</code> with libomt.dylib in your lib
-        path to enable).
+        NDI and OMT sources are published from their raw frames
+        in-process; cameras, screens, pipe and relay sources are
+        published through a second FFmpeg process that opens the same
+        source (some cameras allow only one reader). Audio over OMT is
+        included for NDI sources. Pre-built
+        installers ship with OMT enabled (libomt is bundled); source
+        builds need <code>--features omt</code>.
       </p>
       <label style="display:flex; align-items:center; gap:8px; margin: 8px 0;">
         <input type="checkbox" id="omt-output-enabled">
@@ -291,6 +381,27 @@
         stream key (this is a separate ATEM-side lockout, not
         something the app can short-circuit).
       </p>
+
+      <hr style="border:none; border-top:1px dashed rgba(255,255,255,.15); margin:16px 0;" />
+      <p class="recovery-lead">
+        <strong>Still stuck?</strong> If a stream is wedged in
+        Connecting/Streaming and even Stop or Kill-orphans won't clear
+        it, this is the bigger hammer. It force-kills <em>every</em>
+        FFmpeg process on this machine at the OS level — which works
+        even when a channel's controls are frozen — then resets every
+        tile to Idle.
+      </p>
+      <button id="force-stop-all" type="button" class="big recovery-btn"
+              style="background:#b3261e; border-color:#d7493f; color:#fff;"
+              aria-label="Force stop all streams">
+        ⛔ Force Stop ALL streams
+      </button>
+      <p class="recovery-foot">
+        Nuclear option — kills <em>all</em> FFmpeg on this machine,
+        including any unrelated FFmpeg jobs. On a dedicated broadcast
+        rig that's exactly what you want; otherwise prefer
+        <em>Kill orphan streams</em> above.
+      </p>
     </section>
 
     </div><!-- /.config-stack (left) -->
@@ -305,7 +416,64 @@
           <span class="card-title-aux" id="dest-aux">no destination</span>
         </div>
 
-        <div class="dest-wizard">
+        <!-- Session 12: destination-type segmented control. ATEM is the
+             default (every existing operator workflow); DeckLink routes
+             the same SOURCE to a local SDI/HDMI output for monitor-wall
+             / hardware-switcher integration. JS toggles between the two
+             body blocks below based on snap.destination_type. -->
+        <div class="dest-type-row">
+          <span class="dest-type-label">Where does this stream go?</span>
+          <div class="seg-control dest-type-seg-control" role="radiogroup" aria-label="Destination type" id="dest-type-row">
+            <label class="seg"><input type="radio" name="dest-type" value="atem" checked /><span>Remote (ATEM | Decoder)</span></label>
+            <label class="seg"><input type="radio" name="dest-type" value="decklink" /><span>Local (DeckLink | SDI/HDMI)</span></label>
+          </div>
+        </div>
+        <p class="dest-type-help" id="dest-decklink-unsupported" hidden>
+          The bundled FFmpeg lacks DeckLink output. Both BtbN and gyan.dev
+          (the two major prebuilt Windows FFmpeg distros) stopped shipping
+          <code>--enable-decklink</code> after the Blackmagic SDK license
+          became un-redistributable. To use DeckLink output today, install
+          a custom FFmpeg with DeckLink support (e.g.
+          <code>choco install ffmpeg-full -y</code>) and point the app at it:
+          set <code>ATEM_PATCHBAY_FFMPEG</code> to the full <code>ffmpeg.exe</code>
+          path, then restart. A future alpha will bundle a build-our-own
+          FFmpeg with DeckLink so this works out of the box.
+        </p>
+
+        <!-- DeckLink-destination body. Hidden when ATEM is active.
+             Device + mode dropdowns are populated from
+             /api/decklink-outputs at first render and on Refresh. -->
+        <div class="dest-decklink-body" id="dest-decklink-body" hidden>
+          <div class="dest-row">
+            <label>DeckLink device
+              <select id="decklink-device"></select>
+              <span class="field-help" id="decklink-device-status">
+                Pick the Blackmagic DeckLink card and SDI/HDMI port that
+                should receive this source's frames.
+              </span>
+            </label>
+            <label>Output mode
+              <select id="decklink-mode"></select>
+              <span class="field-help">
+                Sets the card's signal format. The source is scaled to
+                match — 1080p59.94 is the most universal pick.
+              </span>
+            </label>
+          </div>
+          <p class="field-help">
+            Pixel format: <code>uyvy422</code> (8-bit YUV 4:2:2 — universal
+            DeckLink format). Audio is PCM 48&nbsp;kHz stereo embedded in
+            the SDI signal.
+          </p>
+          <p class="field-help">
+            Need to install the driver? Free download:
+            <a href="https://www.blackmagicdesign.com/support/family/capture-and-playback" target="_blank" rel="noopener">Blackmagic DeckLink Driver</a>.
+            After install, click Refresh below.
+          </p>
+          <button type="button" class="seg-btn" id="decklink-refresh">↻ Refresh devices</button>
+        </div>
+
+        <div class="dest-wizard" id="dest-atem-body">
 
           <div class="dest-row">
             <label>Address
@@ -436,6 +604,14 @@
                      the current video_mode. -->
               </div>
             </div>
+            <div class="toggle-group">
+              <span class="toggle-label">&nbsp;</span>
+              <button type="button" id="open-advanced-btn"
+                      title="Encoder, audio quality, video mode, streamid, label"
+                      style="align-self:flex-end; padding:9px 14px; border-radius:8px; border:1px solid var(--accent,#4ea1ff); background:rgba(78,161,255,0.12); color:var(--accent,#4ea1ff); font-weight:600; cursor:pointer; white-space:nowrap;">
+                ⚙ Advanced
+              </button>
+            </div>
           </div>
 
           <label class="srt-only">
@@ -494,9 +670,94 @@
             </details>
           </div>
 
+          <!-- alpha.68: SRT latency promoted out of Advanced to a prominent,
+               always-visible control. It's the single biggest knob for
+               stream stability over the internet (packet-recovery buffer).
+               Mirrors the #srt-latency field still inside Advanced. -->
+          <div class="dest-latency srt-only">
+            <div class="dest-latency-head">
+              <span class="dest-latency-label">SRT Latency</span>
+              <span class="dest-latency-help">Packet-recovery buffer. Low = least delay; <strong>raise it if the stream drops or audio cuts out</strong> on a lossy / internet path.</span>
+            </div>
+            <div class="latency-row">
+              <button type="button" class="lat-preset" data-ms="200">200&nbsp;ms<small>LAN / solid link</small></button>
+              <button type="button" class="lat-preset" data-ms="1000">1000&nbsp;ms<small>internet</small></button>
+              <button type="button" class="lat-preset" data-ms="2000">2000&nbsp;ms<small>lossy / unstable</small></button>
+              <span class="lat-custom"><input id="srt-latency-top" type="number" min="20" max="8000" /> ms</span>
+            </div>
+          </div>
+
           <details class="dest-advanced">
-            <summary>Advanced (mode, streamid, label, multi-service)</summary>
+            <summary>Advanced (encoder, audio quality, mode, streamid, label)</summary>
             <div class="advanced-body">
+              <!-- alpha.25: encoding controls. Encoder picker, audio
+                   quality knobs, auto-reconnect toggle, raw-flags
+                   textarea. UI populates encoder choices from
+                   /api/state's available_encoders so we only offer
+                   what the bundled FFmpeg actually has. -->
+              <div class="encoder-section">
+                <div class="section-label">Encoding</div>
+                <div class="row-2">
+                  <label>Video encoder
+                    <select id="video-encoder">
+                      <option value="auto">Auto (best for platform)</option>
+                    </select>
+                    <span class="field-help" id="video-encoder-hint">Auto picks
+                      hardware accel when available.</span>
+                  </label>
+                  <label>Auto-reconnect on disconnect
+                    <select id="auto-reconnect">
+                      <option value="true">On (recommended)</option>
+                      <option value="false">Off (fail-fast)</option>
+                    </select>
+                    <span class="field-help">Exponential backoff:
+                      1s, 2s, 4s, &hellip; up to 12 attempts.</span>
+                  </label>
+                </div>
+                <div class="row-3">
+                  <label>Audio codec
+                    <select id="audio-codec">
+                      <option value="aac">AAC-LC (default, ATEM-compatible)</option>
+                      <option value="aac_he">AAC-HE (low bitrate; not ATEM)</option>
+                      <option value="aac_he_v2">AAC-HEv2 (lowest; not ATEM)</option>
+                    </select>
+                  </label>
+                  <label>Audio bitrate (kbps)
+                    <input id="audio-bitrate-kbps" type="number" min="0" max="320"
+                           placeholder="0 = inherit from quality preset" />
+                    <span class="field-help">0 inherits the XML / quality preset.</span>
+                  </label>
+                  <label>Sample rate
+                    <select id="audio-sample-rate">
+                      <option value="48000">48000 Hz (broadcast)</option>
+                      <option value="44100">44100 Hz (legacy)</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="row-2">
+                  <label>Channels
+                    <select id="audio-channels">
+                      <option value="2">Stereo (default)</option>
+                      <option value="1">Mono</option>
+                    </select>
+                  </label>
+                  <label class="checkbox-row">
+                    <input id="meters-enabled" type="checkbox" checked />
+                    <span>Audio level meters
+                      <span class="field-help">Inject astats filter so
+                        the UI can show live VU meters. Disable if a
+                        pathological source breaks the parser.</span>
+                    </span>
+                  </label>
+                </div>
+                <label>Encoder extra flags (power user)
+                  <textarea id="encoder-extra-flags" rows="2"
+                            placeholder='e.g. -tune zerolatency -profile:v high'></textarea>
+                  <span class="field-help">Appended between encoder + muxer.
+                    Shell-tokenized; supports quotes + backslash escapes.
+                    Bad input surfaces as an FFmpeg startup error.</span>
+                </label>
+              </div>
               <div class="row-2 multi-service" id="multi-service-row" hidden>
                 <label>Service
                   <select id="service"></select>
@@ -557,6 +818,7 @@
         <div class="card-title"><span>Video Source</span>
           <span>
             <a href="#" class="card-title-aux" id="ndi-rescan">scan NDI</a>
+            <a href="#" class="card-title-aux" id="omt-rescan" style="margin-left:10px;">scan OMT</a>
             <a href="#" class="card-title-aux" id="rescan-devices" style="margin-left:10px;">rescan</a>
           </span>
         </div>
@@ -619,19 +881,142 @@
               <span class="rw-step">2</span>
               <div class="rw-step-content">
                 <span class="rw-step-label">Copy this URL into your camera, drone, or encoder app</span>
-                <div class="rw-ip-row" id="rw-ip-row">
-                  <label for="rw-ip-pick" class="rw-ip-label">This machine's LAN IP:</label>
-                  <select id="rw-ip-pick" class="rw-ip-pick" hidden></select>
-                  <input id="rw-ip-manual" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" inputmode="decimal" />
-                  <span id="rw-ip-status" class="rw-ip-status" aria-live="polite"></span>
+
+                <!-- Sub-toggle: is the publisher on the same LAN as this
+                     app, or pushing in from outside (cellular, a venue,
+                     a remote home)? "Different network" expands a public-
+                     URL helper + port-forwarding checklist below. -->
+                <div class="rw-where" role="radiogroup" aria-label="Where is the publisher">
+                  <label class="seg"><input type="radio" name="rw-where" value="lan" checked /><span>On my network</span></label>
+                  <label class="seg"><input type="radio" name="rw-where" value="public" /><span>Different network (remote / cellular)</span></label>
                 </div>
-                <div class="rw-url-row">
-                  <input id="rw-publish-url" type="text" readonly />
-                  <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+
+                <!-- LAN flow (default, original wizard behavior). -->
+                <div class="rw-lan-block" id="rw-lan-block">
+                  <div class="rw-ip-row" id="rw-ip-row">
+                    <label for="rw-ip-pick" class="rw-ip-label">This machine's LAN IP:</label>
+                    <select id="rw-ip-pick" class="rw-ip-pick" hidden></select>
+                    <input id="rw-ip-manual" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" inputmode="decimal" />
+                    <span id="rw-ip-status" class="rw-ip-status" aria-live="polite"></span>
+                  </div>
+                  <div class="rw-url-row">
+                    <input id="rw-publish-url" type="text" readonly />
+                    <button id="rw-copy" type="button" class="btn-secondary">Copy</button>
+                  </div>
+                  <p class="rw-hint" id="rw-ip-hint">
+                    Default port is 9710 for SRT, 1935 for RTMP. Expand
+                    <em>Advanced settings</em> below to change ports, the
+                    RTMP app/key, or the SRT passphrase if you already have
+                    something listening on the default.
+                  </p>
                 </div>
-                <p class="rw-hint" id="rw-ip-hint">
-                  Default port is 9710 for SRT, 1935 for RTMP — change them in the panel below if needed.
-                </p>
+
+                <!-- Advanced settings — ports, RTMP app/key, SRT
+                     passphrase. Settable while the receiver is idle;
+                     locked (disabled) while the receiver is running so
+                     a port change doesn't desync the running listener
+                     from the displayed URL. Changes are persisted via
+                     PATCH /api/settings { relay: {...} }. -->
+                <details class="rw-advanced" id="rw-advanced">
+                  <summary>Advanced settings — ports, app name, stream key</summary>
+                  <div class="rw-advanced-body">
+                    <div class="rw-advanced-row" data-protocol="srt_listen">
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">SRT port</span>
+                        <input id="rw-srt-port" type="number" min="1" max="65535" inputmode="numeric" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">SRT passphrase <span class="rw-advanced-opt">(optional)</span></span>
+                        <input id="rw-srt-passphrase" type="text" placeholder="leave blank for no encryption" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="rw-advanced-row" data-protocol="rtmp_listen">
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">RTMP port</span>
+                        <input id="rw-rtmp-port" type="number" min="1" max="65535" inputmode="numeric" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">RTMP app</span>
+                        <input id="rw-rtmp-app" type="text" autocomplete="off" />
+                      </label>
+                      <label class="rw-advanced-field">
+                        <span class="rw-advanced-key">Stream key</span>
+                        <input id="rw-rtmp-key" type="text" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="rw-advanced-actions">
+                      <button id="rw-advanced-apply" type="button" class="btn-secondary">Apply</button>
+                      <button id="rw-advanced-reset" type="button" class="btn-tertiary">Reset to defaults</button>
+                      <span id="rw-advanced-status" class="rw-ip-status" aria-live="polite"></span>
+                    </div>
+                    <p class="rw-hint" id="rw-advanced-running-hint" hidden>
+                      <strong>Receiver is running.</strong> Stop the receiver below before changing
+                      ports or keys — otherwise the new values won't take effect until the next start.
+                    </p>
+                  </div>
+                </details>
+
+                <!-- Public-network flow. WAN IP detect via ipify (the
+                     user clicks Detect — no third-party request until
+                     they opt in), or user types a hostname (DDNS like
+                     duckdns / a static IP / a colocated host). Generated
+                     URL gets a Copy button. The port-forward checklist
+                     below it gives the operator everything they need
+                     to either configure their own router OR forward to
+                     IT — including a copy-pasteable "send to IT"
+                     template. -->
+                <div class="rw-public-block" id="rw-public-block" hidden>
+                  <div class="rw-ip-row">
+                    <label for="rw-public-host" class="rw-ip-label">Public address:</label>
+                    <input id="rw-public-host" type="text" placeholder="e.g. 203.0.113.45 or myhome.duckdns.org" autocomplete="off" />
+                    <button id="rw-public-detect" type="button" class="btn-secondary rw-public-detect">Detect WAN IP</button>
+                    <span id="rw-public-status" class="rw-ip-status" aria-live="polite"></span>
+                  </div>
+                  <div class="rw-url-row">
+                    <input id="rw-public-publish-url" type="text" readonly />
+                    <button id="rw-public-copy" type="button" class="btn-secondary">Copy</button>
+                  </div>
+                  <p class="rw-hint">
+                    <strong>You also need a port-forward rule on your router</strong> so the
+                    publisher's connection from the Internet reaches this machine. Expand the
+                    checklist below — or copy the "send to IT" template if someone else manages
+                    your network.
+                  </p>
+                  <details class="rw-portforward">
+                    <summary>Port-forward checklist</summary>
+                    <div class="rw-portforward-body">
+                      <ul class="rw-portforward-checklist">
+                        <li><span class="rw-pf-key">Protocol</span> <code id="rw-pf-protocol">UDP (SRT)</code></li>
+                        <li><span class="rw-pf-key">External port</span> <code id="rw-pf-ext-port">9710</code></li>
+                        <li><span class="rw-pf-key">Internal IP</span> <code id="rw-pf-int-ip">(set your LAN IP in the "On my network" tab)</code></li>
+                        <li><span class="rw-pf-key">Internal port</span> <code id="rw-pf-int-port">9710</code></li>
+                      </ul>
+                      <p class="rw-hint">
+                        On a UniFi gateway: <em>Settings → Routing &amp; Firewall → Port Forwarding → Create New Forward</em>.
+                        On most home routers: <em>Advanced → Port Forwarding</em> (sometimes "Virtual Server" or "NAT").
+                        SRT uses <strong>UDP</strong> (not TCP — most operators get this wrong); RTMP uses <strong>TCP</strong>.
+                      </p>
+                      <p class="rw-hint">
+                        <strong>Carrier-grade NAT gotcha:</strong> some ISPs (especially cellular / 5G home internet,
+                        a lot of fiber resellers, and most apartment-building ISPs) use CGN — your "public" IP
+                        from ipify is actually shared with hundreds of other customers and port-forwards
+                        won't work no matter what your router says. If forwarding doesn't connect after a few
+                        retries, you'll need an SRT relay service (srt.live, OvenMediaEngine on a VPS, Cloudflare
+                        Stream) instead of a direct push.
+                      </p>
+                      <p class="rw-hint">
+                        <strong>Quick test:</strong> from your phone on <em>cellular</em> (NOT Wi-Fi), try
+                        <code>nc -uvz &lt;your-public-ip&gt; &lt;port&gt;</code> from a terminal, or just point a test
+                        stream at the URL above. If the receiver shows "listener bound — waiting for encoder"
+                        but never flips to "connected," the port-forward isn't routing traffic through yet.
+                      </p>
+                      <div class="rw-pf-template-row">
+                        <button id="rw-pf-copy-template" type="button" class="btn-secondary">Copy "send to IT" template</button>
+                        <span id="rw-pf-template-status" class="rw-ip-status" aria-live="polite"></span>
+                      </div>
+                    </div>
+                  </details>
+                </div>
               </div>
             </div>
 
@@ -671,6 +1056,24 @@
       <!-- ---------- AUDIO MIXER (separate card) -------------- -->
       <section class="card audio-mixer-card">
         <div class="card-title"><span>Audio Mixer</span></div>
+
+        <!-- alpha.31: VU meters. Hidden until meters_enabled is set
+             via the Advanced encoder/audio panel (where the toggle
+             lives). When active, /api/audio-levels polls at 4Hz and
+             repaints these canvases with green/yellow/red zones +
+             1.5s peak-hold. -->
+        <div class="audio-meters" id="audio-meters" hidden>
+          <div class="audio-meter-row">
+            <span class="audio-meter-label">L</span>
+            <canvas id="audio-meter-l" class="audio-meter-canvas" width="320" height="12"></canvas>
+            <span class="audio-meter-db" id="audio-meter-l-db">—</span>
+          </div>
+          <div class="audio-meter-row">
+            <span class="audio-meter-label">R</span>
+            <canvas id="audio-meter-r" class="audio-meter-canvas" width="320" height="12"></canvas>
+            <span class="audio-meter-db" id="audio-meter-r-db">—</span>
+          </div>
+        </div>
 
         <p class="audio-mixer-disclaimer">
           By default we pull audio straight from the Video Source you picked above
@@ -880,7 +1283,7 @@
       <div class="guide-card">
         <h3>Latency budget</h3>
         <ul class="guide-facts">
-          <li><strong>SRT push</strong> — 200–500 ms typical (we set <code>latency=500000 µs</code> by default)</li>
+          <li><strong>SRT push</strong> — 200–500 ms typical (default SRT latency is 200 ms; raise it on flaky links)</li>
           <li><strong>Encoder</strong> — 50–100 ms (libx265/x264, <code>preset veryfast tune zerolatency</code>)</li>
           <li><strong>Total end-to-end</strong> — 250–600 ms typical</li>
           <li><strong>Bandwidth</strong> — 2.5 Mbps (Low) · 4.5 Mbps (Medium) · 6 Mbps (High); 1080p60 needs ~1.5× more</li>
@@ -914,10 +1317,10 @@
           BMD doesn't endorse third-party encoders. Use in real productions at your own risk.</p>
         </details>
         <details class="faq-item">
-          <summary>Why does my source appear delayed by ~500 ms on the ATEM?</summary>
-          <p>That's SRT's latency budget — the receiver buffers half a second so packet retransmits
-          have time to land. Reduce <code>SRT latency</code> in the Advanced section if your network
-          is fast and stable; raise it on flaky connections.</p>
+          <summary>Why does my source appear delayed by a few hundred ms on the ATEM?</summary>
+          <p>That's SRT's latency budget — the receiver buffers (200 ms by default) so packet
+          retransmits have time to land, plus encoder and decoder time. Reduce <code>SRT latency</code>
+          in the Advanced section if your network is fast and stable; raise it on flaky connections.</p>
         </details>
         <details class="faq-item">
           <summary>What's the difference between NDI direct and the bridge workflow?</summary>
@@ -971,13 +1374,13 @@
         </details>
         <details class="faq-item">
           <summary>Does this support OMT (Open Media Transport)?</summary>
-          <p><strong>OMT support coming soon.</strong> OMT is the open, royalty-free
+          <p><strong>Yes, in and out.</strong> OMT is the open, royalty-free
           alternative to NDI from the Open Media Transport project — same use case
-          (low-latency uncompressed-ish video over IP on a LAN), no per-seat licensing,
-          and an MIT-licensed reference implementation. It's a natural fit alongside
-          our direct NDI ingest path; we'll add it as another source kind once the
-          Rust crate stabilizes. If you have a strong use case, drop a note via the
-          Email link below — early-feedback senders get tested against first.</p>
+          (low-latency video over IP on a LAN), no per-seat licensing, and an
+          MIT-licensed reference implementation. OMT senders on the LAN appear as
+          source tiles next to NDI senders, and the OMT output card publishes the
+          outgoing stream on the LAN alongside the ATEM-bound path. The pre-built
+          installers include the OMT runtime.</p>
         </details>
       </div>
     </div>
@@ -1017,6 +1420,18 @@
     <div class="muted">ATEM IP Patchbay · proof of concept · use in real productions at your own risk</div>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <!-- alpha.22's UDM config dialog removed in alpha.25 (relocated to
+       net-diag's own dashboard). -->
+
+  <!-- alpha.54: defer app.js to match system-drawer.js's defer.
+       Without this, app.js ran during HTML parse (before deferred
+       scripts execute) so window.createSystemDrawer was undefined
+       when app.js checked. Result: single-view sys-pill never got
+       a click handler and never started polling. With both deferred,
+       they run in document order (system-drawer first, then app)
+       after the DOM is fully parsed — createSystemDrawer is defined,
+       the pill gets wired + polls /api/system-health like the
+       multiview's. -->
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

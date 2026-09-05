@@ -220,7 +220,10 @@ impl OmtCapture {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            // Bounded join — same rationale as ndi_capture: a wedged
+            // capture thread must never freeze the shutdown/recovery
+            // path. Detach after the timeout rather than hang.
+            join_with_timeout(handle, "omt-capture", Duration::from_secs(3));
         }
     }
 }
@@ -228,6 +231,56 @@ impl OmtCapture {
 impl Drop for OmtCapture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Join a thread but give up after `timeout`, logging and detaching
+/// instead of blocking forever. Mirrors ndi_capture's helper. Kept
+/// outside the `omt` feature gate because `stop()`/`Drop` are
+/// unconditional.
+fn join_with_timeout(handle: JoinHandle<()>, name: &str, timeout: Duration) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(timeout).is_err() {
+        log::warn!(
+            "{name} thread did not exit within {timeout:?}; detaching \
+             (reclaimed at process exit)"
+        );
+    }
+}
+
+/// Result of [`send_frame_or_stop`].
+#[cfg(feature = "omt")]
+enum SendOutcome {
+    Sent,
+    Stopped,
+}
+
+/// Stop-aware send — see ndi_capture::send_frame_or_stop. `blocking_send`
+/// parks the capture thread forever when FFmpeg stops draining stdin,
+/// which makes the thread unjoinable and freezes stop()/recovery. Poll
+/// `try_send` and re-check `stop` between full-channel retries instead.
+#[cfg(feature = "omt")]
+fn send_frame_or_stop(
+    tx: &mpsc::Sender<Vec<u8>>,
+    mut buf: Vec<u8>,
+    stop: &AtomicBool,
+) -> SendOutcome {
+    loop {
+        match tx.try_send(buf) {
+            Ok(()) => return SendOutcome::Sent,
+            Err(mpsc::error::TrySendError::Closed(_)) => return SendOutcome::Stopped,
+            Err(mpsc::error::TrySendError::Full(returned)) => {
+                if stop.load(Ordering::Acquire) {
+                    return SendOutcome::Stopped;
+                }
+                buf = returned;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 }
 
@@ -287,10 +340,12 @@ fn run_capture_loop(
             }
         }
 
-        if tx.blocking_send(packed).is_err() {
-            // Channel closed — streamer's writer task exited.
-            log::info!("OMT capture: channel closed, exiting capture loop");
-            break;
+        match send_frame_or_stop(&tx, packed, &stop) {
+            SendOutcome::Sent => {}
+            SendOutcome::Stopped => {
+                log::info!("OMT capture: stop requested or channel closed, exiting capture loop");
+                break;
+            }
         }
         sent_in_window += 1;
         frame_counter += 1;

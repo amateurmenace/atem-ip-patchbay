@@ -1,0 +1,1799 @@
+<!doctype html>
+<!--
+  Broadcast multiview — 6 channels in one window (4 at alpha.41, 6
+  since alpha.62). Each tile is a full source→DeckLink-output pipeline
+  routed via the same /api/i/:idx/* endpoints the single-source UI
+  uses; TILE_COUNT=6 in fleet.rs gives us 6 independent EncoderState +
+  Streamer + Preview slots.
+
+  alpha.41 production hardening:
+  - System health pill in header (CPU/RAM polled every 2s via
+    /api/system-health, traffic-light Green/Yellow/Red).
+  - Confirm dialog on Stop / Stop All when tile is Streaming —
+    prevents stray-click off-air during a live show.
+  - Source / DeckLink output / Mode dropdowns disabled while a tile
+    is Streaming, so config can't silently drift from the live state.
+  - Per-tile state persisted to disk via /api/i/N/settings → reloads
+    on restart so a crash / Cmd-Q / installer doesn't wipe configs.
+  - Backend stall detector: FFmpeg "Streaming with fps=0 for 5s"
+    triggers a force-kill that the alpha.30 supervisor catches and
+    reconnects — operator sees "Reconnecting" rather than a stuck-
+    Streaming-forever tile.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ATEM IP Patchbay · Multiview</title>
+<script src="/static/system-drawer.js" defer></script>
+<style>
+  :root {
+    --bg: #0e0f12;
+    --bg-tile: #15171c;
+    --bg-input: #1c1e24;
+    --bg-preview: #050608;
+    --border: #2a2e36;
+    --border-active: #3a4250;
+    --text: #e6e6ea;
+    --text-dim: #8a8f9b;
+    --accent: #66d3fa;
+    --accent-hot: #99e3ff;
+    --good: #5fd06b;
+    --warn: #f0b84f;
+    --bad: #e85c5c;
+    --idle: #6f7682;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 12px;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  header {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    height: 48px;
+  }
+  header .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+  header .brand-text {
+    color: var(--text);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  header .controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-left: auto;
+  }
+  header .controls button {
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 5px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  header .controls button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  header .controls button.danger {
+    border-color: rgba(232,92,92,0.5);
+    color: var(--bad);
+  }
+  header .controls button.danger:hover {
+    border-color: var(--bad);
+    background: rgba(232,92,92,0.15);
+  }
+
+  /* View-mode toggle — same shape as index.html so the operator's
+     navigation feels consistent. Primary affordance in the topbar. */
+  .view-toggle {
+    display: inline-flex;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(102,211,250,0.25);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 3px;
+  }
+  .view-toggle-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 7px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.15s ease, background 0.15s ease;
+    font-family: inherit;
+  }
+  .view-toggle-btn svg {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+  }
+  .view-toggle-btn:hover {
+    color: var(--text);
+  }
+  .view-toggle-btn.active {
+    background: var(--accent);
+    color: #0e0f12;
+    box-shadow: 0 0 12px rgba(102,211,250,0.35);
+  }
+  .view-toggle-btn.active:hover {
+    color: #0e0f12;
+  }
+
+  /* alpha.41 system health pill — polled from /api/system-health
+     every 2s. Tooltip on hover shows CPU/RAM detail. */
+  .sys-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: default;
+    user-select: none;
+    line-height: 1;
+  }
+  .sys-pill .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--idle);
+    flex-shrink: 0;
+  }
+  .sys-pill.green { border-color: rgba(95,208,107,0.5); color: var(--good); }
+  .sys-pill.green .dot { background: var(--good); box-shadow: 0 0 6px rgba(95,208,107,0.6); }
+  .sys-pill.yellow { border-color: rgba(240,184,79,0.55); color: var(--warn); }
+  .sys-pill.yellow .dot { background: var(--warn); box-shadow: 0 0 6px rgba(240,184,79,0.6); }
+  .sys-pill.red { border-color: rgba(232,92,92,0.7); color: var(--bad); background: rgba(232,92,92,0.06); }
+  .sys-pill.red .dot { background: var(--bad); box-shadow: 0 0 8px rgba(232,92,92,0.8); }
+  .sys-pill.unknown { color: var(--text-dim); }
+  .sys-pill .label-text {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 8px;
+    padding: 8px;
+    height: calc(100vh - 43px);
+  }
+  /* Medium widths: 2 columns x 3 rows keeps the pickers usable. */
+  @media (max-width: 1200px) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+    }
+  }
+  /* Below 800px width, stack vertically so the controls still fit. */
+  @media (max-width: 800px) {
+    .grid {
+      grid-template-columns: 1fr;
+      grid-template-rows: repeat(6, 1fr);
+    }
+  }
+
+  .tile {
+    background: var(--bg-tile);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: grid;
+    /* Row 1: head | Row 2: stats panel (auto, but display:none when
+       collapsed → takes 0 rows) | Row 3: preview (fills) | Row 4: controls */
+    grid-template-rows: auto auto 1fr auto;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .tile.streaming { border-color: var(--good); }
+  .tile.reconnecting { border-color: var(--warn); }
+  .tile.interrupted { border-color: var(--bad); }
+  .tile.connecting { border-color: var(--accent); }
+
+  .tile-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(0,0,0,0.3);
+    border-bottom: 1px solid var(--border);
+    min-height: 32px;
+    font-size: 12px;
+  }
+  .tile-idx {
+    font-weight: 800;
+    color: var(--accent);
+    font-size: 14px;
+    width: 18px;
+    flex-shrink: 0;
+  }
+  .tile-name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .tile-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .tile-actions button {
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 9px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: 600;
+  }
+  .tile-actions button.primary {
+    border-color: var(--good);
+    color: var(--good);
+  }
+  .tile-actions button.primary:hover:not(:disabled) {
+    background: rgba(95,208,107,0.18);
+  }
+  .tile-actions button.danger {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+  .tile-actions button.danger:hover:not(:disabled) {
+    background: rgba(232,92,92,0.18);
+  }
+  .tile-actions button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .pill {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 2px 6px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .pill.idle { background: rgba(111,118,130,0.2); color: var(--idle); }
+  .pill.connecting { background: rgba(102,211,250,0.15); color: var(--accent); }
+  .pill.streaming { background: rgba(95,208,107,0.15); color: var(--good); }
+  .pill.reconnecting { background: rgba(240,184,79,0.15); color: var(--warn); }
+  .pill.interrupted { background: rgba(232,92,92,0.15); color: var(--bad); }
+
+  .preview {
+    position: relative;
+    background: var(--bg-preview);
+    /* alpha.45 fix: removed aspect-ratio: 16/9 — it was forcing
+       the preview to ~450px tall in tiles that only had ~430px
+       available, pushing the .tile-controls strip off-screen and
+       making the operator believe there were no source/dest
+       pickers. The img inside still letterboxes via object-fit
+       contain, so the preview fills whatever grid 1fr gives it
+       without claiming more space than the tile has. */
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  .preview-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-style: italic;
+  }
+  .preview-overlay {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 4px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%);
+    font-size: 10px;
+    color: rgba(255,255,255,0.92);
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .preview-overlay .err {
+    color: var(--bad);
+  }
+  /* VU meters — top-right corner of the preview. Two thin vertical
+     bars (L, R) with peak hold. Canvas-rendered at 4Hz from
+     /api/i/N/audio-levels. */
+  .tile-meters {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    gap: 3px;
+    padding: 4px;
+    background: rgba(0,0,0,0.45);
+    border-radius: 4px;
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+  }
+  .tile-meters canvas {
+    display: block;
+    width: 8px;
+    height: 56px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.05);
+  }
+  .tile-meters .meter-readout {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 3px;
+    font-size: 9px;
+    color: rgba(255,255,255,0.7);
+    background: rgba(0,0,0,0.5);
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom-audio sub-row: appears when audio_mode == 'custom'.
+     Compact: device dropdown + L/R Dante channel pickers. */
+  .audio-custom-row {
+    display: none;
+    grid-template-columns: 38px 1fr;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 0;
+  }
+  .audio-custom-row.show { display: grid; }
+  .audio-custom-row .control-fields {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+  .audio-custom-row input[type=number] {
+    flex: 0 0 38px;
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 5px;
+    font-size: 11px;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+  .audio-custom-row .channel-pair {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .audio-custom-row .channel-pair span {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  /* alpha.50 — expandable per-tile stats panel. Click ▼ on tile head
+     to reveal a grid of all StreamStats fields under the head. */
+  .tile-stats-panel {
+    display: none;
+    background: rgba(15,19,28,0.92);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px 12px;
+    font-size: 10px;
+  }
+  .tile-stats-panel.show { display: grid; }
+  .stat-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .stat-cell .stat-lbl {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .stat-cell .stat-val {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .stat-cell.warn .stat-val { color: var(--warn); }
+  .stat-cell.bad .stat-val { color: var(--bad); }
+  .stat-cell.good .stat-val { color: var(--good); }
+  .stat-cell.wide {
+    grid-column: span 4;
+  }
+  .stat-cell.wide .stat-val {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--bad);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    word-break: break-word;
+    white-space: normal;
+  }
+  .tile-stats-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 3px;
+    padding: 2px 7px;
+    font-size: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color 0.15s ease;
+    line-height: 1;
+  }
+  .tile-stats-toggle:hover { color: var(--text); }
+  .tile-stats-toggle.expanded {
+    background: rgba(102,211,250,0.15);
+    color: var(--accent);
+    border-color: rgba(102,211,250,0.4);
+  }
+
+  /* alpha.45: brighter, taller controls strip so the operator can't
+     miss it. Previous version blended into the tile background; the
+     accent-tinted top border + slightly heavier padding makes this
+     section unambiguously "this is where you configure the tile". */
+  .tile-controls {
+    background: rgba(8,12,20,0.55);
+    border-top: 2px solid var(--accent);
+    padding: 10px 10px;
+    display: grid;
+    grid-template-rows: auto auto;
+    gap: 8px;
+    min-height: 0;
+    flex-shrink: 0;
+  }
+  .control-row {
+    display: grid;
+    grid-template-columns: 38px 1fr;
+    align-items: center;
+    gap: 6px;
+  }
+  .control-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+  }
+  .control-row .control-fields {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+  .control-row .control-fields > * {
+    min-width: 0;
+  }
+  select, input[type=text] {
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 11px;
+    font-family: inherit;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+  select option {
+    background: #0e0f12;
+    color: #e6e6ea;
+  }
+  select:focus, input[type=text]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  select:disabled, input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  /* Audio dropdown is narrower than source — limit its flex. */
+  .audio-sel { flex: 0 0 110px; }
+  /* Source dropdown takes the rest. */
+  .src-sel { flex: 1 1 auto; }
+  /* Dest type fixed-narrow; the dest fields fill the rest. */
+  .desttype-sel { flex: 0 0 96px; font-weight: 700; }
+
+  /* Toast for error/info */
+  #toast {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: #1c1e24;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 11px;
+    max-width: 360px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: opacity 180ms, transform 180ms;
+    z-index: 50;
+  }
+  #toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  #toast.bad { border-color: var(--bad); color: var(--bad); }
+  #toast.good { border-color: var(--good); color: var(--good); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="14" height="14">
+        <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+    </span>
+    <span class="brand-text">ATEM IP Patchbay</span>
+  </div>
+  <!-- alpha.42 view-mode toggle. Same shape as index.html's so the
+       operator's navigation is consistent across both views. Multi
+       side is the "active" tab here; clicking Single navigates back
+       to / which serves the single-source UI. -->
+  <div class="view-toggle" role="tablist" aria-label="View mode">
+    <a id="view-toggle-single" href="/" class="view-toggle-btn"
+       role="tab" aria-selected="false"
+       title="Single source view — configure one source → one destination">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="8" r="2.4" fill="currentColor"/>
+      </svg>
+      Single
+    </a>
+    <button id="view-toggle-multi" type="button" class="view-toggle-btn active"
+            role="tab" aria-selected="true"
+            title="Multiview — 4 channels in one window">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="1" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="1" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="1" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="9" y="9" width="6" height="6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+      Multi
+    </button>
+  </div>
+  <div class="controls">
+    <div id="sys-pill" class="sys-pill unknown" title="System health — CPU + memory">
+      <span class="dot"></span>
+      <span class="label-text" id="sys-pill-label">starting…</span>
+    </div>
+    <button id="refresh-all" type="button" title="Refresh discovery + tile state">↻ Refresh</button>
+    <button id="stop-all" type="button" class="danger" title="Stop every tile that's streaming">Stop All</button>
+    <button id="force-stop-all" type="button" class="danger"
+            style="background:#b3261e; border-color:#d7493f;"
+            title="Emergency: OS-kill every FFmpeg and reset all tiles — use when a tile is wedged and Stop won't clear it">⛔ Force Stop</button>
+  </div>
+</header>
+
+<div id="grid" class="grid"></div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+const TILE_COUNT = 6;
+const TILES = Array.from({ length: TILE_COUNT }, (_, i) => i);
+const POLL_INTERVAL_MS = 1000;
+const PREVIEW_INTERVAL_MS = 500;
+const SYS_HEALTH_INTERVAL_MS = 2000;
+
+// alpha.41: status taxonomy that should be confirmed before
+// destructive actions. "Reconnecting" not in this set because
+// reconnecting is already "off-air" (operator stopping it just
+// makes it permanent, no surprise content disappears).
+const STREAMING_STATUSES = new Set(['streaming', 'connecting']);
+
+// Per-tile in-memory state cache. Populated lazily on first state poll.
+const tileState = {};
+const tilePreviewCounter = {};
+
+function $(sel) { return document.querySelector(sel); }
+function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === 'class') node.className = v;
+      else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+      else if (k === 'dataset') {
+        for (const [dk, dv] of Object.entries(v)) node.dataset[dk] = dv;
+      }
+      else if (v === false || v === null || v === undefined) {}
+      else node.setAttribute(k, v);
+    }
+  }
+  for (const c of children) {
+    if (c === null || c === undefined || c === false) continue;
+    if (typeof c === 'string' || typeof c === 'number') node.appendChild(document.createTextNode(String(c)));
+    else node.appendChild(c);
+  }
+  return node;
+}
+
+let toastTimer = null;
+function toast(message, kind) {
+  const t = $('#toast');
+  t.textContent = message;
+  t.className = (kind === 'bad' || kind === 'good') ? kind + ' show' : 'show';
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ''; }, 4000);
+}
+
+async function fetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${url}${body ? ': ' + body.slice(0, 200) : ''}`);
+  }
+  return res.json();
+}
+
+function buildTile(idx) {
+  const tile = el('div', { class: 'tile', id: `tile-${idx}`, dataset: { idx: String(idx) } },
+    // Header — idx + dest summary + status pill + Stats toggle + Start/Stop
+    el('div', { class: 'tile-head' },
+      el('span', { class: 'tile-idx' }, idx + 1),
+      el('span', { class: 'tile-name', id: `tile-name-${idx}` }, '— configure tile —'),
+      el('span', { class: 'pill idle', id: `tile-pill-${idx}` }, 'Idle'),
+      el('div', { class: 'tile-actions' },
+        el('button', { class: 'tile-stats-toggle', id: `tile-stats-toggle-${idx}`, onclick: () => toggleStatsPanel(idx), title: 'Show detailed stream stats (bitrate, fps, frames, reconnects)' }, 'Stats ▾'),
+        el('button', { class: 'primary', id: `tile-start-${idx}`, onclick: () => onStart(idx), title: 'Start streaming' }, '▶'),
+        el('button', { class: 'danger', id: `tile-stop-${idx}`, onclick: () => onStop(idx), title: 'Stop streaming' }, '◼')
+      )
+    ),
+    // alpha.50 expandable stats panel. Hidden by default; click "Stats ▾"
+    // in the head to reveal a grid of all StreamStats fields.
+    el('div', { class: 'tile-stats-panel', id: `tile-stats-${idx}` },
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-status-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Status'),
+        el('div', { class: 'stat-val', id: `tile-stat-status-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-bitrate-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Bitrate'),
+        el('div', { class: 'stat-val', id: `tile-stat-bitrate-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-fps-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'FPS'),
+        el('div', { class: 'stat-val', id: `tile-stat-fps-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-speed-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Speed'),
+        el('div', { class: 'stat-val', id: `tile-stat-speed-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell' },
+        el('div', { class: 'stat-lbl' }, 'Frames sent'),
+        el('div', { class: 'stat-val', id: `tile-stat-frames-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-dropped-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Dropped'),
+        el('div', { class: 'stat-val', id: `tile-stat-dropped-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell' },
+        el('div', { class: 'stat-lbl' }, 'Duration'),
+        el('div', { class: 'stat-val', id: `tile-stat-dur-${idx}` }, '—')
+      ),
+      el('div', { class: 'stat-cell', id: `tile-stat-cell-recon-${idx}` },
+        el('div', { class: 'stat-lbl' }, 'Reconnects'),
+        el('div', { class: 'stat-val', id: `tile-stat-recon-${idx}` }, '0')
+      ),
+      el('div', { class: 'stat-cell wide', id: `tile-stat-cell-err-${idx}`, style: 'display:none' },
+        el('div', { class: 'stat-lbl' }, 'Last error'),
+        el('div', { class: 'stat-val', id: `tile-stat-err-${idx}` }, '')
+      )
+    ),
+    // Preview — fills remaining vertical space, JPEG inserted by
+    // refreshPreviews when status is Streaming. Overlays:
+    //   - top-right VU meters (L/R) polled at 4Hz
+    //   - bottom strip with source + bitrate + fps + frames
+    el('div', { class: 'preview', id: `tile-preview-${idx}` },
+      el('div', { class: 'preview-placeholder' }, 'no signal'),
+      el('div', { class: 'tile-meters', id: `tile-meters-${idx}` },
+        el('canvas', { id: `tile-meter-l-${idx}`, width: 8, height: 56, title: 'Left channel level' }),
+        el('canvas', { id: `tile-meter-r-${idx}`, width: 8, height: 56, title: 'Right channel level' }),
+        el('span', { class: 'meter-readout', id: `tile-meter-readout-${idx}` }, '—')
+      ),
+      el('div', { class: 'preview-overlay' },
+        el('span', { id: `tile-info-${idx}`, title: '' }, ''),
+        el('span', { id: `tile-err-${idx}`, class: 'err' }, '')
+      )
+    ),
+    // Compact controls — 2 rows: source/audio and dest type/config.
+    // Audio Custom mode unfolds a sub-row below row 1 with the
+    // device picker + L/R channel pickers (Dante VSC routing).
+    el('div', { class: 'tile-controls' },
+      el('div', { class: 'control-row' },
+        el('label', { class: 'control-label' }, 'SRC'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-src-${idx}`, class: 'src-sel', onchange: (e) => onSourceChange(idx, e.target.value) },
+            el('option', { value: '__none__' }, '— pick source —')
+          ),
+          el('select', { id: `tile-audio-${idx}`, class: 'audio-sel', onchange: (e) => onAudioChange(idx, e.target.value), title: 'Audio mode — Auto uses the source\'s own audio, Custom routes a specific AVF/dshow device, Silent emits no audio' },
+            el('option', { value: 'auto' }, 'Auto audio'),
+            el('option', { value: 'custom' }, 'Custom…'),
+            el('option', { value: 'silent' }, 'Silent')
+          )
+        )
+      ),
+      // Custom-audio sub-row — appears when audio_mode == 'custom'.
+      // Backend's apply_settings honors av_audio_name + L/R pan
+      // (Session 4 alpha.4 Dante routing). Hidden by .audio-custom-row
+      // CSS unless `.show` is added.
+      el('div', { class: 'audio-custom-row', id: `tile-audio-custom-${idx}` },
+        el('label', { class: 'control-label' }, 'AUD'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-audiodev-${idx}`, onchange: (e) => onAudioDeviceChange(idx, e.target.value), title: 'Audio capture device (Dante VSC, USB mic, etc.)' },
+            el('option', { value: '__none__' }, '— pick audio device —')
+          ),
+          el('div', { class: 'channel-pair', title: 'L/R Dante channel numbers (1-indexed) — pan filter routes these source channels to the stereo output' },
+            el('span', {}, 'L'),
+            el('input', { type: 'number', id: `tile-pan-l-${idx}`, min: 1, max: 64, value: 1, onchange: (e) => onPanChange(idx, 'l', e.target.value) }),
+            el('span', {}, 'R'),
+            el('input', { type: 'number', id: `tile-pan-r-${idx}`, min: 1, max: 64, value: 2, onchange: (e) => onPanChange(idx, 'r', e.target.value) })
+          )
+        )
+      ),
+      el('div', { class: 'control-row' },
+        el('label', { class: 'control-label' }, 'DST'),
+        el('div', { class: 'control-fields' },
+          el('select', { id: `tile-desttype-${idx}`, class: 'desttype-sel', onchange: (e) => onDestTypeChange(idx, e.target.value), title: 'Destination type' },
+            el('option', { value: 'decklink' }, 'DeckLink'),
+            el('option', { value: 'atem' }, 'Remote SRT')
+          ),
+          // Container that swaps between DeckLink dropdowns and Remote
+          // ATEM text inputs depending on dest type. Populated by
+          // renderDestFields() on tile state changes.
+          el('div', { class: 'control-fields', id: `tile-dest-fields-${idx}`, style: 'flex: 1 1 auto; gap: 4px;' })
+        )
+      )
+    )
+  );
+  return tile;
+}
+
+// -------------------------------------------------------------------
+// Audio meter rendering (VU bars per tile)
+// -------------------------------------------------------------------
+
+// Per-tile meter state: peak-hold value + decay timestamp for both
+// channels. Peak hold = 1.5s decay matching broadcast convention.
+const meterState = {};
+
+function dbToHeight(db) {
+  // Map dB to 0-1 fill where -60 dB = 0 (silent), 0 dB = 1 (full).
+  // Anything below -60 is treated as silence.
+  if (!Number.isFinite(db) || db < -60) return 0;
+  if (db >= 0) return 1;
+  return (db + 60) / 60;
+}
+
+function drawMeter(canvas, rmsDb, peakDb) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  // Background scale ticks every 6 dB (for orientation).
+  const rmsHeight = dbToHeight(rmsDb) * h;
+  // Gradient — fills from bottom up. Top portion red (>=−6 dB),
+  // middle yellow (−18 to −6), bottom green (−60 to −18).
+  const grad = ctx.createLinearGradient(0, h, 0, 0);
+  grad.addColorStop(0, '#5fd06b');
+  grad.addColorStop(0.7, '#5fd06b');
+  grad.addColorStop(0.7, '#f0b84f');
+  grad.addColorStop(0.9, '#f0b84f');
+  grad.addColorStop(0.9, '#e85c5c');
+  grad.addColorStop(1.0, '#e85c5c');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, h - rmsHeight, w, rmsHeight);
+  // Peak hold marker (thin white line)
+  if (Number.isFinite(peakDb)) {
+    const peakY = h - dbToHeight(peakDb) * h;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(0, Math.max(0, peakY - 1), w, 2);
+  }
+}
+
+function updateMeter(idx, rmsL, rmsR, peakL, peakR, idle) {
+  const state = (meterState[idx] = meterState[idx] || {
+    holdL: -120, holdR: -120, holdLAt: 0, holdRAt: 0,
+  });
+  const now = performance.now();
+  // 1.5s peak hold with linear decay. New peak resets the hold; old
+  // peak decays smoothly toward the current RMS.
+  if (peakL > state.holdL) { state.holdL = peakL; state.holdLAt = now; }
+  else {
+    const dec = (now - state.holdLAt) / 1500;
+    if (dec > 0) state.holdL = Math.max(rmsL, state.holdL - dec * 60);
+  }
+  if (peakR > state.holdR) { state.holdR = peakR; state.holdRAt = now; }
+  else {
+    const dec = (now - state.holdRAt) / 1500;
+    if (dec > 0) state.holdR = Math.max(rmsR, state.holdR - dec * 60);
+  }
+  // Idle → fade to silence so meters don't lie when no audio is flowing.
+  const effRmsL = idle ? -120 : rmsL;
+  const effRmsR = idle ? -120 : rmsR;
+  drawMeter(document.getElementById(`tile-meter-l-${idx}`), effRmsL, idle ? -120 : state.holdL);
+  drawMeter(document.getElementById(`tile-meter-r-${idx}`), effRmsR, idle ? -120 : state.holdR);
+  const readout = document.getElementById(`tile-meter-readout-${idx}`);
+  if (readout) {
+    if (idle) readout.textContent = '—';
+    else {
+      const peak = Math.max(rmsL, rmsR);
+      readout.textContent = Number.isFinite(peak) ? `${peak.toFixed(0)} dB` : '—';
+    }
+  }
+}
+
+async function pollAudioLevels() {
+  // Fan out per-tile fetches. /api/i/N/audio-levels was added in
+  // alpha.31 — on older backends it 404s, which we treat as "idle"
+  // so the meters degrade gracefully (gray) instead of erroring.
+  await Promise.all(TILES.map(async (idx) => {
+    try {
+      const data = await fetchJson(`/api/i/${idx}/audio-levels`);
+      const idleSecs = Math.max(0, (data.server_time || 0) - (data.updated_at || 0));
+      const idle = !data.meters_enabled || idleSecs > 0.7;
+      updateMeter(idx, data.rms_l, data.rms_r, data.peak_l, data.peak_r, idle);
+    } catch (e) {
+      // Backend doesn't have the endpoint — idle the meter
+      updateMeter(idx, -120, -120, -120, -120, true);
+    }
+  }));
+}
+
+// -------------------------------------------------------------------
+// Custom-audio handlers
+// -------------------------------------------------------------------
+
+function populateAudioDeviceDropdown(idx) {
+  const sel = document.getElementById(`tile-audiodev-${idx}`);
+  if (!sel) return;
+  const cur = tileState[idx]?.snapshot?.av_audio_name;
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '__none__' }, '— pick audio device —'));
+  for (const d of (knownDevices.audio || [])) {
+    const opt = el('option', { value: d.name }, d.name);
+    if (cur === d.name) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function toggleAudioCustomRow(idx, show) {
+  const row = document.getElementById(`tile-audio-custom-${idx}`);
+  if (!row) return;
+  if (show) {
+    row.classList.add('show');
+    populateAudioDeviceDropdown(idx);
+    const snap = tileState[idx]?.snapshot;
+    const lEl = document.getElementById(`tile-pan-l-${idx}`);
+    const rEl = document.getElementById(`tile-pan-r-${idx}`);
+    if (lEl && snap?.audio_pan_l) lEl.value = snap.audio_pan_l;
+    if (rEl && snap?.audio_pan_r) rEl.value = snap.audio_pan_r;
+  } else {
+    row.classList.remove('show');
+  }
+}
+
+async function onAudioDeviceChange(idx, name) {
+  if (name === '__none__') return;
+  await applySettings(idx, { audio_mode: 'custom', av_audio_name: name });
+}
+
+async function onPanChange(idx, which, value) {
+  const v = Math.max(1, Math.min(64, parseInt(value, 10) || 1));
+  const payload = which === 'l' ? { audio_pan_l: v } : { audio_pan_r: v };
+  await applySettings(idx, payload);
+}
+
+function renderDestFields(idx) {
+  const container = document.getElementById(`tile-dest-fields-${idx}`);
+  if (!container) return;
+  const snap = tileState[idx]?.snapshot || {};
+  const destType = snap.destination_type || 'decklink';
+  container.innerHTML = '';
+  if (destType === 'decklink') {
+    // DeckLink: device + mode dropdowns.
+    const dl = el('select', {
+      id: `tile-dl-${idx}`,
+      onchange: (e) => onDecklinkChange(idx, e.target.value),
+      title: 'DeckLink output device'
+    },
+      el('option', { value: '__none__' }, '— pick output —')
+    );
+    const mode = el('select', {
+      id: `tile-mode-${idx}`,
+      onchange: (e) => onModeChange(idx, e.target.value),
+      disabled: !snap.decklink_device_name,
+      title: 'DeckLink output mode'
+    },
+      el('option', { value: '__none__' }, snap.decklink_device_name ? '— pick mode —' : '— pick device first —')
+    );
+    container.appendChild(dl);
+    container.appendChild(mode);
+    populateDecklinkDropdown(idx);
+  } else {
+    // Remote ATEM/SRT: URL + stream key text inputs. Inline edits
+    // POST to /api/i/N/settings on blur or Enter.
+    const urlEl = el('input', {
+      type: 'text',
+      id: `tile-url-${idx}`,
+      placeholder: 'srt://host:port',
+      value: snap.custom_url || '',
+      title: 'Destination URL — usually srt://<atem-host>:<port> or rtmp://…',
+    });
+    const keyEl = el('input', {
+      type: 'text',
+      id: `tile-key-${idx}`,
+      placeholder: 'stream key',
+      value: snap.stream_key || '',
+      title: 'BMD stream key (u=…) — paste from your ATEM streaming service config',
+      style: 'flex: 0 0 120px;',
+    });
+    const commit = () => {
+      const payload = {
+        destination_type: 'atem',
+        custom_url: urlEl.value.trim(),
+        stream_key: keyEl.value.trim(),
+      };
+      applySettings(idx, payload);
+    };
+    urlEl.addEventListener('change', commit);
+    keyEl.addEventListener('change', commit);
+    urlEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') urlEl.blur(); });
+    keyEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') keyEl.blur(); });
+    container.appendChild(urlEl);
+    container.appendChild(keyEl);
+  }
+}
+
+function toggleStatsPanel(idx) {
+  const panel = document.getElementById(`tile-stats-${idx}`);
+  const toggle = document.getElementById(`tile-stats-toggle-${idx}`);
+  if (!panel || !toggle) return;
+  const open = !panel.classList.contains('show');
+  panel.classList.toggle('show', open);
+  toggle.classList.toggle('expanded', open);
+  toggle.textContent = open ? 'Stats ▴' : 'Stats ▾';
+  // Localstorage persist per-tile preference so reopening the
+  // multiview keeps panels the operator likes expanded.
+  try { localStorage.setItem(`atemMv_statsPanel_${idx}`, open ? '1' : '0'); } catch (_e) {}
+}
+
+function applyStatsPanelPersistedState() {
+  for (const idx of TILES) {
+    try {
+      if (localStorage.getItem(`atemMv_statsPanel_${idx}`) === '1') {
+        toggleStatsPanel(idx);
+      }
+    } catch (_e) {}
+  }
+}
+
+function renderStatsPanel(idx, snap) {
+  const panel = document.getElementById(`tile-stats-${idx}`);
+  if (!panel || !panel.classList.contains('show')) return; // skip when collapsed
+  const stats = snap?.stats || {};
+  const set = (id, val, klass) => {
+    const e = document.getElementById(`tile-stat-${id}-${idx}`);
+    if (e) e.textContent = val;
+    if (klass) {
+      const cell = document.getElementById(`tile-stat-cell-${id}-${idx}`);
+      if (cell) {
+        cell.classList.remove('good', 'warn', 'bad');
+        cell.classList.add(klass);
+      }
+    }
+  };
+  const status = stats.status || 'Idle';
+  const sLow = status.toLowerCase();
+  set('status', status, sLow === 'streaming' ? 'good' : sLow === 'reconnecting' ? 'warn' : sLow === 'interrupted' ? 'bad' : '');
+  const bitrate = stats.bitrate || 0;
+  set('bitrate', bitrate ? `${(bitrate / 1000).toFixed(2)} Mbps` : '—');
+  const fps = stats.fps || 0;
+  const targetFps = snap?.video_mode ? parseFloat(snap.video_mode.match(/p(\d+\.?\d*)/i)?.[1] || '0') : 0;
+  let fpsKlass = '';
+  if (fps > 0 && targetFps > 0) {
+    const dev = Math.abs(fps - targetFps) / targetFps;
+    fpsKlass = dev < 0.05 ? 'good' : dev < 0.15 ? 'warn' : 'bad';
+  }
+  set('fps', fps ? fps.toFixed(2) : '—', fpsKlass);
+  const speed = stats.speed || 0;
+  let speedKlass = '';
+  if (speed > 0) {
+    const dev = Math.abs(speed - 1.0);
+    speedKlass = dev < 0.05 ? 'good' : dev < 0.15 ? 'warn' : 'bad';
+  }
+  set('speed', speed ? `${speed.toFixed(2)}x` : '—', speedKlass);
+  set('frames', (stats.frames_sent || 0).toLocaleString());
+  const drops = stats.frames_dropped || 0;
+  set('dropped', drops.toLocaleString(), drops === 0 ? 'good' : drops < 100 ? 'warn' : 'bad');
+  set('dur', stats.duration || '00:00:00:00');
+  const totalRecon = stats.total_reconnects_this_session || 0;
+  set('recon', totalRecon.toString(), totalRecon === 0 ? 'good' : totalRecon < 5 ? 'warn' : 'bad');
+  // Last error - show wide row if present
+  const errCell = document.getElementById(`tile-stat-cell-err-${idx}`);
+  if (errCell) {
+    if (stats.error) {
+      errCell.style.display = '';
+      const errEl = document.getElementById(`tile-stat-err-${idx}`);
+      if (errEl) errEl.textContent = String(stats.error).slice(0, 200);
+    } else {
+      errCell.style.display = 'none';
+    }
+  }
+}
+
+async function onDestTypeChange(idx, value) {
+  // Don't apply yet — the dest-type swap rebuilds the fields, and
+  // the actual config (decklink device / atem URL) lives in the
+  // fields themselves. POST the type change so the backend knows
+  // which destination_type to validate against, then rerender.
+  await applySettings(idx, { destination_type: value });
+  // Force-refresh tile state so the new destination_type drives
+  // renderDestFields' choice.
+  await pollTile(idx);
+  renderDestFields(idx);
+}
+
+// -------------------------------------------------------------------
+// Loading + populating dropdowns
+// -------------------------------------------------------------------
+
+async function loadNdiSenders() {
+  try {
+    // /api/i/0/ndi-senders proxies the global discovery, so any tile's
+    // endpoint returns the same list.
+    const data = await fetchJson('/api/i/0/ndi-senders');
+    return data.senders || [];
+  } catch (e) {
+    console.warn('NDI senders load failed:', e);
+    return [];
+  }
+}
+
+async function loadOmtSenders() {
+  try {
+    const data = await fetchJson('/api/i/0/omt-senders');
+    return data.senders || [];
+  } catch (e) {
+    console.warn('OMT senders load failed:', e);
+    return [];
+  }
+}
+
+async function loadDecklinkOutputs() {
+  try {
+    const data = await fetchJson('/api/i/0/decklink-outputs');
+    // The endpoint returns the Vec<DecklinkDeviceWithModes> directly,
+    // not wrapped. Normalize to { devices: [...] } so the rest of this
+    // file can keep one shape.
+    return { devices: Array.isArray(data) ? data : (data.devices || []) };
+  } catch (e) {
+    console.warn('DeckLink outputs load failed:', e);
+    return { devices: [] };
+  }
+}
+
+let knownDecklink = { devices: [] };
+let knownNdi = [];
+let knownOmt = [];
+// alpha.42 — also pick up physical sources (AVF/dshow cameras +
+// screen capture) so an operator can run "camera → remote SRT" tiles
+// alongside "NDI → DeckLink" ones in the same window. Loaded once
+// per session; refresh-all reloads.
+let knownDevices = { video: [], audio: [] };
+
+async function loadDevices() {
+  try {
+    const data = await fetchJson('/api/i/0/devices');
+    return data || { video: [], audio: [] };
+  } catch (e) {
+    console.warn('Devices load failed:', e);
+    return { video: [], audio: [] };
+  }
+}
+
+function populateSourceDropdown(idx) {
+  const sel = document.getElementById(`tile-src-${idx}`);
+  if (!sel) return;
+  const snap = tileState[idx]?.snapshot || {};
+  const current = snap.source_id;
+  const currentNdi = snap.ndi_source_name;
+  const currentOmt = snap.omt_source_name;
+  const currentAvName = snap.av_video_name;
+
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '__none__' }, '— pick source —'));
+
+  if (knownNdi.length) {
+    const grp = el('optgroup', { label: 'NDI' });
+    for (const s of knownNdi) {
+      const val = 'ndi:' + s.name;
+      const opt = el('option', { value: val }, s.name);
+      if (current === 'ndi' && currentNdi === s.name) opt.selected = true;
+      grp.appendChild(opt);
+    }
+    sel.appendChild(grp);
+  }
+  if (knownOmt.length) {
+    const grp = el('optgroup', { label: 'OMT' });
+    for (const s of knownOmt) {
+      const val = 'omt:' + s.name;
+      const opt = el('option', { value: val }, s.name);
+      if (current === 'omt' && currentOmt === s.name) opt.selected = true;
+      grp.appendChild(opt);
+    }
+    sel.appendChild(grp);
+  }
+  // alpha.42 — physical sources (cameras + screens) so a tile can
+  // do "physical camera → remote SRT" in addition to the original
+  // "NDI → DeckLink" pattern. Each device's category drives the
+  // source_id we'll POST:
+  //   screen* → "screen_capture"
+  //   anything else video → "avfoundation" (Mac) / "dshow" (Win)
+  if (knownDevices.video && knownDevices.video.length) {
+    const screens = knownDevices.video.filter(d => /screen|desk view|screen capture/i.test(d.name || ''));
+    const cameras = knownDevices.video.filter(d => !screens.includes(d));
+    if (cameras.length) {
+      const grp = el('optgroup', { label: 'Cameras' });
+      for (const d of cameras) {
+        const val = `camera:${d.index}|${d.name}`;
+        const opt = el('option', { value: val }, d.name);
+        if ((current === 'avfoundation' || current === 'dshow') && currentAvName === d.name) {
+          opt.selected = true;
+        }
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+    if (screens.length) {
+      const grp = el('optgroup', { label: 'Screen capture' });
+      for (const d of screens) {
+        const val = `screen:${d.index}`;
+        const opt = el('option', { value: val }, d.name);
+        if (current === 'screen_capture' || current === 'gdigrab') opt.selected = true;
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+  }
+  // Test pattern — always available, useful for verifying 4x decklink_enc
+  // concurrency on the rig without needing 4 live sources.
+  const tp = el('option', { value: 'test_pattern' }, 'Test pattern (SMPTE bars)');
+  if (current === 'test_pattern') tp.selected = true;
+  sel.appendChild(tp);
+}
+
+function populateDecklinkDropdown(idx) {
+  const sel = document.getElementById(`tile-dl-${idx}`);
+  if (!sel) return;
+  const current = tileState[idx]?.snapshot?.decklink_device_name;
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '__none__' }, '— pick output —'));
+  const devices = knownDecklink.devices || [];
+  for (const d of devices) {
+    const opt = el('option', { value: d.name }, d.name);
+    if (current === d.name) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  // Once a device is picked, also populate the mode dropdown.
+  if (current) populateModeDropdown(idx, current);
+}
+
+function populateModeDropdown(idx, deviceName) {
+  const sel = document.getElementById(`tile-mode-${idx}`);
+  if (!sel) return;
+  const device = (knownDecklink.devices || []).find(d => d.name === deviceName);
+  sel.innerHTML = '';
+  if (!device || !device.modes || !device.modes.length) {
+    sel.appendChild(el('option', { value: '__none__' }, '— no modes —'));
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  sel.appendChild(el('option', { value: '__none__' }, '— pick mode —'));
+  const currentCode = tileState[idx]?.snapshot?.decklink_format_code;
+  for (const m of device.modes) {
+    const label = `${m.width}x${m.height} ${(m.fps_num/(m.fps_den||1)).toFixed(2)} (${m.format_code})`;
+    const opt = el('option', { value: m.format_code }, label);
+    if (currentCode === m.format_code) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function setAudioDropdown(idx) {
+  const sel = document.getElementById(`tile-audio-${idx}`);
+  if (!sel) return;
+  const cur = tileState[idx]?.snapshot?.audio_mode || 'auto';
+  for (const opt of sel.options) opt.selected = (opt.value === cur);
+  // Show the Custom-audio sub-row (device picker + L/R channel inputs)
+  // when the operator picked Custom mode. Hidden for Auto/Silent.
+  toggleAudioCustomRow(idx, cur === 'custom');
+}
+
+// -------------------------------------------------------------------
+// Setting changes
+// -------------------------------------------------------------------
+
+async function applySettings(idx, payload) {
+  try {
+    await fetchJson(`/api/i/${idx}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    toast(`Tile ${idx + 1} settings: ${e.message}`, 'bad');
+    throw e;
+  }
+}
+
+async function onSourceChange(idx, value) {
+  if (value === '__none__') return;
+  if (value.startsWith('ndi:')) {
+    await applySettings(idx, { source_id: 'ndi', ndi_source_name: value.slice(4) });
+  } else if (value.startsWith('omt:')) {
+    await applySettings(idx, { source_id: 'omt', omt_source_name: value.slice(4) });
+  } else if (value.startsWith('camera:')) {
+    // Format: "camera:<index>|<name>". Use the platform-appropriate
+    // source_id; backend's source factories treat avfoundation
+    // (macOS) and dshow (Windows) interchangeably for naming.
+    const rest = value.slice(7);
+    const pipe = rest.indexOf('|');
+    const index = pipe >= 0 ? parseInt(rest.slice(0, pipe), 10) || 0 : 0;
+    const name = pipe >= 0 ? rest.slice(pipe + 1) : '';
+    const platformSrcId = navigator.platform.toLowerCase().includes('mac')
+      ? 'avfoundation' : 'dshow';
+    await applySettings(idx, {
+      source_id: platformSrcId,
+      av_video_index: index,
+      av_video_name: name,
+    });
+  } else if (value.startsWith('screen:')) {
+    const index = parseInt(value.slice(7), 10) || 0;
+    // Backend source_id for screen capture is "screen_capture"; on
+    // Windows that internally selects gdigrab, on macOS it selects
+    // avfoundation with the screen device index.
+    await applySettings(idx, {
+      source_id: 'screen_capture',
+      av_video_index: index,
+    });
+  } else if (value === 'test_pattern') {
+    await applySettings(idx, { source_id: 'test_pattern' });
+  }
+}
+
+async function onDecklinkChange(idx, deviceName) {
+  if (deviceName === '__none__') return;
+  await applySettings(idx, {
+    destination_type: 'decklink',
+    decklink_device_name: deviceName
+  });
+  populateModeDropdown(idx, deviceName);
+}
+
+async function onModeChange(idx, formatCode) {
+  if (formatCode === '__none__') return;
+  // Find the human-readable mode label for decklink_output_mode.
+  const dl = tileState[idx]?.snapshot?.decklink_device_name;
+  const device = (knownDecklink.devices || []).find(d => d.name === dl);
+  const mode = device?.modes?.find(m => m.format_code === formatCode);
+  const modeLabel = mode ? `${mode.width}p${(mode.fps_num/(mode.fps_den||1)).toFixed(0)}` : formatCode;
+  await applySettings(idx, {
+    destination_type: 'decklink',
+    decklink_format_code: formatCode,
+    decklink_output_mode: modeLabel
+  });
+}
+
+async function onAudioChange(idx, mode) {
+  await applySettings(idx, { audio_mode: mode });
+}
+
+async function onStart(idx) {
+  try {
+    await fetchJson(`/api/i/${idx}/start`, { method: 'POST' });
+    toast(`Tile ${idx + 1}: starting…`, 'good');
+  } catch (e) {
+    toast(`Tile ${idx + 1} start: ${e.message}`, 'bad');
+  }
+}
+
+async function onStop(idx) {
+  // alpha.41 destructive-op guard: when the tile is in Streaming
+  // (or Connecting), a stray click takes a real output off-air. Pop
+  // a synchronous confirm() with the current bitrate + destination
+  // so the operator sees what they're about to interrupt. Skipped
+  // for Idle / Interrupted / Reconnecting tiles where there's no
+  // live content to lose.
+  const snap = tileState[idx]?.snapshot;
+  const status = (snap?.stats?.status || '').toLowerCase();
+  if (STREAMING_STATUSES.has(status)) {
+    const bitrate = snap?.stats?.bitrate || 0;
+    const fps = snap?.stats?.fps || 0;
+    const dest = describeDest(snap);
+    const msg = `Stop tile ${idx + 1}?\n\n` +
+      `Currently ${status === 'streaming' ? 'streaming' : 'connecting'}: ` +
+      `${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps\n` +
+      `→ ${dest}`;
+    if (!confirm(msg)) return;
+  }
+  try {
+    await fetchJson(`/api/i/${idx}/stop`, { method: 'POST' });
+    toast(`Tile ${idx + 1}: stopping`, 'good');
+  } catch (e) {
+    toast(`Tile ${idx + 1} stop: ${e.message}`, 'bad');
+  }
+}
+
+async function onStopAll() {
+  // Find the streaming tiles up front so we can include the count
+  // in the confirm prompt. "Reconnecting" tiles count too — they're
+  // a stream the operator intends to recover, stopping them gives
+  // up the recovery.
+  const active = TILES.filter(idx => {
+    const status = (tileState[idx]?.snapshot?.stats?.status || '').toLowerCase();
+    return status === 'streaming' || status === 'connecting' || status === 'reconnecting';
+  });
+  if (active.length === 0) {
+    toast('No active tiles to stop', 'good');
+    return;
+  }
+  if (!confirm(`Stop ALL ${active.length} active tile${active.length === 1 ? '' : 's'}?\n\nThis takes every running output off-air.`)) {
+    return;
+  }
+  for (const idx of active) {
+    try { await fetch(`/api/i/${idx}/stop`, { method: 'POST' }); } catch {}
+  }
+  toast(`Stopped ${active.length} tile${active.length === 1 ? '' : 's'}`, 'good');
+}
+
+// Emergency escape hatch — OS-kills every FFmpeg on the machine
+// (lock-free, works even when a tile is wedged in Connecting/Streaming
+// and per-tile Stop won't respond), then resets every tile to Idle.
+async function onForceStopAll() {
+  if (!confirm(
+    "FORCE STOP ALL?\n\n" +
+    "Kills EVERY FFmpeg process on this machine at the OS level " +
+    "(including any unrelated ones) and resets all tiles to Idle. " +
+    "Use this when a tile is wedged and Stop won't clear it."
+  )) return;
+  try {
+    const r = await fetch('/api/i/0/force-stop-all', { method: 'POST' });
+    const j = await r.json();
+    toast(j.message || `Force-stopped (killed ${j.killed ?? '?'})`, 'good');
+  } catch (e) {
+    toast(`Force stop failed: ${e.message}`, 'bad');
+  }
+}
+
+// -------------------------------------------------------------------
+// alpha.41 system health polling
+// -------------------------------------------------------------------
+
+async function pollSystemHealth() {
+  try {
+    const data = await fetchJson('/api/system-health');
+    renderSystemHealth(data);
+  } catch (e) {
+    const pill = document.getElementById('sys-pill');
+    const lbl = document.getElementById('sys-pill-label');
+    if (pill && lbl) {
+      pill.className = 'sys-pill unknown';
+      lbl.textContent = 'monitor offline';
+      pill.title = 'Cannot reach /api/system-health';
+    }
+  }
+}
+
+function renderSystemHealth(data) {
+  const pill = document.getElementById('sys-pill');
+  const lbl = document.getElementById('sys-pill-label');
+  if (!pill || !lbl) return;
+  const status = data.status || 'unknown';
+  pill.className = 'sys-pill ' + status;
+  const cpu = Math.round(data.cpu_percent || 0);
+  const memUsed = data.mem_used_mb || 0;
+  const memTotal = data.mem_total_mb || 0;
+  const memPct = Math.round(data.mem_percent || 0);
+
+  let summary;
+  if (status === 'unknown') {
+    summary = 'starting…';
+  } else if (status === 'red') {
+    summary = (data.warning || `CPU ${cpu}% · MEM ${memPct}%`).split('—')[0].trim();
+  } else {
+    summary = `CPU ${cpu}% · MEM ${memPct}%`;
+  }
+  lbl.textContent = summary;
+
+  const tooltipParts = [
+    `Status: ${status.toUpperCase()}`,
+    `CPU: ${cpu}% (${data.cpu_count || '?'} cores)`,
+    `Memory: ${memPct}% — ${(memUsed / 1024).toFixed(1)} / ${(memTotal / 1024).toFixed(1)} GB`,
+  ];
+  if (data.warning) tooltipParts.push('', data.warning);
+  pill.title = tooltipParts.join('\n');
+}
+
+// -------------------------------------------------------------------
+// State polling
+// -------------------------------------------------------------------
+
+function statusToClass(status) {
+  switch ((status || '').toLowerCase()) {
+    case 'streaming': return 'streaming';
+    case 'connecting': return 'connecting';
+    case 'reconnecting': return 'reconnecting';
+    case 'interrupted': return 'interrupted';
+    case 'preview': return 'connecting';
+    case 'switching': return 'connecting'; // alpha.59 hot-swap: yellow in-progress
+    default: return 'idle';
+  }
+}
+
+function statusPillText(snap) {
+  const s = snap?.stats?.status || 'Idle';
+  if (s.toLowerCase() === 'reconnecting') {
+    const next = snap.stats?.reconnect_next_secs || 0;
+    const att = snap.stats?.reconnect_attempt || 0;
+    const max = snap?.auto_reconnect_max_attempts || 12;
+    return `Reconnect ${next}s · ${att}/${max}`;
+  }
+  return s;
+}
+
+function describeSource(snap) {
+  switch (snap.source_id) {
+    case 'ndi': return snap.ndi_source_name ? `NDI · ${snap.ndi_source_name}` : 'NDI (no source)';
+    case 'omt': return snap.omt_source_name ? `OMT · ${snap.omt_source_name}` : 'OMT (no source)';
+    case 'test_pattern': return 'Test pattern';
+    case 'avfoundation': return snap.av_video_name ? `Camera · ${snap.av_video_name}` : 'Camera';
+    case 'screen_capture': return 'Screen';
+    case 'pipe': return snap.pipe_path ? `Pipe · ${snap.pipe_path}` : 'Pipe';
+    case 'srt_listen': return 'SRT receiver';
+    case 'rtmp_listen': return 'RTMP receiver';
+    default: return snap.source_id || '—';
+  }
+}
+
+function describeDest(snap) {
+  if (snap.destination_type === 'decklink') {
+    const dev = snap.decklink_device_name || '(pick DeckLink)';
+    const mode = snap.decklink_output_mode || snap.decklink_format_code || '';
+    return mode ? `${dev} · ${mode}` : dev;
+  }
+  // ATEM / SRT remote — show host:port from the active or custom URL.
+  // current_url is populated by the backend from XML or custom_url;
+  // fall back to raw custom_url for newly-configured tiles where the
+  // service has not yet been resolved.
+  const url = snap.current_url || snap.custom_url || '';
+  if (url) {
+    try {
+      // Strip protocol + path so it fits in the header line.
+      const stripped = url.replace(/^[a-z]+:\/\//i, '').split('?')[0].split('/')[0];
+      return `Remote · ${stripped}`;
+    } catch (_e) { return `Remote · ${url}`; }
+  }
+  return 'Remote (configure URL + key)';
+}
+
+function renderTile(idx, data) {
+  const snap = data.snapshot || data;
+  const tile = document.getElementById(`tile-${idx}`);
+  if (!tile) return;
+  const klass = statusToClass(snap?.stats?.status);
+  tile.className = 'tile' + (klass ? ' ' + klass : '');
+
+  // Header name = destination summary so the operator sees at a
+  // glance what each tile is sending TO (vs. tile idx alone).
+  const name = document.getElementById(`tile-name-${idx}`);
+  name.textContent = describeDest(snap) || `Tile ${idx + 1}`;
+
+  const pill = document.getElementById(`tile-pill-${idx}`);
+  pill.className = 'pill ' + klass;
+  pill.textContent = statusPillText(snap);
+
+  // Preview overlay — source + bitrate/fps/frames on left, error on right.
+  // Tooltip on hover shows extended stats: duration, frames dropped,
+  // reconnect history, speed, codec. Broadcast operators rely on these
+  // for go/no-go decisions; surface them without cluttering the tile.
+  const info = document.getElementById(`tile-info-${idx}`);
+  const stats = snap?.stats || {};
+  const bitrate = stats.bitrate || 0;
+  const fps = stats.fps || 0;
+  const framesSent = stats.frames_sent || 0;
+  const framesDropped = stats.frames_dropped || 0;
+  const duration = stats.duration || '00:00:00:00';
+  const speed = stats.speed || 0;
+  const totalReconnects = stats.total_reconnects_this_session || 0;
+  const srcSummary = describeSource(snap);
+  const fmtFrames = (n) => n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  if (klass === 'streaming') {
+    info.textContent = `${srcSummary} · ${(bitrate / 1000).toFixed(1)} Mbps · ${fps.toFixed(1)} fps · ${fmtFrames(framesSent)} fr`;
+  } else if (klass === 'connecting') {
+    info.textContent = `${srcSummary} · connecting…`;
+  } else if (klass === 'reconnecting') {
+    info.textContent = `${srcSummary} · attempt ${stats.reconnect_attempt || 0}/${snap?.auto_reconnect_max_attempts || 12} · ${stats.reconnect_next_secs || 0}s`;
+  } else {
+    info.textContent = srcSummary;
+  }
+  // Extended-stats tooltip on the info line.
+  const tooltipLines = [
+    `Status: ${stats.status || 'Idle'}`,
+    `Bitrate: ${(bitrate / 1000).toFixed(2)} Mbps`,
+    `FPS: ${fps.toFixed(2)}`,
+    `Frames sent: ${framesSent.toLocaleString()}`,
+    `Frames dropped: ${framesDropped.toLocaleString()}`,
+    `Duration: ${duration}`,
+    `Speed: ${speed.toFixed(2)}x`,
+  ];
+  if (totalReconnects > 0) tooltipLines.push(`Reconnects this session: ${totalReconnects}`);
+  if (snap?.video_codec) tooltipLines.push(`Codec: ${snap.video_codec}`);
+  if (snap?.video_encoder) tooltipLines.push(`Encoder: ${snap.video_encoder}`);
+  info.title = tooltipLines.join('\n');
+
+  const errEl = document.getElementById(`tile-err-${idx}`);
+  errEl.textContent = stats.error ? String(stats.error).slice(0, 60) : '';
+
+  // alpha.50: populate the expandable stats panel when it's open.
+  // No-op cost when collapsed (checked inside renderStatsPanel).
+  renderStatsPanel(idx, snap);
+
+  // Reflect server state in dropdowns. setAudioDropdown is safe to
+  // call every poll; the dest-type dropdown is here too so a state
+  // change from another tab is reflected.
+  setAudioDropdown(idx);
+  const dt = document.getElementById(`tile-desttype-${idx}`);
+  if (dt) {
+    const want = snap.destination_type || 'decklink';
+    if (dt.value !== want) {
+      dt.value = want;
+      // Type changed externally — rebuild the field strip to match.
+      renderDestFields(idx);
+    }
+  }
+
+  // alpha.41/42 destructive-op guard: disable configuration controls
+  // while the tile is Streaming or Connecting so the live config
+  // can't silently drift. Lifted as soon as the tile is Idle /
+  // Interrupted / Reconnecting (Reconnecting → operator should be
+  // free to reconfigure during backoff).
+  const locked = STREAMING_STATUSES.has((snap?.stats?.status || '').toLowerCase());
+  const lockTitle = locked
+    ? 'Locked while streaming — Stop the tile to change configuration'
+    : '';
+  const controlIds = [
+    `tile-src-${idx}`,
+    `tile-audio-${idx}`,
+    `tile-audiodev-${idx}`,
+    `tile-pan-l-${idx}`,
+    `tile-pan-r-${idx}`,
+    `tile-desttype-${idx}`,
+    `tile-dl-${idx}`,
+    `tile-mode-${idx}`,
+    `tile-url-${idx}`,
+    `tile-key-${idx}`,
+    `tile-start-${idx}`,
+  ];
+  for (const ctrl of controlIds) {
+    const elx = document.getElementById(ctrl);
+    if (!elx) continue;
+    if (ctrl === `tile-mode-${idx}` && !snap?.decklink_device_name) {
+      continue; // mode dropdown's own "no device" disable wins
+    }
+    if (ctrl === `tile-start-${idx}`) {
+      // Start should only be disabled while ACTIVELY streaming.
+      // Connecting allowed (clicking Start does nothing anyway).
+      elx.disabled = (snap?.stats?.status || '').toLowerCase() === 'streaming';
+    } else {
+      elx.disabled = locked;
+    }
+    if (locked) elx.title = lockTitle;
+    else elx.removeAttribute('title');
+  }
+}
+
+async function pollTile(idx) {
+  try {
+    const data = await fetchJson(`/api/i/${idx}/state`);
+    const wasFirst = !tileState[idx];
+    // Backend's StateResponse uses #[serde(flatten)] on snapshot, so
+    // the snapshot fields are at the TOP LEVEL of `data`, not nested
+    // under a `snapshot` key. Self-reference here so the existing
+    // `tileState[idx]?.snapshot?.field` accessors throughout this
+    // file all resolve uniformly.
+    data.snapshot = data;
+    tileState[idx] = data;
+    if (wasFirst) {
+      populateSourceDropdown(idx);
+      // renderDestFields seeds the dest-fields container with the
+      // appropriate widgets (DeckLink dropdowns vs. Remote ATEM
+      // text inputs) based on the persisted destination_type, then
+      // calls populateDecklinkDropdown for the DeckLink branch.
+      renderDestFields(idx);
+    }
+    renderTile(idx, data);
+  } catch (e) {
+    console.warn(`tile ${idx} state poll failed:`, e);
+  }
+}
+
+async function pollAllTiles() {
+  await Promise.all(TILES.map(pollTile));
+}
+
+// Preview poll — refresh JPEG every PREVIEW_INTERVAL_MS by bumping a
+// cache-buster query param. We only refresh tiles whose status is
+// streaming or preview to save bandwidth on idle tiles.
+function refreshPreviews() {
+  for (const idx of TILES) {
+    const snap = tileState[idx]?.snapshot;
+    const status = (snap?.stats?.status || '').toLowerCase();
+    const previewState = (tileState[idx]?.preview?.state || '').toLowerCase();
+    const shouldShow = status === 'streaming' || previewState === 'running';
+    const container = document.getElementById(`tile-preview-${idx}`);
+    if (!container) continue;
+    const existing = container.querySelector('img');
+    const placeholder = container.querySelector('.preview-placeholder');
+    if (shouldShow) {
+      tilePreviewCounter[idx] = (tilePreviewCounter[idx] || 0) + 1;
+      const src = `/api/i/${idx}/preview?t=${tilePreviewCounter[idx]}`;
+      if (existing) {
+        existing.src = src;
+      } else {
+        const img = el('img', { alt: '', onerror: () => { img.remove(); if (placeholder) placeholder.style.display = ''; } });
+        img.onload = () => { if (placeholder) placeholder.style.display = 'none'; };
+        img.src = src;
+        container.insertBefore(img, container.firstChild);
+      }
+    } else {
+      if (existing) existing.remove();
+      if (placeholder) placeholder.style.display = '';
+    }
+  }
+}
+
+// -------------------------------------------------------------------
+// Bootstrap
+// -------------------------------------------------------------------
+
+async function bootstrap() {
+  const grid = $('#grid');
+  for (const idx of TILES) grid.appendChild(buildTile(idx));
+
+  $('#refresh-all').addEventListener('click', async () => {
+    toast('Refreshing…', 'good');
+    knownDecklink = await loadDecklinkOutputs();
+    knownNdi = await loadNdiSenders();
+    knownOmt = await loadOmtSenders();
+    knownDevices = await loadDevices();
+    for (const idx of TILES) {
+      populateSourceDropdown(idx);
+      // Rebuild dest fields so a freshly-attached DeckLink device
+      // appears in the dropdown without a full page reload.
+      renderDestFields(idx);
+    }
+    await pollAllTiles();
+  });
+  $('#stop-all').addEventListener('click', onStopAll);
+  $('#force-stop-all').addEventListener('click', onForceStopAll);
+
+  knownDecklink = await loadDecklinkOutputs();
+  knownNdi = await loadNdiSenders();
+  knownOmt = await loadOmtSenders();
+  knownDevices = await loadDevices();
+  await pollAllTiles();
+  for (const idx of TILES) {
+    populateSourceDropdown(idx);
+    // Dest-fields strip already rendered by pollTile on first poll;
+    // populateDecklinkDropdown ran inside renderDestFields if the
+    // current dest type is "decklink". No extra call needed here.
+  }
+
+  // alpha.41: kick off system health polling alongside tile state.
+  // Fire one immediate poll so the pill doesn't sit on "starting…"
+  // for the full interval before the first real reading.
+  pollSystemHealth();
+  setInterval(pollSystemHealth, SYS_HEALTH_INTERVAL_MS);
+
+  // alpha.50: wire the system pill to open the shared drawer
+  // (system-drawer.js). Same component the single-view uses.
+  const sysPillEl = document.getElementById('sys-pill');
+  if (sysPillEl && typeof window.createSystemDrawer === 'function') {
+    window.createSystemDrawer({
+      anchorEl: sysPillEl,
+      getLogUrl: () => '/api/i/0/log',
+    });
+  }
+
+  // alpha.45: audio meters per tile. 4Hz polls of /api/i/N/audio-levels
+  // (alpha.31 endpoint). Graceful 404 fallback on older backends keeps
+  // meters in a muted "idle" state rather than erroring. The meters
+  // are useful even when not streaming — operators can verify the
+  // chosen audio device is producing levels via the Audio Mixer's
+  // built-in monitor path.
+  for (const idx of TILES) {
+    updateMeter(idx, -120, -120, -120, -120, true); // initial paint
+  }
+  setInterval(pollAudioLevels, 250); // 4Hz
+
+  // alpha.50: restore per-tile stats-panel expand preference from
+  // localStorage so the operator's chosen layout survives reloads.
+  applyStatsPanelPersistedState();
+
+  setInterval(pollAllTiles, POLL_INTERVAL_MS);
+  setInterval(refreshPreviews, PREVIEW_INTERVAL_MS);
+  refreshPreviews();
+}
+
+window.addEventListener('DOMContentLoaded', bootstrap);
+</script>
+
+</body>
+</html>

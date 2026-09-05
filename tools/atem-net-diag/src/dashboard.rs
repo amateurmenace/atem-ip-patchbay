@@ -443,6 +443,59 @@ pub struct StateResponse<'a> {
     /// This machine's own IPs. Sent to the UI so the wizard can
     /// pre-fill Step 1 ("Identify the port the peer Mac is on").
     pub local_ips: Vec<String>,
+    /// alpha.28: pre-show readiness check panel. Aggregates the
+    /// existing dashboard signals (WAN IP, headroom, UDM polling,
+    /// ATEM reachability, capture visibility, etc.) into one
+    /// go/no-go panel the operator scans before a live show. Pure
+    /// projection over the other state fields; no new polling.
+    pub pre_show: PreShowVerdict,
+}
+
+/// alpha.28: status of an individual pre-show check. Maps to a
+/// colored icon in the UI.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreShowStatus {
+    /// Check passes; nothing to surface.
+    Pass,
+    /// Check has a yellow flag — operator should look but isn't
+    /// blocking. Examples: WAN headroom 70-90%, ATEM seen but stale.
+    Warn,
+    /// Check is failing; operator should fix before going live.
+    /// Examples: WAN headroom >90%, ATEM not reachable, capture
+    /// visibility PossiblyBlind.
+    Fail,
+    /// Precondition not met so the check didn't run. Examples: WAN
+    /// upload cap not configured (can't compute headroom),
+    /// UDM not configured (can't poll for ATEM client). Visually
+    /// muted in the UI — not green, not yellow, just info.
+    Skip,
+}
+
+/// alpha.28: one row in the pre-show check panel. `id` is the stable
+/// identifier the UI keys off (for stable DOM updates across poll
+/// ticks); `label` is the operator-facing display name; `detail`
+/// is the current value or short summary; `hint` is optional
+/// remediation advice surfaced as a smaller line below the row when
+/// the check is failing.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreShowCheck {
+    pub id: String,
+    pub label: String,
+    pub status: PreShowStatus,
+    pub detail: String,
+    pub hint: Option<String>,
+}
+
+/// alpha.28: aggregate pre-show verdict. `overall` is the worst
+/// status across all checks (Fail > Warn > Pass > Skip); `summary`
+/// is a one-line "X failed · Y warnings" headline; `checks` is the
+/// per-row list.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreShowVerdict {
+    pub overall: PreShowStatus,
+    pub summary: String,
+    pub checks: Vec<PreShowCheck>,
 }
 
 #[derive(Serialize)]
@@ -509,8 +562,14 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_UDM_HOST.to_string());
-    let unifi_credentials = unifi::read_credentials_from_env();
-    let unifi_configured = unifi_credentials.is_some();
+    let env_credentials = unifi::read_credentials_from_env();
+    let unifi_configured = env_credentials.is_some();
+    // Shared credentials slot — env-read creds at startup are the
+    // seed; the dashboard form's POST /api/config { unifi_api_key }
+    // updates the slot at runtime. Polling threads check on each
+    // tick so a runtime update takes effect within ~2s.
+    let creds_holder: unifi::CredentialsHolder =
+        Arc::new(Mutex::new(env_credentials));
 
     // Snapshot this machine's own IPv4 addresses once at startup.
     // The monitor loop uses these to classify each captured flow's
@@ -566,40 +625,46 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .spawn(move || probe_loop(probe_state))
         .expect("spawn probe loop");
 
-    // UDM polling thread — only spawn if creds are configured.
-    // No creds means the dashboard reports "UDM: not configured"
-    // and the operator can still use the tool with active probes
-    // (Standby mode) and tshark monitoring as data sources.
-    if let Some(creds) = unifi_credentials {
+    // UDM polling threads — always spawn. Each loop reads creds
+    // from the shared `creds_holder` on every tick; when None it
+    // idles in NotConfigured. This is how the dashboard form's
+    // POST /api/config { unifi_api_key } takes effect at runtime
+    // without a binary restart.
+    {
         let unifi_state = state.clone();
-        let host = state.lock().unwrap().config.unifi_host.clone();
-        let creds_for_clients = creds.clone();
+        let unifi_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("unifi-poll".into())
-            .spawn(move || unifi::poll_loop(host, creds_for_clients, unifi_state))
+            .spawn(move || unifi::poll_loop(unifi_state, unifi_creds))
             .expect("spawn unifi poll");
+    }
 
-        // Separate thread for WAN bandwidth — same UDM, different
-        // endpoint. Kept independent so a slow / failing WAN endpoint
-        // doesn't starve client polling and vice versa.
+    // Separate thread for WAN bandwidth — same UDM, different
+    // endpoint. Kept independent so a slow / failing WAN endpoint
+    // doesn't starve client polling and vice versa.
+    {
         let wan_state = state.clone();
-        let wan_host = state.lock().unwrap().config.unifi_host.clone();
-        let wan_creds = creds.clone();
+        let wan_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("wan-poll".into())
-            .spawn(move || unifi::wan_poll_loop(wan_host, wan_creds, wan_state))
+            .spawn(move || unifi::wan_poll_loop(wan_state, wan_creds))
             .expect("spawn wan poll");
+    }
 
-        // System poll: switches + alarms (slower cadence: 5s).
+    // System poll: switches + alarms (slower cadence: 5s).
+    {
         let sys_state = state.clone();
-        let sys_host = state.lock().unwrap().config.unifi_host.clone();
+        let sys_creds = creds_holder.clone();
         std::thread::Builder::new()
             .name("system-poll".into())
-            .spawn(move || unifi::system_poll_loop(sys_host, creds, sys_state))
+            .spawn(move || unifi::system_poll_loop(sys_state, sys_creds))
             .expect("spawn system poll");
+    }
 
-        // Reverse-DNS resolver thread: pulls source IPs out of the
-        // pending queue, runs `host` to look them up, caches results.
+    // Reverse-DNS resolver thread: pulls source IPs out of the
+    // pending queue, runs `host` to look them up, caches results.
+    // No creds needed; just shells out to the OS resolver.
+    {
         let rdns_state = state.clone();
         std::thread::Builder::new()
             .name("rdns-worker".into())
@@ -655,47 +720,82 @@ pub fn run(cli: &crate::Cli, port: u16) -> ! {
         .stderr(Stdio::null())
         .spawn();
 
-    for mut request in server.incoming_requests() {
-        let url = request.url().to_string();
-        let method = request.method().clone();
-        let is_post = matches!(method, tiny_http::Method::Post);
-        let response = match (is_post, url.as_str()) {
-            (false, "/") | (false, "/index.html") => {
-                let mut r = Response::from_string(INDEX_HTML);
-                r.add_header(html_header());
-                r
-            }
-            (false, "/api/state") => {
-                let body = build_state_json(&state);
-                let mut r = Response::from_string(body);
-                r.add_header(json_header());
-                r.add_header(no_cache_header());
-                r
-            }
-            (true, "/api/config") => {
-                let mut body = String::new();
-                if request.as_reader().read_to_string(&mut body).is_err() {
-                    Response::from_string(r#"{"error":"failed to read body"}"#)
-                        .with_status_code(400)
-                } else {
-                    let result = apply_config_update(&state, &body);
-                    let mut r = Response::from_string(match &result {
-                        Ok(()) => r#"{"ok":true}"#.to_string(),
-                        Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
-                    });
-                    r.add_header(json_header());
-                    r.add_header(no_cache_header());
-                    if result.is_err() {
-                        r = r.with_status_code(400);
-                    }
-                    r
-                }
-            }
-            _ => Response::from_string("404").with_status_code(404),
-        };
-        let _ = request.respond(response);
+    // alpha.43: spawn-per-request multithreading. tiny_http's
+    // incoming_requests() is a single-threaded iterator — without
+    // this, /api/config can block for many seconds queued behind a
+    // slow /api/state poll (build_state_json iterates flows + probes
+    // under state.lock; on a busy production network with hundreds
+    // of UDM clients + many SRT flows + a heavy probe history that's
+    // hundreds of ms per call, polled at 1Hz). The result the
+    // operator saw was "Saving for a long time but nothing seems to
+    // happen" — the POST was queued behind the polls and never
+    // actually processed until something cleared the queue.
+    //
+    // Each request gets its own short-lived OS thread. State + creds
+    // Arcs are cloned in (cheap). Per-request thread overhead is
+    // ~tens of microseconds — negligible compared to the worst-case
+    // serial queueing that motivated this change. A real thread-pool
+    // would be tidier but spawn-per-request is enough for a tool
+    // that handles maybe 2-3 req/sec at peak (1Hz state poll + the
+    // occasional config POST + asset fetches).
+    let state_for_loop = state;
+    let creds_for_loop = creds_holder;
+    for request in server.incoming_requests() {
+        let state = state_for_loop.clone();
+        let creds = creds_for_loop.clone();
+        std::thread::spawn(move || {
+            handle_request(request, state, creds);
+        });
     }
     unreachable!("incoming_requests is an infinite iterator");
+}
+
+/// Handle one HTTP request. Runs in a dedicated thread spawned by
+/// the accept loop so a slow /api/state response doesn't block
+/// /api/config (or vice versa).
+fn handle_request(
+    mut request: tiny_http::Request,
+    state: Arc<Mutex<DashboardState>>,
+    creds_holder: unifi::CredentialsHolder,
+) {
+    let url = request.url().to_string();
+    let method = request.method().clone();
+    let is_post = matches!(method, tiny_http::Method::Post);
+    let response = match (is_post, url.as_str()) {
+        (false, "/") | (false, "/index.html") => {
+            let mut r = Response::from_string(INDEX_HTML);
+            r.add_header(html_header());
+            r
+        }
+        (false, "/api/state") => {
+            let body = build_state_json(&state);
+            let mut r = Response::from_string(body);
+            r.add_header(json_header());
+            r.add_header(no_cache_header());
+            r
+        }
+        (true, "/api/config") => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                Response::from_string(r#"{"error":"failed to read body"}"#)
+                    .with_status_code(400)
+            } else {
+                let result = apply_config_update(&state, &creds_holder, &body);
+                let mut r = Response::from_string(match &result {
+                    Ok(()) => r#"{"ok":true}"#.to_string(),
+                    Err(e) => format!(r#"{{"error":{}}}"#, json_escape(e)),
+                });
+                r.add_header(json_header());
+                r.add_header(no_cache_header());
+                if result.is_err() {
+                    r = r.with_status_code(400);
+                }
+                r
+            }
+        }
+        _ => Response::from_string("404").with_status_code(404),
+    };
+    let _ = request.respond(response);
 }
 
 fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
@@ -823,6 +923,7 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
     // hint, so stable ordering matters for keyboard-focus UX too.
     let mut local_ips: Vec<String> = s.local_ips.iter().cloned().collect();
     local_ips.sort();
+    let pre_show = compute_preshow(&s, now, &lan_visibility);
     let resp = StateResponse {
         started_at: s.started_at,
         now,
@@ -852,8 +953,311 @@ fn build_state_json(state: &Arc<Mutex<DashboardState>>) -> String {
         rdns_cache,
         lan_visibility,
         local_ips,
+        pre_show,
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
+}
+
+/// alpha.28: aggregate pre-show readiness from the existing state.
+/// Pure projection — no new polling, no new state, no side effects.
+/// Eight checks aimed at the operator's "am I ready to go live?"
+/// question, ordered roughly by how often each catches a real issue.
+fn compute_preshow(
+    s: &DashboardState,
+    now: u64,
+    lan_visibility: &LanVisibility,
+) -> PreShowVerdict {
+    let mut checks: Vec<PreShowCheck> = Vec::new();
+
+    // 1. WAN IP detected. Comes from the gateway's status — if WAN
+    // polling isn't healthy this is naturally Skip / Warn.
+    let wan_ip = s.wan_snapshot.as_ref().and_then(|w| w.wan_ip.as_ref());
+    checks.push(match wan_ip {
+        Some(ip) if !ip.is_empty() => PreShowCheck {
+            id: "wan_ip".into(),
+            label: "WAN IP detected".into(),
+            status: PreShowStatus::Pass,
+            detail: ip.clone(),
+            hint: None,
+        },
+        _ => {
+            let is_skip = matches!(s.wan_status, WanStatus::NotConfigured);
+            PreShowCheck {
+                id: "wan_ip".into(),
+                label: "WAN IP detected".into(),
+                status: if is_skip {
+                    PreShowStatus::Skip
+                } else {
+                    PreShowStatus::Warn
+                },
+                detail: if is_skip {
+                    "UDM gateway polling not configured".into()
+                } else {
+                    "no WAN IP reported by gateway".into()
+                },
+                hint: if is_skip {
+                    Some("Configure UDM credentials so net-utility can poll the gateway.".into())
+                } else {
+                    Some("Check whether the UDM's WAN interface has a current upstream lease.".into())
+                },
+            }
+        }
+    });
+
+    // 2. WAN headroom. Needs both a configured upload cap AND a
+    // current upload kbps reading. Bucket: pass <70%, warn 70-90%,
+    // fail >90%.
+    let cap_mbps = s.config.wan_upload_cap_mbps;
+    let cur_up_kbps = s.wan_snapshot.as_ref().map(|w| w.upload_kbps).unwrap_or(0);
+    if cap_mbps > 0.0 {
+        let cap_kbps = cap_mbps * 1000.0;
+        let pct = (cur_up_kbps as f64) / cap_kbps * 100.0;
+        let (status, hint) = if pct >= 90.0 {
+            (
+                PreShowStatus::Fail,
+                Some(
+                    "WAN upload is saturated. Free bandwidth (pause other uploads, lower stream bitrate) before going live."
+                        .into(),
+                ),
+            )
+        } else if pct >= 70.0 {
+            (
+                PreShowStatus::Warn,
+                Some(
+                    "WAN upload is close to the configured cap. Watch for stream stalls under load."
+                        .into(),
+                ),
+            )
+        } else {
+            (PreShowStatus::Pass, None)
+        };
+        checks.push(PreShowCheck {
+            id: "wan_headroom".into(),
+            label: "WAN headroom".into(),
+            status,
+            detail: format!(
+                "{:.1}% used ({} kbps / {} Mbps)",
+                pct, cur_up_kbps, cap_mbps as u64
+            ),
+            hint,
+        });
+    } else {
+        checks.push(PreShowCheck {
+            id: "wan_headroom".into(),
+            label: "WAN headroom".into(),
+            status: PreShowStatus::Skip,
+            detail: "upload cap not configured".into(),
+            hint: Some("Set wan_upload_cap_mbps via the UDM controller card to enable headroom monitoring.".into()),
+        });
+    }
+
+    // 3. UDM polling healthy. Drives most other checks; if this is
+    // Fail then several below will be Skip.
+    checks.push(match &s.unifi_status {
+        UnifiStatus::Connected { .. } => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Pass,
+            detail: format!("{} clients", s.unifi_clients.len()),
+            hint: None,
+        },
+        UnifiStatus::Connecting => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Warn,
+            detail: "connecting".into(),
+            hint: Some("First poll hasn't completed yet. Give it 5 seconds.".into()),
+        },
+        UnifiStatus::NotConfigured => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Skip,
+            detail: "not configured".into(),
+            hint: Some("Set UDM_API_KEY in the shell launching net-utility, or use the UDM panel form when it lands.".into()),
+        },
+        UnifiStatus::Failed { error, .. } => PreShowCheck {
+            id: "udm_polling".into(),
+            label: "UDM polling".into(),
+            status: PreShowStatus::Fail,
+            detail: error.clone(),
+            hint: Some("Check UDM_API_KEY validity + UDM controller reachability.".into()),
+        },
+    });
+
+    // 4. ATEM reachable. Looks up the is_atem entry in unifi_clients
+    // and checks last_seen freshness.
+    let atem_client = s.unifi_clients.iter().find(|c| c.is_atem);
+    checks.push(match atem_client {
+        Some(c) => {
+            let stale_secs = now.saturating_sub(c.last_seen);
+            if stale_secs < 60 {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Pass,
+                    detail: format!(
+                        "{} · seen {}s ago",
+                        c.ip.as_deref().unwrap_or("?"),
+                        stale_secs
+                    ),
+                    hint: None,
+                }
+            } else if stale_secs < 300 {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Warn,
+                    detail: format!("last seen {}s ago", stale_secs),
+                    hint: Some(
+                        "ATEM hasn't checked in recently. Power-cycle if you can't reach the ATEM Software Control."
+                            .into(),
+                    ),
+                }
+            } else {
+                PreShowCheck {
+                    id: "atem_reachable".into(),
+                    label: "ATEM reachable".into(),
+                    status: PreShowStatus::Fail,
+                    detail: format!("last seen {}s ago (>5 min stale)", stale_secs),
+                    hint: Some(
+                        "ATEM hasn't been seen in >5 min — check its network cable + power."
+                            .into(),
+                    ),
+                }
+            }
+        }
+        None => {
+            let is_skip = !matches!(s.unifi_status, UnifiStatus::Connected { .. });
+            PreShowCheck {
+                id: "atem_reachable".into(),
+                label: "ATEM reachable".into(),
+                status: if is_skip {
+                    PreShowStatus::Skip
+                } else {
+                    PreShowStatus::Fail
+                },
+                detail: if is_skip {
+                    "depends on UDM polling".into()
+                } else {
+                    "no ATEM client in UDM list".into()
+                },
+                hint: if is_skip {
+                    None
+                } else {
+                    Some(format!(
+                        "Verify the ATEM MAC ({}) matches what UDM sees, or update the configured MAC in net-utility.",
+                        s.config.atem.mac.as_deref().unwrap_or("?")
+                    ))
+                },
+            }
+        }
+    });
+
+    // 5. Capture visibility — surfaces the SPAN-port / blind-mac
+    // gotcha as a pre-show check (the mirror-mode wizard banner
+    // already surfaces it lower on the page; this just brings it
+    // into the operator's at-a-glance verdict).
+    checks.push(match lan_visibility {
+        LanVisibility::SeesPeers => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Pass,
+            detail: "ATEM traffic observed".into(),
+            hint: None,
+        },
+        LanVisibility::PossiblyBlind { .. } => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Fail,
+            detail: "no ATEM traffic visible from this capture interface".into(),
+            hint: Some(
+                "Set up a UDM SPAN port to mirror ATEM traffic to this machine, OR run net-utility on the streamer's host directly. See the mirror-mode wizard below."
+                    .into(),
+            ),
+        },
+        LanVisibility::Unknown => PreShowCheck {
+            id: "capture_visibility".into(),
+            label: "Capture visibility".into(),
+            status: PreShowStatus::Skip,
+            detail: "capture warming up or not started".into(),
+            hint: None,
+        },
+    });
+
+    // 6. Active stream count — info only (always Pass).
+    let atem_ip = s.config.atem.ip.clone();
+    let active_streams = s
+        .flows
+        .iter()
+        .filter(|(_, _)| true) // FlowKey doesn't directly expose src/dst in a way that
+        .count(); // matches without flow parsing; we count the total + leave per-key correlation below.
+    let _ = atem_ip; // FlowKey shape varies — keep this conservative for now.
+    checks.push(PreShowCheck {
+        id: "active_streams".into(),
+        label: "Active streams".into(),
+        status: PreShowStatus::Pass,
+        detail: format!("{} flow{}", active_streams, if active_streams == 1 { "" } else { "s" }),
+        hint: None,
+    });
+
+    // 7. Stream key correlation — how many flows have been matched
+    // to a BMD stream key via the SID parser. Info-only.
+    let keyed_flows = s.per_key.len();
+    checks.push(PreShowCheck {
+        id: "stream_keys".into(),
+        label: "Stream-key correlation".into(),
+        status: PreShowStatus::Pass,
+        detail: format!(
+            "{} key{} correlated",
+            keyed_flows,
+            if keyed_flows == 1 { "" } else { "s" }
+        ),
+        hint: if keyed_flows == 0 && matches!(lan_visibility, LanVisibility::SeesPeers) {
+            Some(
+                "No BMD-flavored streamids parsed yet. Either no live stream is running, or the SRT capture isn't seeing handshakes."
+                    .into(),
+            )
+        } else {
+            None
+        },
+    });
+
+    // Compute overall verdict: worst status wins (Fail > Warn > Pass > Skip).
+    let fail_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, PreShowStatus::Fail))
+        .count();
+    let warn_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, PreShowStatus::Warn))
+        .count();
+    let overall = if fail_count > 0 {
+        PreShowStatus::Fail
+    } else if warn_count > 0 {
+        PreShowStatus::Warn
+    } else {
+        PreShowStatus::Pass
+    };
+    let summary = match overall {
+        PreShowStatus::Pass => "All pre-show checks passing — ready to go live.".to_string(),
+        PreShowStatus::Warn => format!(
+            "{} warning{} — review before going live.",
+            warn_count,
+            if warn_count == 1 { "" } else { "s" }
+        ),
+        PreShowStatus::Fail => format!(
+            "{} failing check{} — fix before going live.",
+            fail_count,
+            if fail_count == 1 { "" } else { "s" }
+        ),
+        PreShowStatus::Skip => "Configuration incomplete — set up UDM polling for full coverage.".to_string(),
+    };
+
+    PreShowVerdict {
+        overall,
+        summary,
+        checks,
+    }
 }
 
 fn probe_loop(state: Arc<Mutex<DashboardState>>) {
@@ -899,9 +1303,34 @@ fn probe_loop(state: Arc<Mutex<DashboardState>>) {
 /// dashboard's success-rate / latency numbers reflect only the new
 /// configuration. Tweaking interval, mode, atem, or unifi_host
 /// preserves probe history.
-fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result<(), String> {
+fn apply_config_update(
+    state: &Arc<Mutex<DashboardState>>,
+    creds_holder: &unifi::CredentialsHolder,
+    body: &str,
+) -> Result<(), String> {
+    // alpha.51 — instrumentation. Operator reports persistent
+    // "Timed out after 12s" on the UDM key form despite alpha.43's
+    // spawn-per-request multithreading. Log each phase + timing so
+    // /api/log surfaces where the latency is (JSON parse, lock
+    // acquisition, individual field updates). The bytes() len bound
+    // keeps us from printing a huge body if somebody sends one.
+    let started = std::time::Instant::now();
+    let body_summary = if body.len() > 200 {
+        format!("{}…(+{} bytes)", &body[..200], body.len() - 200)
+    } else {
+        body.to_string()
+    };
+    eprintln!(
+        "[/api/config] received {} bytes: {}",
+        body.len(),
+        body_summary.replace('\n', " ")
+    );
     let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("invalid JSON: {e}"))?;
+    eprintln!(
+        "[/api/config] JSON parse OK after {:?}",
+        started.elapsed()
+    );
 
     let url_field = parsed
         .get("url")
@@ -963,6 +1392,31 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
+    // UDM API key — write-through to the shared credentials holder.
+    // Polling threads pick up the change on their next tick (~2s).
+    // Sending an empty string CLEARS credentials, useful for "log
+    // out" / "stop polling" without restarting the binary.
+    //
+    // Important: the key is NEVER written into DashboardState, so
+    // it doesn't leak into /api/state JSON. Only the
+    // UnifiStatus surfaces (Connected / Connecting / Failed /
+    // NotConfigured) to the dashboard.
+    //
+    // Encoding: outer Option = field-presence (None = field absent,
+    // don't touch creds); inner Option = empty-vs-set (None = clear,
+    // Some(key) = set).
+    let unifi_api_key_field: Option<Option<String>> = parsed
+        .get("unifi_api_key")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+
     let monitor_iface_field = parsed
         .get("monitor_iface")
         .and_then(|v| v.as_str())
@@ -999,6 +1453,22 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
         }
     });
 
+    // Write-through to the shared credentials holder BEFORE
+    // acquiring state.lock(). Polling threads acquire creds first,
+    // then state — apply_config_update has to use the same order
+    // or two opposing locks could deadlock. Capture the new
+    // unifi_configured value for the state update below.
+    let new_unifi_configured: Option<bool> = if let Some(key_change) = unifi_api_key_field {
+        let mut creds = creds_holder.lock().unwrap();
+        *creds = match key_change {
+            Some(key) => Some(unifi::UnifiCredentials::ApiKey(key)),
+            None => None,
+        };
+        Some(creds.is_some())
+    } else {
+        None
+    };
+
     let mut s = state.lock().unwrap();
     let mut probe_target_changed = false;
     if let Some(u) = url_field {
@@ -1024,6 +1494,9 @@ fn apply_config_update(state: &Arc<Mutex<DashboardState>>, body: &str) -> Result
     }
     if let Some(h) = unifi_host_field {
         s.config.unifi_host = h;
+    }
+    if let Some(cfg_val) = new_unifi_configured {
+        s.config.unifi_configured = cfg_val;
     }
     if let Some(new_iface) = monitor_iface_field {
         if !new_iface.is_empty() && Some(&new_iface) != s.config.monitor_iface.as_ref() {

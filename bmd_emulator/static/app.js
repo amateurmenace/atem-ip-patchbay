@@ -17,7 +17,15 @@ const els = {
   duration:   $('#duration'),
   refreshApp: $('#refresh-app'),
   killOrphans: $('#kill-orphans'),
+  forceStopAll: $('#force-stop-all'),
+  openAdvanced: $('#open-advanced-btn'),
   openNetDiag: $('#open-net-diag'),
+  // alpha.42: openMultiview button removed; the view-mode toggle in
+  // the topbar (.view-toggle) handles Single ↔ Multi navigation now.
+  // alpha.52: openMonitor button removed too — multiview supersedes
+  // the alpha.16 single-tile companion window pattern.
+  heroHideBtn: $('#hero-hide-btn'),
+  introToggleBtn: $('#intro-toggle-btn'),
   omtOutputEnabled: $('#omt-output-enabled'),
   omtOutputName:    $('#omt-output-name'),
   omtOutputStatus:  $('#omt-output-status'),
@@ -84,6 +92,7 @@ const els = {
   pipePath:       $('#pipe-path'),
   rescanDevices:  $('#rescan-devices'),
   ndiRescan:      $('#ndi-rescan'),
+  omtRescan:      $('#omt-rescan'),
 
   // Relay (incoming SRT/RTMP server)
   // Old per-tile relay-config panels removed in favor of the
@@ -143,11 +152,39 @@ const els = {
   // SRT advanced
   srtMode:          $('#srt-mode'),
   srtLatency:       $('#srt-latency'),
+  srtLatencyTop:    $('#srt-latency-top'),
   srtListenPort:    $('#srt-listen-port'),
   srtListenerOnly:  $$('.srt-listener-only'),
   streamidOverride: $('#streamid-override'),
   streamidLegacy:   $('#streamid-legacy'),
+
+  // Session 12 — destination-type picker + DeckLink output config
+  destTypeRow:        $('#dest-type-row'),
+  destTypeSegs:       $$('input[name="dest-type"]'),
+  destAtemBody:       $('#dest-atem-body'),
+  destDecklinkBody:   $('#dest-decklink-body'),
+  destDecklinkUnsupported: $('#dest-decklink-unsupported'),
+  decklinkDevice:     $('#decklink-device'),
+  decklinkMode:       $('#decklink-mode'),
+  decklinkDeviceStatus: $('#decklink-device-status'),
+  decklinkRefresh:    $('#decklink-refresh'),
+
+  // alpha.22's UDM config dialog elements removed in alpha.25 — UDM
+  // is configured inside the net-diag dashboard now.
+
+  // alpha.25: Advanced encoding controls.
+  videoEncoder:       $('#video-encoder'),
+  videoEncoderHint:   $('#video-encoder-hint'),
+  autoReconnect:      $('#auto-reconnect'),
+  audioCodec:         $('#audio-codec'),
+  audioBitrateKbps:   $('#audio-bitrate-kbps'),
+  audioSampleRate:    $('#audio-sample-rate'),
+  audioChannelsSel:   $('#audio-channels'),
+  metersEnabled:      $('#meters-enabled'),
+  encoderExtraFlags:  $('#encoder-extra-flags'),
 };
+
+let knownDecklinkDevices = []; // populated by fetchDecklinkDevices()
 
 let lastSnapshot   = null;
 let knownDevices   = { video: [], audio: [] };
@@ -260,6 +297,233 @@ async function applySettings(patch) {
     });
     render(snap);
   } catch (_e) { /* ignore */ }
+}
+
+// -----------------------------------------------------------------
+// Session 12 — DeckLink output destination
+// -----------------------------------------------------------------
+
+/// Fetch the current DeckLink output devices + per-device modes from
+/// the backend. Empty result is the operator's "missing prerequisite"
+/// signal — distinguished from "FFmpeg lacks --enable-decklink" by
+/// the ffmpeg_decklink_available flag on /api/state.
+async function fetchDecklinkDevices(force = false) {
+  try {
+    const url = force ? '/api/decklink-outputs?force=1' : '/api/decklink-outputs';
+    const list = await fetchJSON(url);
+    knownDecklinkDevices = Array.isArray(list) ? list : [];
+  } catch (_e) {
+    knownDecklinkDevices = [];
+  }
+  // Re-render against the last-seen snapshot so the dropdowns update
+  // immediately after a refresh click without waiting for the next
+  // /api/state poll tick.
+  if (lastSnapshot) renderDecklinkDestination(lastSnapshot);
+}
+
+/// Update the DeckLink picker (device + mode dropdowns) from the
+/// current snapshot. Also gates visibility of the DeckLink body block
+/// and toggles the "FFmpeg lacks DeckLink support" warning.
+function renderDecklinkDestination(snap) {
+  if (!els.destDecklinkBody) return;
+
+  const ffmpegHasDecklink = !!snap.ffmpeg_decklink_available;
+  const destType = snap.destination_type || 'atem';
+  const isDecklink = destType === 'decklink';
+
+  // Toggle which body block is visible. The ATEM body is the existing
+  // dest-wizard div; the DeckLink body is the new dest-decklink-body
+  // sibling.
+  if (els.destAtemBody) els.destAtemBody.hidden = isDecklink;
+  els.destDecklinkBody.hidden = !isDecklink;
+
+  // Segmented control reflects current state. Disable the DeckLink
+  // radio when the FFmpeg build lacks support — surfaced with the
+  // dest-decklink-unsupported hint below the segments.
+  for (const seg of els.destTypeSegs) {
+    if (seg.value === 'decklink') {
+      seg.disabled = !ffmpegHasDecklink;
+    }
+    if (document.activeElement !== seg) {
+      seg.checked = (seg.value === destType);
+    }
+  }
+  if (els.destDecklinkUnsupported) {
+    els.destDecklinkUnsupported.hidden = ffmpegHasDecklink;
+  }
+
+  // Populate the device dropdown. Always include the current pick at
+  // the top even if it's not in the latest scan — operator might have
+  // a card temporarily unplugged that they want to re-plug; we don't
+  // erase their state.
+  const devicePicks = knownDecklinkDevices.map((d) => ({
+    value: d.name,
+    label: d.name,
+  }));
+  const currentDevice = snap.decklink_device_name || '';
+  if (currentDevice && !devicePicks.some((d) => d.value === currentDevice)) {
+    devicePicks.unshift({
+      value: currentDevice,
+      label: `${currentDevice} (not connected)`,
+    });
+  }
+  if (devicePicks.length === 0) {
+    devicePicks.push({ value: '', label: '— No DeckLink devices found —' });
+  }
+  setOptions(els.decklinkDevice, devicePicks, currentDevice);
+
+  // Populate the mode dropdown from the picked device's modes. Empty
+  // when no device picked OR when the picked device has no probed
+  // modes yet (the per-device probe is lazy — happens server-side on
+  // the first /api/decklink-outputs call for the named device).
+  const pickedDevice = knownDecklinkDevices.find((d) => d.name === currentDevice);
+  const modePicks = (pickedDevice?.modes || []).map((m) => ({
+    value: m.format_code,
+    label: humanizeDecklinkMode(m),
+  }));
+  if (modePicks.length === 0) {
+    modePicks.push({ value: '', label: '— Pick a device first —' });
+  }
+  setOptions(els.decklinkMode, modePicks, snap.decklink_format_code || '');
+
+  // Status hint below the device select — surfaces driver/build state.
+  if (els.decklinkDeviceStatus) {
+    if (!ffmpegHasDecklink) {
+      els.decklinkDeviceStatus.textContent =
+        'FFmpeg build lacks DeckLink support — reinstall the app.';
+    } else if (knownDecklinkDevices.length === 0) {
+      els.decklinkDeviceStatus.textContent =
+        'No DeckLink devices found. Install the Blackmagic DeckLink Driver and plug in a card.';
+    } else {
+      els.decklinkDeviceStatus.textContent =
+        `${knownDecklinkDevices.length} device${knownDecklinkDevices.length === 1 ? '' : 's'} available.`;
+    }
+  }
+
+  // Destination aux label in the card title — switch to DeckLink-flavored
+  // when DeckLink is active.
+  if (isDecklink) {
+    if (currentDevice) {
+      const modeLabel = snap.decklink_output_mode || snap.decklink_format_code || '—';
+      els.destAux.textContent = `DECKLINK → ${currentDevice} · ${modeLabel}`;
+    } else {
+      els.destAux.textContent = 'DECKLINK · pick a device';
+    }
+  }
+}
+
+/// Build a human-friendly mode label from a DecklinkMode object.
+/// Example: "1080p59.94 (Hp59)".
+function humanizeDecklinkMode(m) {
+  const fps = m.fps_num / Math.max(1, m.fps_den);
+  // Trim trailing zeros: 59.94 -> 59.94, 60.00 -> 60.
+  const fpsLabel = fps.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  const scan = m.interlaced ? 'i' : 'p';
+  return `${m.height}${scan}${fpsLabel}  (${m.format_code})`;
+}
+
+// alpha.22's UDM config dialog functions removed in alpha.25 — UDM
+// is configured inside the net-diag dashboard now (see its UDM
+// panel form, POSTs to its own /api/config).
+
+// -----------------------------------------------------------------
+// alpha.25 — Advanced encoding controls (encoder picker + audio knobs)
+// -----------------------------------------------------------------
+
+/// Populate the Advanced disclosure pickers from the current snapshot
+/// + the available_encoders list. Called from the main render() path
+/// every poll tick. Idempotent — checks document.activeElement to
+/// avoid clobbering an input the operator is mid-typing.
+function renderEncodingAdvanced(snap) {
+  if (!els.videoEncoder) return;
+
+  // Encoder dropdown — always offer "auto" + whatever the bundled
+  // FFmpeg actually has. Filter against snap.available_encoders so
+  // we don't list nvenc on a build without it. Encoder names that
+  // start with h264_ / hevc_ are surfaced under H.264 / H.265 labels.
+  const avail = Array.isArray(snap.available_encoders) ? snap.available_encoders : [];
+  const wantedEncoders = [
+    'libx264', 'libx265',
+    'h264_videotoolbox', 'hevc_videotoolbox',
+    'h264_nvenc', 'hevc_nvenc',
+    'h264_qsv', 'hevc_qsv',
+    'h264_amf', 'hevc_amf',
+  ];
+  const present = wantedEncoders.filter((e) => avail.includes(e));
+  const options = [{ value: 'auto', label: 'Auto (best for platform)' }];
+  for (const enc of present) {
+    options.push({ value: enc, label: encoderLabel(enc) });
+  }
+  setOptions(els.videoEncoder, options, snap.video_encoder || 'auto');
+
+  // Hint below the encoder dropdown — describes what auto would
+  // pick on this platform / FFmpeg build.
+  if (els.videoEncoderHint) {
+    if ((snap.video_encoder || 'auto') === 'auto') {
+      const autoGuess = guessAutoEncoder(snap.video_codec || 'h265', avail);
+      els.videoEncoderHint.textContent = autoGuess
+        ? `Auto will pick ${encoderLabel(autoGuess)} for current codec/platform.`
+        : 'No matching encoder available in bundled FFmpeg.';
+    } else {
+      els.videoEncoderHint.textContent = 'Manual override — falls back to auto if not available.';
+    }
+  }
+
+  // Auto-reconnect toggle (state field exists; supervisor loop lands
+  // in alpha.26+, so this toggle currently round-trips the value
+  // without changing runtime behavior yet).
+  if (els.autoReconnect && document.activeElement !== els.autoReconnect) {
+    els.autoReconnect.value = snap.auto_reconnect === false ? 'false' : 'true';
+  }
+
+  // Audio knobs.
+  if (els.audioCodec && document.activeElement !== els.audioCodec) {
+    els.audioCodec.value = snap.audio_codec || 'aac';
+  }
+  if (els.audioBitrateKbps && document.activeElement !== els.audioBitrateKbps) {
+    els.audioBitrateKbps.value = snap.audio_bitrate_kbps || 0;
+  }
+  if (els.audioSampleRate && document.activeElement !== els.audioSampleRate) {
+    els.audioSampleRate.value = String(snap.audio_sample_rate || 48000);
+  }
+  if (els.audioChannelsSel && document.activeElement !== els.audioChannelsSel) {
+    els.audioChannelsSel.value = String(snap.audio_channels || 2);
+  }
+  if (els.metersEnabled && document.activeElement !== els.metersEnabled) {
+    els.metersEnabled.checked = snap.meters_enabled !== false;
+  }
+  if (els.encoderExtraFlags && document.activeElement !== els.encoderExtraFlags) {
+    els.encoderExtraFlags.value = snap.encoder_extra_flags || '';
+  }
+}
+
+/// Human-readable label for an encoder name. Keeps the dropdown
+/// concise but informative ("h264_nvenc" -> "H.264 / NVIDIA NVENC").
+function encoderLabel(name) {
+  const codec = name.startsWith('hevc_') || name === 'libx265' ? 'H.265' : 'H.264';
+  if (name === 'libx264' || name === 'libx265') return `${codec} / libx${codec === 'H.264' ? '264' : '265'} (software)`;
+  if (name.includes('videotoolbox')) return `${codec} / VideoToolbox (macOS hardware)`;
+  if (name.includes('nvenc')) return `${codec} / NVIDIA NVENC`;
+  if (name.includes('qsv')) return `${codec} / Intel QuickSync`;
+  if (name.includes('amf')) return `${codec} / AMD AMF`;
+  return name;
+}
+
+/// Mirror the Rust auto_select_encoder logic so the UI can hint at
+/// what auto-mode would pick. Doesn't have to be perfect — this is a
+/// preview, not the source of truth (server's select_encoder always
+/// makes the actual call at stream-start).
+function guessAutoEncoder(codec, available) {
+  const isMac = navigator.userAgent.includes('Mac');
+  const wantH265 = codec === 'h265';
+  const candidates = wantH265
+    ? (isMac
+        ? ['hevc_videotoolbox', 'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'libx265']
+        : ['hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'libx265'])
+    : (isMac
+        ? ['h264_videotoolbox', 'h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264']
+        : ['h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264']);
+  return candidates.find((c) => available.includes(c)) || null;
 }
 
 // -----------------------------------------------------------------
@@ -827,24 +1091,36 @@ function buildSourceTiles(snap) {
       continue;
     }
     if (cat === 'omt_senders') {
-      // Skip the section entirely when no OMT senders are visible —
-      // most users don't have OMT on their network, and showing an
-      // empty "OMT senders" header noisily implies the feature is
-      // broken. The section appears when discovery finds something
-      // OR when the user has a previously-selected OMT source still
-      // in their state (so the active tile renders as a placeholder).
-      const omtTiles = [];
-      for (const sender of knownOmt) {
-        omtTiles.push({
-          sourceId: 'omt-sender',
+      // alpha.24 reversed alpha.13's "hide OMT when empty" — the
+      // hide-when-empty UX made OMT undiscoverable for users who
+      // didn't know the feature existed. Always show the section
+      // (matches NDI's "scan NDI" affordance in the card title) and
+      // render either the discovered senders OR a single
+      // placeholder tile that explains how to populate the list.
+      if (knownOmt.length > 0) {
+        for (const sender of knownOmt) {
+          tiles.push({
+            sourceId: 'omt-sender',
+            avIndex: null,
+            name: sender.name,
+            category: 'omt',
+            section: label,
+            discovered: true,
+          });
+        }
+      } else {
+        // Empty-state placeholder. Non-selectable (the click handler
+        // checks `placeholder` and no-ops). Tells the operator the
+        // feature exists and how to populate it.
+        tiles.push({
+          sourceId: 'omt-placeholder',
           avIndex: null,
-          name: sender.name,
+          name: 'No OMT senders found',
           category: 'omt',
           section: label,
-          discovered: true,
+          placeholder: true,
         });
       }
-      tiles.push(...omtTiles);
       continue;
     }
     for (const d of groups[cat]) {
@@ -894,13 +1170,27 @@ function buildSourceTiles(snap) {
        (snap.source_id === 'omt' && t.sourceId === 'omt-sender' && snap.omt_source_name === t.name)) &&
       (t.sourceId !== 'avfoundation' || snap.av_video_index === t.avIndex);
     const div = document.createElement('div');
-    div.className = 'tile' + (isActive ? ' active' : '') + (t.discovered ? ' discovered' : '');
-    div.innerHTML = `
-      <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
-      <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
-      <div class="tile-cat">${CATEGORY_LABEL[t.category] || t.category}</div>
-    `;
-    div.addEventListener('click', () => selectSource(t));
+    div.className = 'tile'
+      + (isActive ? ' active' : '')
+      + (t.discovered ? ' discovered' : '')
+      + (t.placeholder ? ' placeholder' : '');
+    if (t.placeholder) {
+      // Non-selectable empty-state tile (e.g. "No OMT senders found").
+      // Slightly muted styling via .placeholder CSS; hint text in tile-cat.
+      div.innerHTML = `
+        <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
+        <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+        <div class="tile-cat">click "scan ${(t.category || '').toUpperCase()}" above to refresh</div>
+      `;
+      // No click handler — placeholder is informational.
+    } else {
+      div.innerHTML = `
+        <div class="tile-icon">${ICONS[t.category] || ICONS.camera}</div>
+        <div class="tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+        <div class="tile-cat">${CATEGORY_LABEL[t.category] || t.category}</div>
+      `;
+      div.addEventListener('click', () => selectSource(t));
+    }
     els.sourceTiles.appendChild(div);
   }
 }
@@ -1065,8 +1355,24 @@ function render(snap) {
     els.destAux.textContent = 'no destination';
   }
 
+  // Session 12 — DeckLink destination toggling. Renders last so it
+  // can overwrite destAux with the DeckLink-flavored label when the
+  // operator has switched to a DeckLink output. Otherwise hides the
+  // DeckLink body and lets the ATEM body keep its rendering above.
+  renderDecklinkDestination(snap);
+
+  // alpha.25 — encoder picker + audio knobs + auto-reconnect toggle.
+  renderEncodingAdvanced(snap);
+
+  // alpha.22's renderUdmConfigStatus removed in alpha.25 — UDM lives
+  // inside the net-diag dashboard now.
+
   if (document.activeElement !== els.srtMode) els.srtMode.value = snap.srt_mode || 'caller';
-  if (document.activeElement !== els.srtLatency) els.srtLatency.value = Math.round((snap.srt_latency_us || 500000) / 1000);
+  {
+    const latMs = Math.round((snap.srt_latency_us || 200000) / 1000);
+    if (document.activeElement !== els.srtLatency) els.srtLatency.value = latMs;
+    if (els.srtLatencyTop && document.activeElement !== els.srtLatencyTop) els.srtLatencyTop.value = latMs;
+  }
   if (document.activeElement !== els.srtListenPort) els.srtListenPort.value = snap.srt_listen_port || 9710;
   if (document.activeElement !== els.streamidOverride) els.streamidOverride.value = snap.streamid_override || '';
   if (els.streamidLegacy && document.activeElement !== els.streamidLegacy) els.streamidLegacy.checked = !!snap.streamid_legacy;
@@ -1114,11 +1420,23 @@ function render(snap) {
 
   // Status pill + body class for streaming-state animations
   const stats = snap.stats;
-  els.statusPill.textContent = stats.status.toUpperCase();
-  els.statusPill.classList.remove('streaming', 'connecting', 'interrupted');
+  // alpha.30: during auto-reconnect backoff the supervisor sets
+  // status = "Reconnecting" with reconnect_attempt / reconnect_next_secs
+  // populated. Surface the countdown so operators can see the loop
+  // is alive and know how long until the next retry. Max is from
+  // snap.auto_reconnect_max_attempts (12 default).
+  const max = snap.auto_reconnect_max_attempts || 12;
+  if (stats.status === 'Reconnecting') {
+    els.statusPill.textContent = `RECONNECTING IN ${stats.reconnect_next_secs || 0}s · ${stats.reconnect_attempt || 0}/${max}`;
+  } else {
+    els.statusPill.textContent = stats.status.toUpperCase();
+  }
+  els.statusPill.classList.remove('streaming', 'connecting', 'interrupted', 'reconnecting');
   if (stats.status === 'Streaming') els.statusPill.classList.add('streaming');
   else if (stats.status === 'Connecting') els.statusPill.classList.add('connecting');
+  else if (stats.status === 'Switching') els.statusPill.classList.add('connecting'); // alpha.59 hot-swap: yellow in-progress
   else if (stats.status === 'Interrupted') els.statusPill.classList.add('interrupted');
+  else if (stats.status === 'Reconnecting') els.statusPill.classList.add('reconnecting');
 
   els.body.classList.toggle('is-streaming', stats.status === 'Streaming');
   els.liveBadge.hidden = stats.status !== 'Streaming';
@@ -1126,7 +1444,9 @@ function render(snap) {
   els.duration.textContent = stats.duration;
   els.monitorAux.textContent = stats.status === 'Streaming'
     ? `live · ${Math.round((stats.bitrate || 0) / 1000)} kbps`
-    : (stats.status === 'Connecting' ? 'connecting…' : sourceLabel(snap));
+    : stats.status === 'Connecting' ? 'connecting…'
+    : stats.status === 'Reconnecting' ? `reconnecting · ${stats.total_reconnects_this_session || 0} drops this session`
+    : sourceLabel(snap);
 
   const cfg = snap.active_config;
   els.ovlSource.textContent  = sourceLabel(snap);
@@ -1136,6 +1456,18 @@ function render(snap) {
 
   renderTelemetry(snap);
   renderOmtOutput(snap);
+
+  // Wizard sync: lock/unlock the protocol radio + advanced inputs and
+  // pull initial values out of the snapshot. window.* bridges exist
+  // because the helpers are scoped inside bind(); calling them here
+  // gives users an instant reaction to receiver-state changes instead
+  // of waiting up to one second for the wizard's own poll tick.
+  if (typeof window.hydrateRwAdvancedFromSnapshot === 'function') {
+    window.hydrateRwAdvancedFromSnapshot(snap);
+  }
+  if (typeof window.syncRwProtocolWithSnapshot === 'function') {
+    window.syncRwProtocolWithSnapshot(snap);
+  }
 
   if (stats.error) {
     els.error.hidden = false;
@@ -1509,6 +1841,93 @@ function bind() {
   els.streamKey.addEventListener('change', () => applySettings({ stream_key: els.streamKey.value }));
   els.passphrase.addEventListener('change', () => applySettings({ passphrase: els.passphrase.value }));
 
+  // Session 12 — destination-type segmented control
+  els.destTypeSegs.forEach((r) => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      // Fetch DeckLink devices on first switch into DeckLink mode so
+      // the dropdown isn't empty when the body becomes visible. Idempotent
+      // — if the device list is already populated this is a no-op refresh.
+      if (r.value === 'decklink') fetchDecklinkDevices(false);
+      applySettings({ destination_type: r.value });
+    });
+  });
+  // Device picker — also clears the picked mode so the user doesn't
+  // accidentally try to drive Card B with Card A's mode code.
+  els.decklinkDevice.addEventListener('change', () => {
+    applySettings({
+      decklink_device_name: els.decklinkDevice.value,
+      decklink_format_code: '',
+      decklink_output_mode: '',
+    });
+  });
+  els.decklinkMode.addEventListener('change', () => {
+    // Look up the human-friendly mode label from the picked device's
+    // modes so snapshot's decklink_output_mode stays in sync with the
+    // dropdown. Fall back to the format_code itself if the device
+    // isn't in our local cache (shouldn't happen — defensive).
+    const pickedCode = els.decklinkMode.value;
+    const dev = knownDecklinkDevices.find(
+      (d) => d.name === els.decklinkDevice.value,
+    );
+    const mode = dev?.modes?.find((m) => m.format_code === pickedCode);
+    applySettings({
+      decklink_format_code: pickedCode,
+      decklink_output_mode: mode ? humanizeDecklinkMode(mode) : pickedCode,
+    });
+  });
+  if (els.decklinkRefresh) {
+    els.decklinkRefresh.addEventListener('click', () => fetchDecklinkDevices(true));
+  }
+
+  // alpha.22's UDM dialog wiring removed in alpha.25 — UDM moved into
+  // the net-diag dashboard.
+
+  // alpha.25 — Advanced encoding control wiring.
+  if (els.videoEncoder) {
+    els.videoEncoder.addEventListener('change', () => {
+      applySettings({ video_encoder: els.videoEncoder.value });
+    });
+  }
+  if (els.autoReconnect) {
+    els.autoReconnect.addEventListener('change', () => {
+      applySettings({ auto_reconnect: els.autoReconnect.value === 'true' });
+    });
+  }
+  if (els.audioCodec) {
+    els.audioCodec.addEventListener('change', () => {
+      applySettings({ audio_codec: els.audioCodec.value });
+    });
+  }
+  if (els.audioBitrateKbps) {
+    els.audioBitrateKbps.addEventListener('change', () => {
+      const v = parseInt(els.audioBitrateKbps.value, 10);
+      applySettings({ audio_bitrate_kbps: isNaN(v) ? 0 : v });
+    });
+  }
+  if (els.audioSampleRate) {
+    els.audioSampleRate.addEventListener('change', () => {
+      applySettings({ audio_sample_rate: parseInt(els.audioSampleRate.value, 10) });
+    });
+  }
+  if (els.audioChannelsSel) {
+    els.audioChannelsSel.addEventListener('change', () => {
+      applySettings({ audio_channels: parseInt(els.audioChannelsSel.value, 10) });
+    });
+  }
+  if (els.metersEnabled) {
+    els.metersEnabled.addEventListener('change', () => {
+      applySettings({ meters_enabled: !!els.metersEnabled.checked });
+    });
+  }
+  if (els.encoderExtraFlags) {
+    // Save on blur (matches the SRT-mode / streamid-override fields'
+    // existing pattern). Avoids POSTing on every keystroke.
+    els.encoderExtraFlags.addEventListener('blur', () => {
+      applySettings({ encoder_extra_flags: els.encoderExtraFlags.value });
+    });
+  }
+
   // Segmented controls — Protocol + Codec
   els.protoSegs.forEach((r) => r.addEventListener('change', () => {
     if (r.checked) applyProtocolToggle(r.value);
@@ -1620,6 +2039,48 @@ function bind() {
     });
   }
 
+  // Force Stop ALL — emergency escape hatch. OS-kills every FFmpeg on
+  // the machine (lock-free, works even when a tile's controls are
+  // wedged), then resets all tiles to Idle. The guaranteed-to-work
+  // recovery path when Stop / Kill-orphans aren't enough.
+  if (els.forceStopAll) {
+    els.forceStopAll.addEventListener('click', async () => {
+      const ok = confirm(
+        "FORCE STOP ALL streams?\n\n" +
+        "This kills EVERY FFmpeg process on this machine at the OS level " +
+        "— including any unrelated FFmpeg jobs — then resets all tiles to " +
+        "Idle. Use it when a stream is wedged and Stop / Kill-orphans " +
+        "won't clear it.\n\n" +
+        "On a dedicated broadcast machine this is safe and is the " +
+        "guaranteed way to recover."
+      );
+      if (!ok) return;
+      els.forceStopAll.disabled = true;
+      try {
+        const r = await fetch('/api/force-stop-all', { method: 'POST' });
+        const j = await r.json();
+        alert(j.message || ('Force-stopped. Killed: ' + (j.killed ?? '?')));
+      } catch (e) {
+        alert('Force stop failed: ' + e.message);
+      } finally {
+        els.forceStopAll.disabled = false;
+      }
+    });
+  }
+
+  // Discoverable jump to the Advanced (encoder / audio quality / video
+  // mode / streamid / label) panel — a button next to the Quality
+  // picker that opens the collapsed <details> and scrolls to it.
+  if (els.openAdvanced) {
+    els.openAdvanced.addEventListener('click', () => {
+      const adv = document.querySelector('.dest-advanced');
+      if (adv) {
+        adv.open = true;
+        adv.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  }
+
   // Open ATEM Net Diag (companion app). The backend tries to launch
   // the .app bundle on macOS first (matches by display name), then
   // opens http://localhost:8092 in the default browser regardless.
@@ -1655,6 +2116,84 @@ function bind() {
     });
   }
 
+  // alpha.52: openMonitor button + click handler removed. The
+  // alpha.16 single-tile companion window pattern is superseded by
+  // the alpha.40+ multiview UI which monitors all 4 tiles in one
+  // view with richer per-tile controls + the alpha.50 expandable
+  // stats panel. The Tauri open_monitor_window command stays
+  // registered (low cost, no surface) so existing operator scripts
+  // that invoke it directly still work.
+
+  // alpha.42 — view-toggle was previously a separate "Open Multiview"
+  // button; now it's the .view-toggle in the topbar (.view-toggle-btn
+  // anchor tags) which uses default navigation. Nothing to wire here.
+
+  // alpha.50 — system health pill + drawer. Pill polls /api/system-health
+  // at 2 Hz to color-code itself; clicking opens the slide-out drawer
+  // with per-core CPU, FFmpeg processes, encoder inventory, log tail.
+  // Same drawer component multiview.html uses (see system-drawer.js).
+  const sysPillEl = $('#sys-pill');
+  if (sysPillEl && typeof window.createSystemDrawer === 'function') {
+    window.createSystemDrawer({
+      anchorEl: sysPillEl,
+      getLogUrl: () => '/api/log',
+    });
+    async function pollSystemHealth() {
+      try {
+        const r = await fetch('/api/system-health', { cache: 'no-store' });
+        if (!r.ok) return;
+        const data = await r.json();
+        const status = data.status || 'unknown';
+        sysPillEl.className = 'sys-pill-topbar ' + status;
+        const cpu = Math.round(data.cpu_percent || 0);
+        const memPct = Math.round(data.mem_percent || 0);
+        const lbl = $('#sys-pill-label');
+        if (lbl) lbl.textContent = `CPU ${cpu}% · MEM ${memPct}%`;
+        const tooltip = [
+          `Status: ${status.toUpperCase()}`,
+          `CPU: ${cpu}% (${data.cpu_count || '?'} cores)`,
+          `Memory: ${memPct}% — ${((data.mem_used_mb || 0) / 1024).toFixed(1)} / ${((data.mem_total_mb || 0) / 1024).toFixed(1)} GB`,
+          data.warning || null,
+          '',
+          'Click for full system monitor',
+        ].filter(Boolean).join('\n');
+        sysPillEl.title = tooltip;
+      } catch (e) { /* silent */ }
+    }
+    pollSystemHealth();
+    setInterval(pollSystemHealth, 2000);
+  }
+
+  // alpha.55 — Hide About is session-only (no localStorage persist).
+  // App always launches with the About section visible; operator can
+  // hide it for the current session via the topbar toggle or the
+  // in-hero × button, but next reload/relaunch starts visible again.
+  // Inline <head> script clears any old persisted flag.
+  function setHeroHidden(hidden) {
+    document.documentElement.dataset.heroHidden = hidden ? 'true' : 'false';
+    // Re-sync the toggle button's label so the operator sees the
+    // action that will happen on next click.
+    syncIntroToggleLabel();
+  }
+  function syncIntroToggleLabel() {
+    if (!els.introToggleBtn) return;
+    const hidden = document.documentElement.dataset.heroHidden === 'true';
+    els.introToggleBtn.textContent = hidden ? '▴ Show about' : '▼ Hide about';
+    els.introToggleBtn.title = hidden ? 'Show the About section' : 'Hide the About section';
+  }
+  if (els.heroHideBtn) {
+    els.heroHideBtn.addEventListener('click', () => setHeroHidden(true));
+  }
+  if (els.introToggleBtn) {
+    els.introToggleBtn.addEventListener('click', () => {
+      const currentlyHidden = document.documentElement.dataset.heroHidden === 'true';
+      setHeroHidden(!currentlyHidden);
+    });
+    // Initial label sync (data attribute was set by the inline <head>
+    // script before the page paint).
+    syncIntroToggleLabel();
+  }
+
   els.audioPanL.addEventListener('change', () => {
     const v = Math.max(1, parseInt(els.audioPanL.value, 10) || 1);
     els.audioPanL.value = v;
@@ -1668,6 +2207,9 @@ function bind() {
   els.pipePath.addEventListener('change', () => applySettings({ pipe_path: els.pipePath.value }));
   els.rescanDevices.addEventListener('click', (e) => { e.preventDefault(); ensureDevicesLoaded(true); });
   els.ndiRescan.addEventListener('click', (e) => { e.preventDefault(); ensureNdiLoaded(true); });
+  if (els.omtRescan) {
+    els.omtRescan.addEventListener('click', (e) => { e.preventDefault(); ensureOmtLoaded(true); });
+  }
 
   // OMT output toggle + sender name. POSTs to /api/omt-output which
   // updates state.omt_output_enabled / state.omt_output_name. The
@@ -1720,9 +2262,20 @@ function bind() {
     applySrtModeVisibility(els.srtMode.value);
     applySettings({ srt_mode: els.srtMode.value });
   });
-  els.srtLatency.addEventListener('change', () => {
-    const ms = parseInt(els.srtLatency.value, 10);
-    if (!isNaN(ms)) applySettings({ srt_latency_us: ms * 1000 });
+  // alpha.68: latency is also a prominent control (presets + input) above
+  // Advanced. Both inputs write the same setting and mirror each other.
+  const setLatencyMs = (ms) => {
+    if (isNaN(ms) || ms < 20) return;
+    if (els.srtLatency) els.srtLatency.value = ms;
+    if (els.srtLatencyTop) els.srtLatencyTop.value = ms;
+    applySettings({ srt_latency_us: ms * 1000 });
+  };
+  els.srtLatency.addEventListener('change', () => setLatencyMs(parseInt(els.srtLatency.value, 10)));
+  if (els.srtLatencyTop) {
+    els.srtLatencyTop.addEventListener('change', () => setLatencyMs(parseInt(els.srtLatencyTop.value, 10)));
+  }
+  document.querySelectorAll('.lat-preset').forEach((btn) => {
+    btn.addEventListener('click', () => setLatencyMs(parseInt(btn.dataset.ms, 10)));
   });
   els.srtListenPort.addEventListener('change', () => {
     const p = parseInt(els.srtListenPort.value, 10);
@@ -1878,6 +2431,33 @@ function bind() {
   const rwIpManual = $('#rw-ip-manual');
   const rwIpStatus = $('#rw-ip-status');
   const rwIpHint = $('#rw-ip-hint');
+  // Public-URL helper (Step 2, "Different network" sub-tab).
+  const rwWhere = $$('input[name="rw-where"]');
+  const rwLanBlock = $('#rw-lan-block');
+  const rwPublicBlock = $('#rw-public-block');
+  const rwPublicHost = $('#rw-public-host');
+  const rwPublicDetect = $('#rw-public-detect');
+  const rwPublicStatus = $('#rw-public-status');
+  const rwPublicUrl = $('#rw-public-publish-url');
+  const rwPublicCopy = $('#rw-public-copy');
+  const rwPfProtocol = $('#rw-pf-protocol');
+  const rwPfExtPort = $('#rw-pf-ext-port');
+  const rwPfIntIp = $('#rw-pf-int-ip');
+  const rwPfIntPort = $('#rw-pf-int-port');
+  const rwPfCopyTemplate = $('#rw-pf-copy-template');
+  const rwPfTemplateStatus = $('#rw-pf-template-status');
+  // Advanced settings — ports, RTMP app/key, SRT passphrase.
+  const rwAdvanced = $('#rw-advanced');
+  const rwAdvancedRows = $$('#rw-advanced .rw-advanced-row');
+  const rwSrtPortIn = $('#rw-srt-port');
+  const rwSrtPassphraseIn = $('#rw-srt-passphrase');
+  const rwRtmpPortIn = $('#rw-rtmp-port');
+  const rwRtmpAppIn = $('#rw-rtmp-app');
+  const rwRtmpKeyIn = $('#rw-rtmp-key');
+  const rwAdvancedApply = $('#rw-advanced-apply');
+  const rwAdvancedReset = $('#rw-advanced-reset');
+  const rwAdvancedStatus = $('#rw-advanced-status');
+  const rwAdvancedRunningHint = $('#rw-advanced-running-hint');
 
   // The active host for the publish URL. Empty means "we don't know
   // — user must type one in"; UI surfaces a yellow warning instead
@@ -1914,6 +2494,268 @@ function bind() {
     } else {
       rwUrl.value = `rtmp://${displayHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
     }
+    // The public-URL block reads the same protocol + port state, so
+    // keep it in sync any time the LAN URL refreshes (port changes,
+    // protocol toggle, snapshot updates).
+    refreshRwPublicUrl();
+    refreshPortForwardChecklist();
+  }
+
+  function getRwWhere() {
+    for (const r of rwWhere) if (r.checked) return r.value;
+    return 'lan';
+  }
+
+  function getActivePublicHost() {
+    return (rwPublicHost?.value || '').trim();
+  }
+
+  function refreshRwPublicUrl() {
+    if (!rwPublicUrl) return;
+    const proto = getRwProto();
+    const host = getActivePublicHost();
+    const r = lastSnapshot?.relay || {};
+    const displayHost = host || '<your-public-ip-or-hostname>';
+    if (proto === 'srt_listen') {
+      rwPublicUrl.value = `srt://${displayHost}:${r.srt_port ?? 9710}`;
+    } else {
+      rwPublicUrl.value = `rtmp://${displayHost}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    }
+  }
+
+  function refreshPortForwardChecklist() {
+    const proto = getRwProto();
+    const r = lastSnapshot?.relay || {};
+    const port = proto === 'srt_listen' ? (r.srt_port ?? 9710) : (r.rtmp_port ?? 1935);
+    const protoText = proto === 'srt_listen' ? 'UDP (SRT)' : 'TCP (RTMP)';
+    if (rwPfProtocol) rwPfProtocol.textContent = protoText;
+    if (rwPfExtPort) rwPfExtPort.textContent = String(port);
+    if (rwPfIntPort) rwPfIntPort.textContent = String(port);
+    if (rwPfIntIp) {
+      rwPfIntIp.textContent = rwSelectedIp || '(set your LAN IP in the "On my network" tab)';
+    }
+  }
+
+  function applyRwWhereState() {
+    if (!rwLanBlock || !rwPublicBlock) return;
+    const where = getRwWhere();
+    rwLanBlock.hidden = where === 'public';
+    rwPublicBlock.hidden = where !== 'public';
+    if (where === 'public') {
+      refreshRwPublicUrl();
+      refreshPortForwardChecklist();
+    }
+  }
+
+  // Show only the rows that apply to the currently-selected protocol.
+  // SRT picker → SRT row visible, RTMP row hidden, and vice versa.
+  function updateRwAdvancedRowVisibility() {
+    const proto = getRwProto();
+    rwAdvancedRows.forEach((row) => {
+      row.hidden = row.dataset.protocol !== proto;
+    });
+  }
+
+  // Populate the advanced inputs from the snapshot's relay block.
+  // Called on first snapshot and any time the receiver transitions
+  // off (so a port we just changed gets reflected back). Skipped if
+  // the user is mid-edit (rwAdvancedDirty true) — they own the field
+  // values until Apply or Reset.
+  let rwAdvancedDirty = false;
+  let rwAdvancedHydrated = false;
+  function hydrateRwAdvancedFromSnapshot(snap) {
+    const r = (snap && snap.relay) || {};
+    if (rwAdvancedDirty) return;
+    if (rwSrtPortIn) rwSrtPortIn.value = r.srt_port ?? 9710;
+    if (rwSrtPassphraseIn) rwSrtPassphraseIn.value = r.srt_passphrase ?? '';
+    if (rwRtmpPortIn) rwRtmpPortIn.value = r.rtmp_port ?? 1935;
+    if (rwRtmpAppIn) rwRtmpAppIn.value = r.rtmp_app ?? 'live';
+    if (rwRtmpKeyIn) rwRtmpKeyIn.value = r.rtmp_key ?? 'stream';
+    rwAdvancedHydrated = true;
+  }
+
+  function markRwAdvancedDirty() {
+    rwAdvancedDirty = true;
+    if (rwAdvancedStatus) {
+      rwAdvancedStatus.textContent = 'Unsaved changes — click Apply.';
+      rwAdvancedStatus.classList.remove('is-warning');
+    }
+  }
+
+  async function applyRwAdvanced() {
+    if (!rwAdvancedApply) return;
+    rwAdvancedApply.disabled = true;
+    if (rwAdvancedStatus) {
+      rwAdvancedStatus.textContent = 'Applying…';
+      rwAdvancedStatus.classList.remove('is-warning');
+    }
+    const srtPort = parseInt(rwSrtPortIn?.value || '0', 10);
+    const rtmpPort = parseInt(rwRtmpPortIn?.value || '0', 10);
+    // Light client-side validation — let the backend do the real
+    // check, but catch obvious nonsense locally so we don't paper
+    // over a typo with a misleading 200 OK.
+    if (!Number.isFinite(srtPort) || srtPort < 1 || srtPort > 65535) {
+      rwAdvancedStatus.textContent = 'SRT port must be 1-65535.';
+      rwAdvancedStatus.classList.add('is-warning');
+      rwAdvancedApply.disabled = false;
+      return;
+    }
+    if (!Number.isFinite(rtmpPort) || rtmpPort < 1 || rtmpPort > 65535) {
+      rwAdvancedStatus.textContent = 'RTMP port must be 1-65535.';
+      rwAdvancedStatus.classList.add('is-warning');
+      rwAdvancedApply.disabled = false;
+      return;
+    }
+    const payload = {
+      relay: {
+        srt_port: srtPort,
+        srt_passphrase: rwSrtPassphraseIn?.value || '',
+        rtmp_port: rtmpPort,
+        rtmp_app: rwRtmpAppIn?.value || 'live',
+        rtmp_key: rwRtmpKeyIn?.value || 'stream',
+      },
+    };
+    try {
+      // applySettings() POSTs the patch and internally calls render()
+      // with the response, so lastSnapshot is current by the time it
+      // resolves. It also swallows errors silently, so a missing
+      // network or 4xx won't throw — we read lastSnapshot.relay back
+      // and check whether the values stuck.
+      await applySettings(payload);
+      const newRelay = (lastSnapshot && lastSnapshot.relay) || {};
+      const stuck =
+        newRelay.srt_port === srtPort &&
+        newRelay.rtmp_port === rtmpPort &&
+        newRelay.rtmp_app === (rwRtmpAppIn?.value || 'live') &&
+        newRelay.rtmp_key === (rwRtmpKeyIn?.value || 'stream');
+      if (stuck) {
+        rwAdvancedDirty = false;
+        if (rwAdvancedStatus) {
+          rwAdvancedStatus.textContent = 'Saved.';
+          rwAdvancedStatus.classList.remove('is-warning');
+          setTimeout(() => {
+            if (rwAdvancedStatus && rwAdvancedStatus.textContent === 'Saved.') {
+              rwAdvancedStatus.textContent = '';
+            }
+          }, 2200);
+        }
+      } else if (rwAdvancedStatus) {
+        rwAdvancedStatus.textContent = 'Backend rejected one or more values — check the log panel.';
+        rwAdvancedStatus.classList.add('is-warning');
+      }
+      refreshRwUrl();
+      refreshPortForwardChecklist();
+    } catch (err) {
+      if (rwAdvancedStatus) {
+        rwAdvancedStatus.textContent = `Save failed (${err && err.message || err}).`;
+        rwAdvancedStatus.classList.add('is-warning');
+      }
+    } finally {
+      rwAdvancedApply.disabled = false;
+    }
+  }
+
+  function resetRwAdvancedDefaults() {
+    if (rwSrtPortIn) rwSrtPortIn.value = '9710';
+    if (rwSrtPassphraseIn) rwSrtPassphraseIn.value = '';
+    if (rwRtmpPortIn) rwRtmpPortIn.value = '1935';
+    if (rwRtmpAppIn) rwRtmpAppIn.value = 'live';
+    if (rwRtmpKeyIn) rwRtmpKeyIn.value = 'stream';
+    markRwAdvancedDirty();
+  }
+
+  // While the receiver is running, lock the protocol radio AND the
+  // advanced inputs so the displayed config can't drift from the
+  // running listener. Sync the radio to the snapshot's source_id so
+  // the user sees the actual protocol of the running listener — fix
+  // for the "I picked SRT but the banner says RTMP" UX bug.
+  function syncRwProtocolWithSnapshot(snap) {
+    const active = isReceiverActive(snap);
+    const running = (snap && snap.source_id) || '';
+    rwProto.forEach((r) => {
+      if (active) {
+        // Force the radio to match what the backend is actually
+        // running. Without this, a user who changed the radio after
+        // starting the receiver would see a SRT pill highlighted while
+        // an RTMP listener is bound. By syncing on every poll, the UI
+        // can't disagree with reality.
+        r.checked = (r.value === running);
+        r.disabled = true;
+      } else {
+        r.disabled = false;
+      }
+    });
+    const advancedDisabled = active;
+    [rwSrtPortIn, rwSrtPassphraseIn, rwRtmpPortIn, rwRtmpAppIn, rwRtmpKeyIn,
+     rwAdvancedApply, rwAdvancedReset].forEach((el) => {
+      if (el) el.disabled = advancedDisabled;
+    });
+    if (rwAdvancedRunningHint) rwAdvancedRunningHint.hidden = !active;
+    // When the receiver flips from off → on we may have shifted the
+    // radio above; reflect that in the URL + the active app's
+    // instructions (so the mismatch banner clears or appears as
+    // appropriate).
+    refreshRwUrl();
+    updateRwAdvancedRowVisibility();
+    if (rwAppPick && rwAppPick.value) {
+      renderRwApp(rwAppPick.value);
+    }
+  }
+
+  // Hit ipify.org from JS — single-purpose API that returns the
+  // requester's public IPv4. CORS-friendly so a webview fetch works.
+  // Deferred behind a user click rather than auto-detected on page
+  // load: spec'd that way so we never leak a third-party request
+  // unless the user explicitly opts into the public-URL flow.
+  async function detectPublicIp() {
+    if (!rwPublicHost || !rwPublicStatus) return;
+    rwPublicStatus.textContent = 'Detecting…';
+    rwPublicStatus.classList.remove('is-warning');
+    try {
+      const r = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (!j || !j.ip) throw new Error('no ip in response');
+      rwPublicHost.value = j.ip;
+      rwPublicStatus.textContent = `Detected: ${j.ip}`;
+      refreshRwPublicUrl();
+      if (getRwWhere() === 'public') {
+        renderRwApp(rwAppPick?.value || '');
+      }
+    } catch (err) {
+      const msg = (err && err.message) ? err.message : String(err);
+      rwPublicStatus.textContent = `Detection failed (${msg}). Type your public IP or hostname manually.`;
+      rwPublicStatus.classList.add('is-warning');
+    }
+  }
+
+  function buildPortForwardTemplate() {
+    const proto = getRwProto();
+    const r = lastSnapshot?.relay || {};
+    const port = proto === 'srt_listen' ? (r.srt_port ?? 9710) : (r.rtmp_port ?? 1935);
+    const protoText = proto === 'srt_listen' ? 'UDP' : 'TCP';
+    const scheme = proto === 'srt_listen' ? 'srt' : 'rtmp';
+    const lanIp = rwSelectedIp || "<this-machine's-LAN-IP>";
+    const publicHost = getActivePublicHost() || '<your-public-IP-or-hostname>';
+    const remotePath = proto === 'rtmp_listen'
+      ? `/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`
+      : '';
+    return [
+      `Hi,`,
+      ``,
+      `I need a port-forward rule on our router so a remote camera can push a`,
+      `${proto === 'srt_listen' ? 'SRT' : 'RTMP'} video stream into a streaming app running on my computer.`,
+      ``,
+      `  Protocol:       ${protoText}`,
+      `  External port:  ${port}`,
+      `  Internal IP:    ${lanIp}`,
+      `  Internal port:  ${port}`,
+      ``,
+      `Once it's live, the URL the remote camera/encoder needs is:`,
+      `  ${scheme}://${publicHost}:${port}${remotePath}`,
+      ``,
+      `Thanks!`,
+    ].join('\n');
   }
 
   function applyIpPickerState(interfaces, preferredIp) {
@@ -2080,13 +2922,76 @@ function bind() {
     }
   }
 
+  // Map: which protocol each app in the dropdown supports. Used to
+  // decide when to surface a mismatch warning + one-click switch.
+  // Apps that support both ('srt_listen','rtmp_listen') just render
+  // for whatever the user picked in step 1.
+  const RW_APP_PROTOCOLS = {
+    'obs': ['srt_listen', 'rtmp_listen'],
+    'larix': ['srt_listen', 'rtmp_listen'],
+    'ffmpeg': ['srt_listen', 'rtmp_listen'],
+    'dji-osmo-pocket3': ['rtmp_listen'],
+    'dji': ['rtmp_listen'],
+    'iphone-bm': ['rtmp_listen'],
+  };
+
   function renderRwApp(app) {
     if (!rwAppBody) return;
     if (!app) { rwAppBody.hidden = true; rwAppBody.innerHTML = ''; return; }
     const proto = getRwProto();
-    const url = rwUrl?.value || '';
+    // Protocol mismatch check: if the app only supports one protocol
+    // and the wizard's current selection is a different one, render a
+    // prominent warning + "Switch to <X>" button instead of letting
+    // the per-app URL silently disagree with the step 2 URL. The
+    // button is disabled when the receiver is running (matching the
+    // locked-radio policy in syncRwProtocolWithSnapshot).
+    const supported = RW_APP_PROTOCOLS[app] || ['srt_listen', 'rtmp_listen'];
+    const mismatched = !supported.includes(proto);
+    const targetProto = supported[0];
+    const targetLabel = targetProto === 'srt_listen' ? 'SRT' : 'RTMP';
+    const receiverRunning = isReceiverActive(lastSnapshot);
+    const switchDisabled = receiverRunning ? ' disabled' : '';
+    const switchHint = receiverRunning
+      ? `<span class="rw-app-mismatch-hint">Stop the receiver below first.</span>`
+      : '';
+    const mismatchBanner = mismatched
+      ? `<div class="rw-app-mismatch">
+           <span class="rw-app-mismatch-msg">⚠ This app only supports <strong>${targetLabel}</strong>.
+           The URL in step 2 above is the wrong protocol — switch to ${targetLabel}
+           so step 2 matches the URL shown here.</span>
+           <button type="button" class="rw-app-mismatch-btn" id="rw-app-mismatch-btn"${switchDisabled}>Switch to ${targetLabel}</button>
+           ${switchHint}
+         </div>`
+      : '';
+    // Effective protocol for rendering this app's instructions —
+    // ALWAYS use the app's required protocol when it's single-
+    // protocol, so the URLs in step 3 are correct regardless of
+    // what the user picked in step 1. The mismatch banner above
+    // explains the situation and offers the one-click fix.
+    const effectiveProto = mismatched ? targetProto : proto;
+    // Host + URL the user should paste into their encoder app. When the
+    // user is in "Different network" mode, switch to the public address
+    // so the per-app instructions are immediately correct without them
+    // having to mentally substitute the LAN IP for their public IP.
+    const where = getRwWhere();
+    const publicMode = where === 'public';
+    const host = publicMode
+      ? (getActivePublicHost() || '<your-public-ip>')
+      : (lanIp || '<your-lan-ip>');
+    // Build a URL string matching the EFFECTIVE protocol, not the
+    // step 2 URL field (which reflects the radio). This is the URL
+    // for the app's required protocol; the mismatch banner is what
+    // alerts the user that the step 2 field is the wrong protocol
+    // until they hit the Switch button.
+    const r = lastSnapshot?.relay || {};
+    const url = effectiveProto === 'srt_listen'
+      ? `srt://${host}:${r.srt_port ?? 9710}`
+      : `rtmp://${host}:${r.rtmp_port ?? 1935}/${r.rtmp_app || 'live'}/${r.rtmp_key || 'stream'}`;
+    const networkBadge = publicMode
+      ? `<p class="rw-app-network-badge">Different network — URL uses your public address. Make sure the port-forward checklist above is set up first.</p>`
+      : '';
     let html = '';
-    if (app === 'obs' && proto === 'srt_listen') {
+    if (app === 'obs' && effectiveProto === 'srt_listen') {
       html = `<strong>OBS → Settings → Stream</strong>
         <ol>
           <li>Service: <code>Custom...</code></li>
@@ -2094,12 +2999,12 @@ function bind() {
           <li>Stream Key: leave blank</li>
           <li>Output → Encoder: x264 or HEVC, Keyframe Interval 2s, Bitrate to match what your network can carry</li>
         </ol>`;
-    } else if (app === 'obs' && proto === 'rtmp_listen') {
+    } else if (app === 'obs' && effectiveProto === 'rtmp_listen') {
       html = `<strong>OBS → Settings → Stream</strong>
         <ol>
           <li>Service: <code>Custom...</code></li>
-          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
-          <li>Stream Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
+          <li>Server: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}</code></li>
+          <li>Stream Key: <code>${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else if (app === 'larix') {
       html = `<strong>Larix Broadcaster (iPhone / Android)</strong>
@@ -2111,16 +3016,8 @@ function bind() {
           <li>Encoder: H.264 or HEVC, Keyframe interval 2s</li>
         </ol>`;
     } else if (app === 'dji-osmo-pocket3') {
-      // The Osmo Pocket 3's Live Streaming flow lives inside the
-      // Mimo app (it streams via the phone, not directly from the
-      // Pocket itself). Mimo only does RTMP — no SRT path — so we
-      // hard-code RTMP examples even when the user has SRT selected
-      // in the wizard, with a hint about why.
-      const rtmpServer = `rtmp://${escapeHtml(lanIp || '<your-lan-ip>')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}`;
-      const rtmpKey = escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream');
-      const protoNote = proto === 'srt_listen'
-        ? `<p style="margin:6px 0 0;color:#ffc452;font-size:11px;">⚠ The Osmo Pocket 3 / Mimo app only speaks RTMP — switch the protocol toggle above to <strong>RTMP</strong> before starting the receiver.</p>`
-        : '';
+      const rtmpServer = `rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}`;
+      const rtmpKey = escapeHtml(r.rtmp_key || 'stream');
       html = `<strong>DJI Osmo Pocket 3 (via Mimo app on phone)</strong>
         <ol>
           <li>Pair the Pocket 3 to the <em>DJI Mimo</em> app on your phone.</li>
@@ -2128,18 +3025,16 @@ function bind() {
           <li>Pick <em>RTMP</em> as the platform.</li>
           <li>Server URL: <code>${rtmpServer}</code></li>
           <li>Stream Key: <code>${rtmpKey}</code></li>
-          <li>Tap <em>Start Live</em> in Mimo. The Pocket sends video over the phone's connection — make sure the phone is on the same Wi-Fi as this computer.</li>
-        </ol>
-        ${protoNote}`;
+          <li>Tap <em>Start Live</em> in Mimo. ${publicMode ? 'The Pocket pushes via the phone\'s data connection — works from anywhere with cellular signal.' : 'The Pocket sends video over the phone\'s connection — make sure the phone is on the same Wi-Fi as this computer.'}</li>
+        </ol>`;
     } else if (app === 'dji') {
       html = `<strong>DJI drone (RC Plus / Mini 4 Pro / Mavic 3)</strong>
         <ol>
           <li>In the Fly app: <em>Camera View → Transmission → Live Streaming Platform → RTMP Custom</em></li>
-          <li>RTMP URL: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}/${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
-          <li>(SRT isn't supported natively on most DJI consumer drones — pick RTMP above for these)</li>
+          <li>RTMP URL: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}/${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else if (app === 'ffmpeg') {
-      const cmd = proto === 'srt_listen'
+      const cmd = effectiveProto === 'srt_listen'
         ? `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f mpegts '${url}'`
         : `ffmpeg -re -i input.mp4 -c:v libx264 -preset veryfast -tune zerolatency -c:a aac -f flv '${url}'`;
       html = `<strong>FFmpeg from a file or device</strong>
@@ -2149,23 +3044,93 @@ function bind() {
         <ol>
           <li>Tap the gear icon → <em>Stream</em></li>
           <li>Service: <code>Custom RTMP</code> (the BMD app speaks RTMP only)</li>
-          <li>Server: <code>rtmp://${escapeHtml(lanIp || '0.0.0.0')}:${(lastSnapshot?.relay?.rtmp_port) ?? 1935}/${escapeHtml(lastSnapshot?.relay?.rtmp_app || 'live')}</code></li>
-          <li>Key: <code>${escapeHtml(lastSnapshot?.relay?.rtmp_key || 'stream')}</code></li>
-          <li>Pick RTMP above (Blackmagic Camera doesn't do SRT yet)</li>
+          <li>Server: <code>rtmp://${escapeHtml(host)}:${r.rtmp_port ?? 1935}/${escapeHtml(r.rtmp_app || 'live')}</code></li>
+          <li>Key: <code>${escapeHtml(r.rtmp_key || 'stream')}</code></li>
         </ol>`;
     } else {
       html = `<em>Pick your encoder app above for tailored instructions.</em>`;
     }
-    rwAppBody.innerHTML = html;
+    // Order: mismatch banner first (most important — warns about the
+    // step 2 URL being the wrong protocol), then network-mode badge
+    // (public-IP reminder), then the app-specific instructions.
+    rwAppBody.innerHTML = mismatchBanner + networkBadge + html;
     rwAppBody.hidden = false;
+    // The mismatch banner contains a button — wire its click handler
+    // after the innerHTML assignment since the button is freshly
+    // created on every render.
+    const mismatchBtn = document.getElementById('rw-app-mismatch-btn');
+    if (mismatchBtn && !receiverRunning) {
+      mismatchBtn.addEventListener('click', () => {
+        // Find the radio for the target protocol and check it.
+        for (const r of rwProto) {
+          r.checked = (r.value === targetProto);
+        }
+        // Mirror the same refresh chain the radio's change handler
+        // does — but the radios were updated programmatically here,
+        // which doesn't fire 'change' events, so call directly.
+        refreshRwUrl();
+        updateRwAdvancedRowVisibility();
+        renderRwApp(app);
+      });
+    }
   }
 
   rwProto.forEach((r) => r.addEventListener('change', () => {
     refreshRwUrl();
+    updateRwAdvancedRowVisibility();
     renderRwApp(rwAppPick?.value || '');
   }));
   if (rwAppPick) rwAppPick.addEventListener('change', () => renderRwApp(rwAppPick.value));
   if (rwCopy) rwCopy.addEventListener('click', () => copyToClipboard(rwUrl.value, rwCopy));
+
+  // Advanced settings wiring — mark dirty on edit, Apply POSTs to
+  // /api/settings, Reset wipes to spec defaults.
+  [rwSrtPortIn, rwSrtPassphraseIn, rwRtmpPortIn, rwRtmpAppIn, rwRtmpKeyIn]
+    .forEach((el) => {
+      if (el) el.addEventListener('input', markRwAdvancedDirty);
+    });
+  if (rwAdvancedApply) rwAdvancedApply.addEventListener('click', applyRwAdvanced);
+  if (rwAdvancedReset) rwAdvancedReset.addEventListener('click', resetRwAdvancedDefaults);
+
+  // Public-URL helper wiring.
+  rwWhere.forEach((r) => r.addEventListener('change', () => {
+    applyRwWhereState();
+    // Re-render per-app instructions with the new host (LAN ↔ public).
+    renderRwApp(rwAppPick?.value || '');
+  }));
+  if (rwPublicHost) {
+    rwPublicHost.addEventListener('input', () => {
+      refreshRwPublicUrl();
+      // Per-app instructions show the public URL inline when in
+      // "different network" mode — re-render as the host changes.
+      if (getRwWhere() === 'public') {
+        renderRwApp(rwAppPick?.value || '');
+      }
+    });
+  }
+  if (rwPublicDetect) {
+    rwPublicDetect.addEventListener('click', () => {
+      rwPublicDetect.disabled = true;
+      detectPublicIp().finally(() => {
+        rwPublicDetect.disabled = false;
+      });
+    });
+  }
+  if (rwPublicCopy) {
+    rwPublicCopy.addEventListener('click', () => copyToClipboard(rwPublicUrl.value, rwPublicCopy));
+  }
+  if (rwPfCopyTemplate) {
+    rwPfCopyTemplate.addEventListener('click', () => {
+      copyToClipboard(buildPortForwardTemplate(), rwPfCopyTemplate);
+    });
+  }
+  // Initial paint so the public-URL field is populated even before
+  // the user toggles into the public sub-tab. Also primes the
+  // port-forward checklist's "internal IP" with whatever LAN IP
+  // detection lands on first poll.
+  applyRwWhereState();
+  refreshRwPublicUrl();
+  refreshPortForwardChecklist();
 
   if (rwIpPick) rwIpPick.addEventListener('change', () => {
     if (rwIpPick.value === '__manual__') {
@@ -2266,6 +3231,14 @@ function bind() {
   // The poll loop already calls render(snap) on every tick; we just
   // need to re-render the URL when the wizard is open.
   const urlRefreshTimer = setInterval(() => {
+    // Hydrate advanced fields on first valid snapshot. Skipped on
+    // subsequent ticks unless the user hits Reset (which marks dirty
+    // → Apply clears dirty → next snapshot re-hydration is safe but
+    // gated by !dirty).
+    if (lastSnapshot && !rwAdvancedHydrated) {
+      hydrateRwAdvancedFromSnapshot(lastSnapshot);
+    }
+    syncRwProtocolWithSnapshot(lastSnapshot);
     refreshRwUrl();
     updateReceiverButtons();
   }, 1000);
@@ -2278,12 +3251,25 @@ function bind() {
   // live inside bind() — exposing on window is the cheapest bridge.
   window.applyIpPickerState = applyIpPickerState;
   window.updateReceiverButtons = updateReceiverButtons;
+  // Expose the wizard sync helpers too so render() can call them
+  // synchronously after applying a snapshot (avoids waiting up to a
+  // second for the next interval tick to redraw the locked-radio
+  // state when the receiver flips active).
+  window.syncRwProtocolWithSnapshot = syncRwProtocolWithSnapshot;
+  window.hydrateRwAdvancedFromSnapshot = (snap) => {
+    if (!rwAdvancedHydrated) hydrateRwAdvancedFromSnapshot(snap);
+  };
 }
 
 bind();
 ensureDevicesLoaded();
 ensureNdiLoaded();
 ensureOmtLoaded();
+// Session 12 — populate the DeckLink device dropdown on boot so the
+// picker is ready when the operator switches to DeckLink mode. The
+// FFmpeg probe is cheap (one process invocation) and runs once per
+// process; subsequent calls hit the 60s cache.
+fetchDecklinkDevices(false);
 // Probe every IPv4 interface so the wizard can show a picker when
 // the host has more than one (Wi-Fi + Ethernet, VPN, Apple Internet
 // Sharing, etc.). The legacy /api/lan-ip single-result endpoint is
@@ -2310,6 +3296,133 @@ setInterval(() => ensureNdiLoaded(true), 30000);
 // returns empty immediately); polls real OmtDiscovery::addresses
 // otherwise.
 setInterval(() => ensureOmtLoaded(true), 30000);
+
+// alpha.31: audio level meters. Independent 4Hz polling so the meter
+// responsiveness doesn't hinge on the main /api/state 1Hz cadence.
+// Self-gates: when meters_enabled is false the loop just hides the
+// meters and skips the fetch.
+const audioMeterState = {
+  // Peak-hold state per channel. Each entry is { value, holdUntilMs }.
+  // value decays back to the live peak after holdUntilMs elapses.
+  peakHold: { l: { value: -120, holdUntil: 0 }, r: { value: -120, holdUntil: 0 } },
+  // Most recent live values (used when the server reports stale data
+  // — we fade meters to silence rather than freezing the bar).
+  lastFresh: { rms_l: -120, rms_r: -120, peak_l: -120, peak_r: -120, age: 0 },
+};
+const PEAK_HOLD_MS = 1500;
+const METER_DB_FLOOR = -60;
+const METER_DB_CEIL = 0;
+
+function dbToFrac(db) {
+  // Clamp + linear-map [-60, 0] dB → [0, 1].
+  if (db <= METER_DB_FLOOR) return 0;
+  if (db >= METER_DB_CEIL) return 1;
+  return (db - METER_DB_FLOOR) / (METER_DB_CEIL - METER_DB_FLOOR);
+}
+
+function renderMeter(canvas, rmsDb, peakDb, peakHoldDb) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Background bar (always visible, very dim).
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+  ctx.fillRect(0, 0, w, h);
+
+  // RMS bar — green (<-18), yellow (-18 to -6), red (-6 to 0).
+  const rmsFrac = dbToFrac(rmsDb);
+  const rmsW = Math.round(rmsFrac * w);
+  if (rmsW > 0) {
+    // Gradient stops match the dB zones.
+    const grad = ctx.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, '#1f8a3f'); // green
+    grad.addColorStop(dbToFrac(-18), '#1f8a3f');
+    grad.addColorStop(dbToFrac(-18) + 0.001, '#d9b32a'); // yellow
+    grad.addColorStop(dbToFrac(-6), '#d9b32a');
+    grad.addColorStop(dbToFrac(-6) + 0.001, '#c64545'); // red
+    grad.addColorStop(1, '#c64545');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, rmsW, h);
+  }
+
+  // Peak-hold tick: small vertical line at the held peak position.
+  const peakFrac = dbToFrac(peakHoldDb);
+  const peakX = Math.round(peakFrac * w);
+  if (peakX > 0 && peakX < w) {
+    ctx.fillStyle = peakHoldDb >= -6 ? '#ff6b6b' : peakHoldDb >= -18 ? '#ffdf6b' : '#74d791';
+    ctx.fillRect(peakX - 1, 0, 2, h);
+  }
+}
+
+function updatePeakHold(channelState, livePeakDb, nowMs) {
+  if (livePeakDb > channelState.value || nowMs >= channelState.holdUntil) {
+    channelState.value = livePeakDb;
+    channelState.holdUntil = nowMs + PEAK_HOLD_MS;
+  }
+}
+
+async function tickAudioMeters() {
+  const wrap = document.getElementById('audio-meters');
+  if (!wrap) return;
+  try {
+    const resp = await fetch('/api/audio-levels');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    // Toggle visibility based on backend's meters_enabled flag.
+    wrap.hidden = !data.meters_enabled;
+    if (!data.meters_enabled) return;
+
+    // Stale-data detection. If the server hasn't received any astats
+    // updates in >0.7s, the stream is paused or the encoder isn't
+    // running — fade meters to silence rather than freezing at the
+    // last live value.
+    const idleSecs = Math.max(0, data.server_time - (data.updated_at || 0));
+    const fresh = idleSecs < 0.7 && data.updated_at > 0;
+
+    const rmsL = fresh ? data.rms_l : -120;
+    const rmsR = fresh ? data.rms_r : -120;
+    const peakL = fresh ? data.peak_l : -120;
+    const peakR = fresh ? data.peak_r : -120;
+
+    const nowMs = performance.now();
+    updatePeakHold(audioMeterState.peakHold.l, peakL, nowMs);
+    updatePeakHold(audioMeterState.peakHold.r, peakR, nowMs);
+
+    const canL = document.getElementById('audio-meter-l');
+    const canR = document.getElementById('audio-meter-r');
+    if (canL) renderMeter(canL, rmsL, peakL, audioMeterState.peakHold.l.value);
+    if (canR) renderMeter(canR, rmsR, peakR, audioMeterState.peakHold.r.value);
+
+    // alpha.48: also render to the preview-overlay meters that sit on
+    // top of the Monitor card's preview frame. Operators want levels
+    // right next to the picture, not just buried in the Audio Mixer
+    // card. Same data, same peak-hold state, additional render
+    // targets — no extra poll cost.
+    const pCanL = document.getElementById('preview-meter-l');
+    const pCanR = document.getElementById('preview-meter-r');
+    if (pCanL) renderMeter(pCanL, rmsL, peakL, audioMeterState.peakHold.l.value);
+    if (pCanR) renderMeter(pCanR, rmsR, peakR, audioMeterState.peakHold.r.value);
+    const previewReadout = document.getElementById('preview-meter-readout');
+    if (previewReadout) {
+      previewReadout.textContent = fresh
+        ? `${Math.max(rmsL, rmsR).toFixed(0)} dB`
+        : '—';
+    }
+
+    const dbLEl = document.getElementById('audio-meter-l-db');
+    const dbREl = document.getElementById('audio-meter-r-db');
+    if (dbLEl) dbLEl.textContent = fresh ? `${rmsL.toFixed(1)} dB` : '—';
+    if (dbREl) dbREl.textContent = fresh ? `${rmsR.toFixed(1)} dB` : '—';
+  } catch (_e) {
+    // Silently skip — meters are a non-critical visualization, no
+    // need to surface a network error on every tick.
+  }
+}
+
+setInterval(tickAudioMeters, 250);
+tickAudioMeters();
 
 // Tauri's WebView ships with no menu bar and no built-in reload
 // shortcut, which is friction during dev iteration. Bind the same

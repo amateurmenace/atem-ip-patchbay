@@ -30,11 +30,28 @@
   IfFileExists "$INSTDIR\sidecar\Processing.NDI.Lib.x64.dll" 0 atem_ndi_dll_skip
     CopyFiles /SILENT "$INSTDIR\sidecar\Processing.NDI.Lib.x64.dll" "$INSTDIR\Processing.NDI.Lib.x64.dll"
   atem_ndi_dll_skip:
+
+  ; alpha.18: same trick for libomt.dll + libvmx.dll. The libomt-rs
+  ; crate statically links against libomt.lib at build time, so
+  ; libomt.dll is in the .exe's import table — loaded by the
+  ; Windows loader BEFORE main() runs, same constraint as the NDI
+  ; DLL. libvmx is loaded by libomt at runtime; copying it up
+  ; alongside is belt-and-suspenders for cases where libomt does
+  ; an early dlopen.
+  IfFileExists "$INSTDIR\sidecar\libomt.dll" 0 atem_omt_dll_skip
+    CopyFiles /SILENT "$INSTDIR\sidecar\libomt.dll" "$INSTDIR\libomt.dll"
+  atem_omt_dll_skip:
+  IfFileExists "$INSTDIR\sidecar\libvmx.dll" 0 atem_vmx_dll_skip
+    CopyFiles /SILENT "$INSTDIR\sidecar\libvmx.dll" "$INSTDIR\libvmx.dll"
+  atem_vmx_dll_skip:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  ; Clean up the sibling DLL we copied at install time. The original
-  ; under $INSTDIR\sidecar\ gets removed by Tauri's standard
-  ; uninstall sequence; the copy is ours alone to manage.
+  ; Clean up the sibling DLLs we copied at install time. The
+  ; originals under $INSTDIR\sidecar\ get removed by Tauri's
+  ; standard uninstall sequence; the copies are ours alone to
+  ; manage.
   Delete "$INSTDIR\Processing.NDI.Lib.x64.dll"
+  Delete "$INSTDIR\libomt.dll"
+  Delete "$INSTDIR\libvmx.dll"
 !macroend

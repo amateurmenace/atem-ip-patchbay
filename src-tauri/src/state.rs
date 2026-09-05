@@ -77,6 +77,29 @@ pub struct StreamStats {
     pub frames_sent: u64,
     pub frames_dropped: u64,
     pub quality: f32,
+    /// Current reconnect attempt counter (1-indexed). 0 when not
+    /// in a reconnect cycle (either streaming normally or stopped).
+    pub reconnect_attempt: u32,
+    /// Seconds remaining until the next reconnect attempt. Ticked
+    /// down by the supervisor during backoff. UI surfaces "Reconnecting
+    /// in {N}s · attempt M/MAX" when non-zero.
+    pub reconnect_next_secs: u32,
+    /// Cumulative reconnect count since the operator clicked Start.
+    /// Resets to 0 only on a fresh user-initiated start; survives the
+    /// 60s-stable counter reset so the operator sees the total churn.
+    pub total_reconnects_this_session: u32,
+    /// alpha.31: audio level meters. Per-channel RMS + peak in dB
+    /// (negative = quieter than full scale). Updated by the FFmpeg
+    /// stderr parser when the astats filter is active. UI polls
+    /// /api/audio-levels at 4Hz to render canvas VU meters.
+    pub audio_db_rms_l: f32,
+    pub audio_db_rms_r: f32,
+    pub audio_db_peak_l: f32,
+    pub audio_db_peak_r: f32,
+    /// Wall-clock seconds since UNIX epoch when audio_db_* was last
+    /// updated. UI uses (server_time - this) to decide whether to
+    /// fade meters to zero on idle (>500ms = stream stalled / paused).
+    pub audio_levels_at: f64,
 }
 
 impl Default for StreamStats {
@@ -92,6 +115,18 @@ impl Default for StreamStats {
             frames_sent: 0,
             frames_dropped: 0,
             quality: 0.0,
+            reconnect_attempt: 0,
+            reconnect_next_secs: 0,
+            total_reconnects_this_session: 0,
+            // -120 dB ≈ silence. Defaulting at -120 (rather than 0)
+            // means the UI's "meter at idle" position is at the very
+            // bottom of the bar instead of pegged at full scale, which
+            // matches operator expectation.
+            audio_db_rms_l: -120.0,
+            audio_db_rms_r: -120.0,
+            audio_db_peak_l: -120.0,
+            audio_db_peak_r: -120.0,
+            audio_levels_at: 0.0,
         }
     }
 }
@@ -112,6 +147,14 @@ impl StreamStats {
 
 #[derive(Debug)]
 pub struct EncoderState {
+    // NOTE: every access below uses `.unwrap_or_else(|e| e.into_inner())`
+    // rather than `.unwrap()`. This is deliberate — a plain unwrap would
+    // panic on a poisoned lock, and since EncoderState is read/written by
+    // every /api/* handler, the streamer supervisor, and the stall
+    // detector, one panic-while-holding-the-write-guard would cascade
+    // into an app-wide wedge (every subsequent access panics too). The
+    // closure recovers the guard and carries on. Do NOT "simplify" these
+    // back to `.unwrap()`.
     inner: RwLock<Inner>,
 }
 
@@ -201,6 +244,78 @@ struct Inner {
 
     video_codec: String,
 
+    // Session 12: destination_type drives whether the streamer pushes
+    // BMD-flavored SRT to an ATEM (`"atem"`, default — every existing
+    // ATEM-side field above applies) or sends raw video/audio out a
+    // local Blackmagic DeckLink card (`"decklink"`, new — the
+    // decklink_* fields below apply). The Snapshot::is_decklink()
+    // helper is the consumer-side switch; build_plan / build_ffmpeg_cmd
+    // branch on it for the actual command construction.
+    destination_type: String,
+    /// DeckLink output device name as reported by FFmpeg's
+    /// `-f decklink -list_devices true -i dummy` (matched
+    /// case-sensitively when passed back to `-i <name>`). Empty when
+    /// destination_type=="atem" or when no device has been picked yet.
+    decklink_device_name: String,
+    /// User-friendly mode label like "1080p59.94" — what the UI
+    /// shows. Stored alongside decklink_format_code so the streamer
+    /// can both surface human strings and pass FFmpeg the exact code.
+    decklink_output_mode: String,
+    /// FFmpeg's format_code for the picked mode — e.g. "Hp59" for
+    /// 1080p59.94. Sent to FFmpeg as `-format_code <code>`. Looked up
+    /// from device_scanner::probe_decklink_modes() when the UI
+    /// commits a mode change.
+    decklink_format_code: String,
+    /// Pixel format for the DeckLink output. Defaults to "uyvy422"
+    /// (8-bit 4:2:2 YUV, the most universally supported DeckLink
+    /// pixel format). Advanced override for 10-bit cards is forward-
+    /// looking; UI currently doesn't expose it.
+    decklink_pixel_format: String,
+
+    // alpha.25: production-quality encoder controls. The "auto"
+    // default keeps existing behavior (VT on macOS, libx264/libx265
+    // elsewhere); explicit names route through select_encoder's
+    // per-encoder flag bag in streamer.rs.
+    video_encoder: String,
+    /// Power-user textarea contents — raw FFmpeg args appended after
+    /// the encoder block but before the muxer/output block. Lets a
+    /// user override encoder params (e.g. tune, profile, x264-params)
+    /// without us having to surface every knob. Parsed via shlex at
+    /// build_ffmpeg_cmd time; bad input surfaces as an FFmpeg
+    /// startup error in the existing error banner.
+    encoder_extra_flags: String,
+
+    // alpha.25: audio quality knobs.
+    /// "aac" (default, AAC-LC — ATEM-compatible) | "aac_he" | "aac_he_v2".
+    /// Hard-blocked at build_plan validation when destination==atem and
+    /// audio_codec != "aac" (the ATEM SRT decoder only accepts LC).
+    audio_codec: String,
+    /// Explicit audio bitrate in kbps. 0 = inherit from active_config
+    /// (XML-driven path). Non-zero = operator override.
+    audio_bitrate_kbps: u32,
+    /// Output sample rate. Defaults to 48000 (broadcast standard).
+    /// 44100 supported for legacy / web use cases.
+    audio_sample_rate: u32,
+    /// Output channel count. Replaces the alpha.22 `audio_output_mono`
+    /// boolean (1=mono, 2=stereo, future 6=5.1). Stored as a u8 to
+    /// keep the wire shape compact.
+    audio_channels: u8,
+
+    // alpha.25: auto-reconnect supervisor controls.
+    /// When true (default), the streamer's supervisor wrapper restarts
+    /// FFmpeg with exponential backoff on unexpected exit. False fails
+    /// fast (matches alpha.21 and earlier behavior).
+    auto_reconnect: bool,
+    /// Max consecutive reconnect attempts before giving up. Default 12 —
+    /// at the 60s ceiling that's ~3 min of total backoff, covers most
+    /// network blip durations without making a hung config hang forever.
+    auto_reconnect_max_attempts: u32,
+
+    /// alpha.25: gate the astats audio-meter filter chain. On by
+    /// default; operator can disable in advanced settings if a
+    /// pathological audio source makes the metadata parser misbehave.
+    meters_enabled: bool,
+
     stats: StreamStats,
 }
 
@@ -214,7 +329,7 @@ impl EncoderState {
                 model: "Blackmagic Streaming Encoder HD".into(),
                 unique_id,
                 device_uuid,
-                video_mode: "1080p30".into(),
+                video_mode: "1080p29.97".into(),
                 quality_level: "Streaming High".into(),
                 source_id: "test_pattern".into(),
                 av_video_index: 0,
@@ -248,11 +363,36 @@ impl EncoderState {
                 passphrase: String::new(),
                 custom_url: String::new(),
                 srt_mode: "caller".into(),
-                srt_latency_us: 500_000,
+                // alpha.68: operator-requested 200ms default (low-latency
+                // starting point). Good links tolerate it fine; lossy
+                // internet paths want more headroom (measured: a remote-ATEM
+                // path dropped every ~2min at 500ms, rock-solid at 2000ms) --
+                // the prominent Latency control + presets let operators raise
+                // it per-path without hunting through Advanced.
+                srt_latency_us: 200_000,
                 srt_listen_port: 9710,
                 streamid_override: String::new(),
                 streamid_legacy: false,
                 video_codec: "h265".into(),
+                destination_type: "atem".into(),
+                decklink_device_name: String::new(),
+                // alpha.43 — default DeckLink output mode to 1080p29.97
+                // (Hp29) as the broadcast-NTSC standard. Matches the
+                // app's default video_mode and is supported by every
+                // SDI DeckLink card in our test rig. Operators can
+                // override per-tile via the mode dropdown.
+                decklink_output_mode: "1080p29.97".into(),
+                decklink_format_code: "Hp29".into(),
+                decklink_pixel_format: "uyvy422".into(),
+                video_encoder: "auto".into(),
+                encoder_extra_flags: String::new(),
+                audio_codec: "aac".into(),
+                audio_bitrate_kbps: 0, // 0 = inherit from active_config
+                audio_sample_rate: 48000,
+                audio_channels: 2,
+                auto_reconnect: true,
+                auto_reconnect_max_attempts: 12,
+                meters_enabled: true,
                 stats: StreamStats::default(),
             }),
         }
@@ -279,7 +419,7 @@ impl EncoderState {
             .and_then(|s| s.to_str())
             .unwrap_or("file");
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if inner.services.contains_key(&svc.name) {
                 svc.name = format!("{} [{}]", svc.name, stem);
             }
@@ -294,7 +434,7 @@ impl EncoderState {
     /// `add_service_from_xml_text(replace=true)` so dropping a new
     /// XML replaces the old one instead of accumulating.
     pub fn clear_services(&self) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.services.clear();
         inner.current_service_name.clear();
         inner.current_server_name = "SRT".into();
@@ -310,7 +450,7 @@ impl EncoderState {
         // filename so we use a "(pasted N)" suffix where N is the
         // first integer that doesn't collide.
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if inner.services.contains_key(&svc.name) {
                 let mut n = 2;
                 loop {
@@ -328,7 +468,7 @@ impl EncoderState {
     }
 
     fn register_service(&self, svc: StreamService, make_active: Option<bool>) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let first_load = inner.current_service_name.is_empty();
         let should_activate = make_active.unwrap_or(first_load);
         let svc_name = svc.name.clone();
@@ -360,7 +500,7 @@ impl EncoderState {
     /// streamer apply audio_mode-specific routing themselves so the
     /// stored device pick is preserved across mode changes.
     pub fn source_selection(&self) -> SourceSelection {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let dimensions = video_dimensions(&inner.video_mode);
         SourceSelection {
             source_id: inner.source_id.clone(),
@@ -388,7 +528,7 @@ impl EncoderState {
     /// control protocol's IDENTITY handler calls this when a control
     /// client sends `Label: ...`.
     pub fn set_label(&self, label: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.label = label.to_string();
     }
 
@@ -397,15 +537,31 @@ impl EncoderState {
     /// (bitrate, fps, frames_sent, etc.) atomically and cheaply
     /// (~200 ns per call).
     pub fn stats_in_place<F: FnOnce(&mut StreamStats)>(&self, f: F) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         f(&mut inner.stats);
+    }
+
+    /// alpha.31: read-only fast path for /api/audio-levels. Returns
+    /// (rms_l, rms_r, peak_l, peak_r, updated_at) without going
+    /// through the full snapshot machinery — the 4Hz audio-meter
+    /// poll is on the hot path so we avoid cloning the entire
+    /// EncoderState's worth of strings.
+    pub fn read_audio_levels(&self) -> (f32, f32, f32, f32, f64) {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        (
+            inner.stats.audio_db_rms_l,
+            inner.stats.audio_db_rms_r,
+            inner.stats.audio_db_peak_l,
+            inner.stats.audio_db_peak_r,
+            inner.stats.audio_levels_at,
+        )
     }
 
     /// Set the AVFoundation / DirectShow defaults from a fresh device
     /// scan. Called once at boot from Tauri's setup() so the source
     /// dropdowns have something selected on first launch.
     pub fn apply_default_devices(&self, video_index: i32, video_name: &str, audio_index: i32, audio_name: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.av_video_index = video_index;
         inner.av_video_name = video_name.to_string();
         inner.av_audio_index = audio_index;
@@ -417,7 +573,7 @@ impl EncoderState {
     /// unchanged. Validation happens here — unknown video modes / codecs
     /// are silently rejected (Python's behavior).
     pub fn apply_settings(&self, update: &SettingsUpdate) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = &update.video_mode {
             if AVAILABLE_VIDEO_MODES.contains(&v.as_str()) {
                 inner.video_mode = v.clone();
@@ -532,10 +688,109 @@ impl EncoderState {
             if let Some(v) = &o.logo_path { inner.overlay_logo_path = v.clone(); }
             if let Some(v) = o.clock { inner.overlay_clock = v; }
         }
+        // Session 12: destination_type + decklink_* fields.
+        // destination_type is validated against the known set; unknown
+        // values are silently rejected (matches video_mode / srt_mode
+        // handling above) so a stale JS client can't put state into a
+        // never-implemented destination kind.
+        if let Some(v) = &update.destination_type {
+            if matches!(v.as_str(), "atem" | "decklink") {
+                inner.destination_type = v.clone();
+            }
+        }
+        if let Some(v) = &update.decklink_device_name {
+            inner.decklink_device_name = v.clone();
+        }
+        if let Some(v) = &update.decklink_output_mode {
+            inner.decklink_output_mode = v.clone();
+        }
+        if let Some(v) = &update.decklink_format_code {
+            inner.decklink_format_code = v.clone();
+        }
+        if let Some(v) = &update.decklink_pixel_format {
+            if !v.trim().is_empty() {
+                inner.decklink_pixel_format = v.clone();
+            }
+        }
+
+        // alpha.25: production-quality encoder + audio + reconnect knobs.
+        // UDM credentials moved out of EncoderState entirely — atem-net-diag
+        // now configures its own UDM via its dashboard's UDM form (POSTs to
+        // /api/config). Main app no longer carries that state.
+        if let Some(v) = &update.video_encoder {
+            // Validate against the known set. Unknown values silently
+            // ignored (matches the video_mode / srt_mode validation pattern
+            // above). "auto" is always valid; specific encoders must
+            // appear in `ffmpeg_path::available_encoders()` to be selectable
+            // but apply_settings accepts them as-is and select_encoder
+            // surfaces an error at stream-start if it can't be resolved.
+            if matches!(
+                v.as_str(),
+                "auto"
+                    | "libx264"
+                    | "libx265"
+                    | "h264_videotoolbox"
+                    | "hevc_videotoolbox"
+                    | "h264_nvenc"
+                    | "hevc_nvenc"
+                    | "h264_qsv"
+                    | "hevc_qsv"
+                    | "h264_amf"
+                    | "hevc_amf"
+            ) {
+                inner.video_encoder = v.clone();
+            }
+        }
+        if let Some(v) = &update.encoder_extra_flags {
+            // Trim only — shlex tokenization happens at build_ffmpeg_cmd
+            // time so the operator sees their original text in the
+            // textarea even if it parses oddly.
+            inner.encoder_extra_flags = v.trim().to_string();
+        }
+        if let Some(v) = &update.audio_codec {
+            if matches!(v.as_str(), "aac" | "aac_he" | "aac_he_v2") {
+                inner.audio_codec = v.clone();
+            }
+        }
+        if let Some(v) = update.audio_bitrate_kbps {
+            // 0 means "inherit from active_config" (XML-driven path).
+            // Any non-zero must be in a reasonable range (32-320 kbps
+            // for AAC is the IETF practical range).
+            inner.audio_bitrate_kbps = if v == 0 { 0 } else { v.clamp(32, 320) };
+        }
+        if let Some(v) = update.audio_sample_rate {
+            // Only 44100 and 48000 supported — broadcast destinations
+            // expect one of these, and supporting 96k/192k is a
+            // can-of-worms-for-no-real-benefit at the current scope.
+            if matches!(v, 44100 | 48000) {
+                inner.audio_sample_rate = v;
+            }
+        }
+        if let Some(v) = update.audio_channels {
+            // 1=mono, 2=stereo. 6 (5.1) reserved for future destination
+            // types (RTMP relay, NDI sender) that accept it.
+            if matches!(v, 1 | 2) {
+                inner.audio_channels = v;
+                // Keep the legacy audio_output_mono boolean in sync so
+                // any code path still reading it sees consistent state.
+                inner.audio_output_mono = v == 1;
+            }
+        }
+        if let Some(v) = update.auto_reconnect {
+            inner.auto_reconnect = v;
+        }
+        if let Some(v) = update.auto_reconnect_max_attempts {
+            // 0 disables the cap (infinite retries). 1-100 is the
+            // reasonable operator-tunable range; higher gets clamped.
+            inner.auto_reconnect_max_attempts = v.min(100);
+        }
+        if let Some(v) = update.meters_enabled {
+            inner.meters_enabled = v;
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let svc = inner.services.get(&inner.current_service_name);
         let active = current_active_server(&inner);
 
@@ -666,7 +921,24 @@ impl EncoderState {
                 frames_sent: inner.stats.frames_sent,
                 frames_dropped: inner.stats.frames_dropped,
                 quality: round1(inner.stats.quality),
+                reconnect_attempt: inner.stats.reconnect_attempt,
+                reconnect_next_secs: inner.stats.reconnect_next_secs,
+                total_reconnects_this_session: inner.stats.total_reconnects_this_session,
             },
+            destination_type: inner.destination_type.clone(),
+            decklink_device_name: inner.decklink_device_name.clone(),
+            decklink_output_mode: inner.decklink_output_mode.clone(),
+            decklink_format_code: inner.decklink_format_code.clone(),
+            decklink_pixel_format: inner.decklink_pixel_format.clone(),
+            video_encoder: inner.video_encoder.clone(),
+            encoder_extra_flags: inner.encoder_extra_flags.clone(),
+            audio_codec: inner.audio_codec.clone(),
+            audio_bitrate_kbps: inner.audio_bitrate_kbps,
+            audio_sample_rate: inner.audio_sample_rate,
+            audio_channels: inner.audio_channels,
+            auto_reconnect: inner.auto_reconnect,
+            auto_reconnect_max_attempts: inner.auto_reconnect_max_attempts,
+            meters_enabled: inner.meters_enabled,
         }
     }
 }
@@ -844,6 +1116,22 @@ pub struct SettingsUpdate {
     // partial update from the UI doesn't clobber unrelated values.
     pub relay: Option<RelaySettingsUpdate>,
     pub overlay: Option<OverlaySettingsUpdate>,
+    // Session 12 destination shape. None = leave field unchanged.
+    pub destination_type: Option<String>,
+    pub decklink_device_name: Option<String>,
+    pub decklink_output_mode: Option<String>,
+    pub decklink_format_code: Option<String>,
+    pub decklink_pixel_format: Option<String>,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    pub video_encoder: Option<String>,
+    pub encoder_extra_flags: Option<String>,
+    pub audio_codec: Option<String>,
+    pub audio_bitrate_kbps: Option<u32>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channels: Option<u8>,
+    pub auto_reconnect: Option<bool>,
+    pub auto_reconnect_max_attempts: Option<u32>,
+    pub meters_enabled: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -915,6 +1203,36 @@ pub struct Snapshot {
     pub overlay: OverlaySnapshot,
     pub active_config: Option<ActiveConfig>,
     pub stats: StatsSnapshot,
+    // Session 12 destination fields. Flat on the wire — JS reads
+    // `snap.destination_type` / `snap.decklink_device_name` / etc.
+    // directly without a nested wrapper.
+    pub destination_type: String,
+    pub decklink_device_name: String,
+    pub decklink_output_mode: String,
+    pub decklink_format_code: String,
+    pub decklink_pixel_format: String,
+    // alpha.25: production-quality encoder + audio + reconnect knobs.
+    pub video_encoder: String,
+    pub encoder_extra_flags: String,
+    pub audio_codec: String,
+    pub audio_bitrate_kbps: u32,
+    pub audio_sample_rate: u32,
+    pub audio_channels: u8,
+    pub auto_reconnect: bool,
+    pub auto_reconnect_max_attempts: u32,
+    pub meters_enabled: bool,
+}
+
+impl Snapshot {
+    /// True when the operator has picked DeckLink output rather than
+    /// the default SRT-to-ATEM destination. Consumed by build_plan
+    /// (validation set differs) and build_ffmpeg_cmd (output muxer
+    /// differs — raw decklink output vs. mpegts/flv push). The
+    /// flat-field storage keeps wire compat; this helper exists so
+    /// consumers don't lift the string comparison.
+    pub fn is_decklink(&self) -> bool {
+        self.destination_type == "decklink"
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -971,4 +1289,11 @@ pub struct StatsSnapshot {
     pub frames_sent: u64,
     pub frames_dropped: u64,
     pub quality: f32,
+    /// Reconnect supervisor fields (alpha.30). Zero when not in a
+    /// reconnect cycle. UI uses these to render a "Reconnecting in
+    /// {N}s · attempt {M}/{MAX}" yellow status pill during backoff
+    /// instead of the red "Interrupted" state.
+    pub reconnect_attempt: u32,
+    pub reconnect_next_secs: u32,
+    pub total_reconnects_this_session: u32,
 }
