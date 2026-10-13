@@ -295,9 +295,10 @@ Blackmagic Camera are trademarks of Blackmagic Design Pty. Ltd. This
 project is independent and is not affiliated with, endorsed by, or
 supported by Blackmagic Design.
 
-Built by [Stephen Walter](https://weirdmachine.org), a community media
-technologist at [Brookline Interactive Group](https://brooklineinteractive.org).
-Issues and pull requests are welcome.
+Built by Stephen Walter, a [designer + developer](https://weirdmachine.org)
+and community media engineer at
+[Brookline Interactive Group](https://brooklineinteractive.org). Issues and
+pull requests are welcome.
 
 ### Built with Claude Code
 
