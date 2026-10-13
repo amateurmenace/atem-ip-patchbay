@@ -56,6 +56,3 @@ src-tauri/sidecar/ffmpeg.exe
 tools/*/target/
 tools/*/Cargo.lock
 .claude/
-
-# Local Claude Code working notes; kept out of the repo by owner decision (2026-10-13).
-CLAUDE.md
