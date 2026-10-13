@@ -288,5 +288,14 @@ project is independent and is not affiliated with, endorsed by, or
 supported by Blackmagic Design.
 
 Built by [Stephen Walter](https://weirdmachine.org), a community media
-technologist at [Brookline Interactive Group](https://brooklineinteractive.org),
-with Claude Code as pair programmer. Issues and pull requests are welcome.
+technologist at [Brookline Interactive Group](https://brooklineinteractive.org).
+Issues and pull requests are welcome.
+
+### Built with Claude Code
+
+This project was developed with [Claude Code](https://claude.com/claude-code),
+Anthropic's agentic coding tool, as pair programmer throughout: the Tauri port,
+the NDI, OMT, and DeckLink pipelines, the ATEM Net Utility, and the CI that
+builds the FFmpeg sidecars were written in Claude Code sessions, directed and
+tested on real ATEM and DeckLink hardware by the author. Individual commits
+carry no AI co-author trailers; this note is the project-wide credit.
