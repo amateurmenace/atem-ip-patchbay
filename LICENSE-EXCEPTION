@@ -1,0 +1,39 @@
+ATEM IP Patchbay
+Copyright (c) 2026 Stephen Walter
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. The full text is in the LICENSE file.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License for more details.
+
+
+Additional permission under GNU GPL version 3 section 7
+--------------------------------------------------------
+
+If you modify this program, or any covered work, by linking or combining
+it with any of the following, or with modified versions of them:
+
+  - the NDI(R) SDK runtime library (libndi), licensed by Vizrt NDI AB
+    under the NDI SDK License Agreement;
+  - the Blackmagic DeckLink SDK, licensed by Blackmagic Design Pty. Ltd.;
+  - an FFmpeg build that is itself linked against either of the above;
+
+containing parts covered by the terms of their respective proprietary
+licenses, the licensors of this program grant you additional permission
+to convey the resulting work. Corresponding Source for a non-source form
+of such a combination need not include the source code of those
+libraries, but must include the complete source code of the covered work
+and of any modifications you made to it.
+
+
+Earlier history
+---------------
+
+Versions of this project up to and including release v0.2.0-alpha.76 were
+published under the MIT License. Copies obtained under that license remain
+available under its terms; this relicensing applies to later versions.

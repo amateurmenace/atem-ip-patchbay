@@ -3,7 +3,7 @@ name = "decklink-spike"
 version = "0.1.0"
 edition = "2021"
 description = "Session 16 Phase A spike — verifies whether 8 concurrent decklink_enc FFmpeg instances coexist on a real DeckLink rig. Outcome drives the Option A (single Tauri process, N pipelines) vs Option B (N processes) decision for the broadcast-multiview rework."
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "decklink-spike"

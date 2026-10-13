@@ -1,7 +1,7 @@
 # ATEM IP Patchbay
 
 [![Latest release](https://img.shields.io/github/v/release/amateurmenace/atem-ip-patchbay?label=release)](https://github.com/amateurmenace/atem-ip-patchbay/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/amateurmenace/atem-ip-patchbay)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/github/license/amateurmenace/atem-ip-patchbay)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Windows%20x64-blue)
 
 Turn almost any video source into a **remote input** for a Blackmagic
@@ -260,8 +260,16 @@ HANDSHAKE-OK-PUBLISH-REJECTED, or OK.
 
 ## License, credits, and trademarks
 
-The code in this repository is [MIT licensed](LICENSE). It implements
-protocols and file formats that Blackmagic Design documents publicly
+The code in this repository is licensed under the [GNU General Public
+License, version 3 or later](LICENSE), with an [additional permission](LICENSE-EXCEPTION)
+under GPL section 7 that allows linking it with the NDI SDK and the
+Blackmagic DeckLink SDK. In practice: you may use, study, modify, and
+redistribute it freely, but if you distribute a modified version, as source
+or as binaries, you must make your changes available under the same license.
+Releases up to and including v0.2.0-alpha.76 were published under the MIT
+license and remain available under those terms.
+
+The code implements protocols and file formats that Blackmagic Design documents publicly
 (*Blackmagic Streaming Encoder Ethernet Protocol* and *Blackmagic Streaming
 XML File Format*, in the Blackmagic Developer Information) and observed
 behaviour of the author's own devices. No Blackmagic firmware or
